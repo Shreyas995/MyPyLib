@@ -1,80 +1,74 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Feb  2 16:38:21 2026
+Simulation configuration for DNS post-processing (Ekman layer, Re_D = 500).
 
-@author: shreyad95
+All values are non-dimensional unless noted otherwise.
 """
 import numpy as np
 
-###############################################################################
-############################# Varaible decleration ############################
-################################# EKMAN18 #####################################
-limity = 700
-hill_hgt = 94 # This value is dummy. True value is calculated after reading the eps field
-step = 2 # Vertical step intervals of the valley in terms of grid points
-Re = 500
-Re_lambda = 0.5*Re*Re
-nu = 1/Re_lambda
-dt = 0.827E-04
-index = 1
-limity_range = 150
-limity = 463
-f = 1
-alpha = -0.430511
-Gx = np.cos(alpha)
-Gz = -np.sin(alpha)
-u_star = 0.076
-kappa = 0.42
-Re_tau = (u_star**2)/nu
-l_visc = nu/u_star
-l_in = l_visc
-l_out = u_star
-time_scale = 2*np.pi
-restart = 500
-counter = 0
-wall_units = nu/u_star
-scal = 1
-dim = 3 
+# ── 1. Physics / Reynolds number ──────────────────────────────────────────────
+Re        = 500               # bulk Reynolds number Re_D = U_G * D / nu
+Re_lambda = 0.5 * Re * Re     # tlab parameter: Re_lambda = 1/nu = 0.5*Re_D^2
+nu        = 1 / Re_lambda     # kinematic viscosity
 
-# Controls
-cal_Avg = 0
-verify_TimeAvg = 0
-save_avg = 0
-load_ncfiles = 0
-load_arrays = 1
-postprocess = 1
-plotRes = 1
-animate = 0
+# ── 2. Geostrophic forcing ────────────────────────────────────────────────────
+f     = 1                     # Coriolis parameter (non-dimensionalised to 1)
+alpha = -0.430511             # geostrophic-wind angle (rad); sets Ekman spiral
+Gx    =  np.cos(alpha)        # streamwise component of geostrophic wind vector
+Gz    = -np.sin(alpha)        # spanwise component
 
-# Derivative cache control
-#   True  -> always recompute derivatives (ignore any cached .npy)
-#   False -> load cached .npy if all present, otherwise compute (and save)
-recompute_derivatives = True
+# ── 3. Inner / outer scaling ──────────────────────────────────────────────────
+u_star     = 0.076            # friction velocity (orography case, Re_D = 500)
+kappa      = 0.42             # von Kármán constant
+Re_tau     = (u_star**2) / nu # friction Reynolds number u★²/ν
+l_visc     = nu / u_star      # viscous length scale = 1 wall unit
+l_in       = l_visc           # alias used in EditGrid / GridShapeCheck / PhAvg
+wall_units = l_visc           # alias used in Ekmangridcreation / make_grid scripts
+                              #   (both names are live in callers — do not merge)
+l_out      = u_star           # outer length scale (friction velocity)
+time_scale = 2 * np.pi        # non-dimensional time unit (one inertial period)
 
-###############################################################################
-########################### Post-processing constants #########################
-###############################################################################
-# Wall-normal (y) derivative schemes used in PhAvg.py (see CompactDerivatives2D).
-#   DY_METHOD  : first  y-derivative  ('compact','fornberg5/7/9','compact_nu','spline')
-#   D2Y_METHOD : second y-derivative  (same options)
-# 'fornberg7' wins the kink benchmark on this grid (test_ddy_schemes.py); the
-# second derivative defaults to the original 'compact' scheme.
-DY_METHOD  = 'fornberg7'
-D2Y_METHOD = 'compact'
+# ── 4. Simulation numerics ────────────────────────────────────────────────────
+dt      = 0.827E-04           # time step
+index   = 1                   # first snapshot index to read
+restart = 500                 # snapshots per phase-averaging cycle
+counter = 0                   # running snapshot counter (reset each run)
+scal    = 1                   # number of active scalar fields
+dim     = 3                   # spatial dimensions
 
-# Ghost-cell interpolation parameters (interpolate_component)
-ghost_depth  = 5
-n_anchor     = 4
-smooth_width = 5
+# ── 5. Geometry / grid ────────────────────────────────────────────────────────
+limity            = 463       # wall-normal index cap for analysis arrays
+limity_range      = 150       # y-index range for limited-height diagnostics
+hill_hgt          = 94        # placeholder; overwritten from eps field at runtime
+canopy_extra_cells = 20       # canopy top = hill_hgt + this many grid cells
 
-# Log-law fit window (inner units z+) and physical bounds on kappa
-loglaw_zmin  = 60.0
-loglaw_zmax  = 200.0
-kappa_bounds = (0.40, 0.44)
+# ── 6. Runtime control flags ──────────────────────────────────────────────────
+cal_Avg        = 0  # 1 → recompute phase-average from raw field files
+verify_TimeAvg = 0  # 1 → run time-average verification checks
+save_avg       = 0  # 1 → write averaged fields to disk
+load_ncfiles   = 0  # (reserved) 1 → load from NetCDF instead of .npy arrays
+load_arrays    = 1  # 1 → load pre-saved .npy arrays; 0 → recompute from fields
+postprocess    = 1  # 1 → execute the post-processing block
+plotRes        = 1  # 1 → generate result plots
+animate        = 0  # 1 → produce animation frames
 
-# Canopy layer extends to hill_hgt + this many cells
-canopy_extra_cells = 20
+# ── 7. Derivative & interpolation settings ────────────────────────────────────
+# DY_METHOD: 'fornberg7' wins the kink benchmark on this grid (test_ddy_schemes.py)
+recompute_derivatives = True   # False → use cached .npy derivatives if available
+DY_METHOD  = 'fornberg7'       # first y-derivative scheme (CompactDerivatives2D)
+D2Y_METHOD = 'compact'         # second y-derivative scheme
+ghost_depth  = 5               # IBM ghost-cell stencil depth (cells)
+n_anchor     = 4               # anchor points for ghost-cell interpolation
+smooth_width = 5               # smoothing half-width at the IBM interface (cells)
 
-# Smooth-wall reference case (flat, neutral, Re=500) NetCDF, relative to cwd
-smooth_nc_path = 'Re500/ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'
+# ── 8. Log-law fit window ─────────────────────────────────────────────────────
+loglaw_zmin  =  60.0           # lower bound of log-law fit region (wall units z⁺)
+loglaw_zmax  = 200.0           # upper bound
+kappa_bounds = (0.40, 0.44)   # acceptable range for the fitted von Kármán constant
+
+# ── 9. Paths ──────────────────────────────────────────────────────────────────
+smooth_nc_path = (
+    '/home/shreyad95/postprocessing/Code/Re500/'
+    'ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'
+)
