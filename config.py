@@ -44,5 +44,37 @@ save_avg = 0
 load_ncfiles = 0
 load_arrays = 1
 postprocess = 1
-plotRes = 0
+plotRes = 1
 animate = 0
+
+# Derivative cache control
+#   True  -> always recompute derivatives (ignore any cached .npy)
+#   False -> load cached .npy if all present, otherwise compute (and save)
+recompute_derivatives = True
+
+###############################################################################
+########################### Post-processing constants #########################
+###############################################################################
+# Wall-normal (y) derivative schemes used in PhAvg.py (see CompactDerivatives2D).
+#   DY_METHOD  : first  y-derivative  ('compact','fornberg5/7/9','compact_nu','spline')
+#   D2Y_METHOD : second y-derivative  (same options)
+# 'fornberg7' wins the kink benchmark on this grid (test_ddy_schemes.py); the
+# second derivative defaults to the original 'compact' scheme.
+DY_METHOD  = 'fornberg7'
+D2Y_METHOD = 'compact'
+
+# Ghost-cell interpolation parameters (interpolate_component)
+ghost_depth  = 5
+n_anchor     = 4
+smooth_width = 5
+
+# Log-law fit window (inner units z+) and physical bounds on kappa
+loglaw_zmin  = 60.0
+loglaw_zmax  = 200.0
+kappa_bounds = (0.40, 0.44)
+
+# Canopy layer extends to hill_hgt + this many cells
+canopy_extra_cells = 20
+
+# Smooth-wall reference case (flat, neutral, Re=500) NetCDF, relative to cwd
+smooth_nc_path = 'Re500/ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'

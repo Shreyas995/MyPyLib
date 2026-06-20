@@ -9,6 +9,7 @@ import os
 import struct
 import pickle
 import numpy as np
+import netCDF4 as nc
 from scipy.integrate import simpson
 from scipy.integrate import trapezoid
 from scipy.stats import linregress
@@ -21,6 +22,143 @@ from scipy.ndimage import uniform_filter1d
 
 ###############################################################################
 ############################## Function defintion #############################
+
+def load_or_compute(names, recompute, compute_fn, save=True, verbose=True,
+                    label=None):
+    """
+    Load a group of cached .npy arrays, or compute them fresh.
+
+    Parameters
+    ----------
+    names      : list[str]   — base names; files are '<name>.npy'.
+    recompute  : bool        — if True, always recompute (ignore caches).
+    compute_fn : callable    — returns a tuple/list of arrays in the same
+                               order as `names` (used only when computing).
+    save       : bool        — save freshly computed arrays to '<name>.npy'.
+    verbose    : bool        — print a load/compute message.
+    label      : str | None  — human label for the message (defaults to names).
+
+    Returns
+    -------
+    tuple of arrays, in the order of `names`, so callers can keep flat
+    assignments, e.g.  a, b, c = load_or_compute([...], flag, lambda: (...)).
+    """
+    tag = label or ', '.join(names)
+    if (not recompute) and all(os.path.exists(n + '.npy') for n in names):
+        if verbose:
+            print(f'Loading cached {tag} ...')
+        return tuple(np.load(n + '.npy') for n in names)
+
+    if verbose:
+        print(f'Computing {tag} ...')
+    vals = tuple(compute_fn())
+    if len(vals) != len(names):
+        raise ValueError(
+            f'load_or_compute: compute_fn returned {len(vals)} arrays '
+            f'but {len(names)} names were given.')
+    if save:
+        for n, v in zip(names, vals):
+            np.save(n + '.npy', v)
+        if verbose:
+            print(f'{tag} saved.')
+    return vals
+
+
+def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
+    """
+    Load and post-process the smooth-wall reference case (flat wall, neutral,
+    Re=500) from its NetCDF file, returning every derived quantity in a dict.
+
+    This is the SINGLE source of truth for the smooth reference, shared by
+    PhAvg.py and results.py so the two can never diverge.  The formulas are
+    PhAvg.py's (the validated pipeline), including the Coriolis convention
+    cor_yx_s = -(W_s - G_z) with the scalar geostrophic value G_z = max(W_s).
+
+    Uses this module's own `diffu_dy` (7-point Fornberg, order 1) and
+    `vIntegral`, so the result is independent of any local helpers a caller may
+    define.
+
+    Parameters
+    ----------
+    nc_path   : str    — full path to the smooth-case NetCDF.
+    x_grid    : array  — streamwise grid onto which AVG_TKE_V_s is interpolated
+                         (AVG_TKE_V_s_i = interp(x_grid, x_s, AVG_TKE_V_s)).
+    nu        : float  — kinematic viscosity (inner scaling of y).
+    Re_lambda : float  — Re_λ (viscous-stress scaling 1/Re_lambda).
+
+    Returns
+    -------
+    dict with keys: sy, nys, U_s, V_s, W_s, su, sw, alpha_s, ustr_s1,
+        alpha_str_s, y_s, y_s_p, rU_s, rV_s, rW_s, G_x_s, G_z_s, G_s, U_s_p,
+        W_s_p, GblU_s, GblW_s, Rxx_s, Rxy_s, Ryy_s, Ryz_s, Rzz_s, TKE_s,
+        case_v_s, cor_yx_s, I_corr_yx_s, du_dy_s, visc_yx_s, tau_yx_s,
+        cor_yz_s, I_corr_yz_s, dw_dy_s, visc_yz_s, tau_yz_s, AVG_TKE_V_s,
+        x_s, AVG_TKE_V_s_i.
+    """
+    s1 = nc.Dataset(nc_path, 'r')
+    sy = (s1.variables['y'][:])
+    nys = np.size(sy)
+    U_s = (s1.variables['fU'][:]).T
+    V_s = (s1.variables['fV'][:]).T
+    W_s = (s1.variables['fW'][:]).T
+    su = np.mean(U_s, axis=1)
+    sw = np.mean(W_s, axis=1)
+    alpha_s = (sw/su)   # turning angle profile for smooth case
+    ustr_s1 = np.mean(s1.variables['FrictionVelocity'][:])
+    alpha_str_s = np.mean(s1.variables['FrictionAngle'][:])
+    y_s = s1.variables['y'][:]
+    y_s_p = (y_s*ustr_s1)/nu
+    rU_s = (s1.variables['rU'][:]).T
+    rV_s = (s1.variables['rV'][:]).T
+    rW_s = (s1.variables['rW'][:]).T
+    G_x_s = np.max(U_s)
+    G_z_s = np.max(W_s)
+    G_s = np.sqrt(G_x_s**2 + G_z_s**2)
+    U_s_p = (U_s/ustr_s1)/G_s
+    W_s_p = (W_s/ustr_s1)/G_s
+    GblU_s = np.mean(rU_s, axis=1)
+    GblW_s = np.mean(rW_s, axis=1)
+    Rxx_s = (s1.variables['Rxx'][:]).T
+    Rxy_s = (s1.variables['Rxy'][:]).T
+    Ryy_s = (s1.variables['Ryy'][:]).T
+    Ryz_s = (s1.variables['Ryz'][:]).T
+    Rzz_s = (s1.variables['Rzz'][:]).T
+    TKE_s = 0.5 * (Rxx_s + Ryy_s + Rzz_s)   # TKE = 0.5*(⟨u'u'⟩+⟨v'v'⟩+⟨w'w'⟩)
+    case_v_s = np.zeros((nys,1)).astype(int)
+    case_v_s[:,:] = 4; case_v_s[0,0] = 1; case_v_s[1,0] = 2; case_v_s[2,0] = 3
+    case_v_s[-3,0] = 5; case_v_s[-2,0] = 6; case_v_s[-1,0] = 7
+    cor_yx_s = -(W_s - G_z_s)
+    I_corr_yx_s = vIntegral(np.mean(cor_yx_s, axis=1), y_s.size, y_s)
+    du_dy_s = diffu_dy((np.reshape(GblU_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
+    visc_yx_s = (1/Re_lambda) * du_dy_s
+    tau_yx_s = I_corr_yx_s + np.mean(visc_yx_s, axis=1) - np.mean(Rxy_s, axis=1)
+    cor_yz_s = (U_s - G_x_s)
+    I_corr_yz_s = vIntegral(np.mean(cor_yz_s, axis=1), y_s.size, y_s)
+    dw_dy_s = diffu_dy((np.reshape(GblW_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
+    visc_yz_s = (1/Re_lambda) * dw_dy_s
+    tau_yz_s = -I_corr_yz_s + np.mean(visc_yz_s, axis=1) - np.mean(Ryz_s, axis=1)
+    AVG_TKE_V_s = np.mean(TKE_s, axis=0)
+    x_s = np.linspace(0, 1, 250)
+    AVG_TKE_V_s_i = np.interp(x_grid, x_s, AVG_TKE_V_s)
+    s1.close()
+
+    return {
+        'sy': sy, 'nys': nys, 'U_s': U_s, 'V_s': V_s, 'W_s': W_s,
+        'su': su, 'sw': sw, 'alpha_s': alpha_s, 'ustr_s1': ustr_s1,
+        'alpha_str_s': alpha_str_s, 'y_s': y_s, 'y_s_p': y_s_p,
+        'rU_s': rU_s, 'rV_s': rV_s, 'rW_s': rW_s,
+        'G_x_s': G_x_s, 'G_z_s': G_z_s, 'G_s': G_s,
+        'U_s_p': U_s_p, 'W_s_p': W_s_p, 'GblU_s': GblU_s, 'GblW_s': GblW_s,
+        'Rxx_s': Rxx_s, 'Rxy_s': Rxy_s, 'Ryy_s': Ryy_s, 'Ryz_s': Ryz_s,
+        'Rzz_s': Rzz_s, 'TKE_s': TKE_s, 'case_v_s': case_v_s,
+        'cor_yx_s': cor_yx_s, 'I_corr_yx_s': I_corr_yx_s, 'du_dy_s': du_dy_s,
+        'visc_yx_s': visc_yx_s, 'tau_yx_s': tau_yx_s,
+        'cor_yz_s': cor_yz_s, 'I_corr_yz_s': I_corr_yz_s, 'dw_dy_s': dw_dy_s,
+        'visc_yz_s': visc_yz_s, 'tau_yz_s': tau_yz_s,
+        'AVG_TKE_V_s': AVG_TKE_V_s, 'x_s': x_s, 'AVG_TKE_V_s_i': AVG_TKE_V_s_i,
+    }
+
+
 bias_patterns = {
     "1": [0,1,2,3,4,5,6],
     "2": [-1,0,1,2,3,4,5],
@@ -224,7 +362,7 @@ def int2bit_2(out,data): # option 2 (bit faster then option 1)
 def epsVolume(eps,ny,nx, hill_hgt):
     eps_vol = np.zeros((ny,nx))
     
-    for j in range (hill_hgt):
+    for j in range (hill_hgt+1):
         for i in range (nx):
             if i == 1023:
                 print (i)
@@ -246,7 +384,7 @@ def epsVolume(eps,ny,nx, hill_hgt):
                         print ('i:', i , 'j:', j, 'Case undefined')
                         
                 # Top edge
-                if i !=0 and i != nx-1:
+                if i != 0 and i != nx-1:
                     if (eps[j,i] + eps[j,i-1] + eps[j+1,i-1] + eps[j+1,i] + eps[j+1,i+1] + eps[j,i+1] == 6):
                             eps_vol[j,i] = 1
                             
@@ -968,3 +1106,182 @@ def fmt_val(v, fmt='.5f', na_str='n/a'):
     if isinstance(v, float) and np.isnan(v):
         return na_str
     return format(v, fmt)
+
+
+def print_summary_table(title, rows, width=74, label_w=46):
+    """
+    Print a consolidated, aligned key-value table to the console.
+
+    Parameters
+    ----------
+    title : str
+    rows  : list — each item is either
+              ('section', text)            -> a sub-header / divider line, or
+              (label, value)               -> formatted with default '.5f', or
+              (label, value, fmt)          -> formatted with `fmt`, or
+              (label, value, fmt, unit)    -> value then a trailing unit string.
+            `value` may be None/NaN (shown as 'n/a').
+
+    Uses fmt_val so NaN/None are handled gracefully.  Pure output — no return.
+    """
+    bar = '=' * width
+    print('\n' + bar)
+    print('  ' + title)
+    print(bar)
+    for row in rows:
+        if row[0] == 'section':
+            print('-' * width)
+            if len(row) > 1 and row[1]:
+                print('  ' + str(row[1]))
+                print('-' * width)
+            continue
+        label = row[0]
+        value = row[1]
+        fmt   = row[2] if len(row) > 2 else '.5f'
+        unit  = row[3] if len(row) > 3 else ''
+        cell  = fmt_val(value, fmt) + (f' {unit}' if unit else '')
+        print(f'  {label:<{label_w}s}{cell:>{width - label_w - 2}s}')
+    print(bar)
+
+
+###############################################################################
+# Plot annotation helpers (valley-crest height + boundary-layer sublayers)
+#
+# Boundary-layer sublayer marker convention (inner units z+ = y·u*/ν).
+# Discrete markers — same symbol = same level in EVERY plot:
+#   'o'  viscous sublayer top          z+ ≈ 5      (both cases)
+#   's'  canopy top / roughness start  (orographic only) = peak of dispersive
+#                                       stress uv_t (x-averaged), where it stops
+#                                       rising and starts to dissipate
+#   '^'  log-layer start               smooth z+ ≈ 30 ;  orographic z+ ≈ 75
+#   'D'  log-layer top                 smooth z+ ≈ 100;  orographic z+ ≈ 200
+#   'X'  valley crest h (index 94)     used only where z+ is NOT an axis
+#                                       (e.g. hodograph); elsewhere h is a line
+# Fill encodes the wall type:
+#   filled marker  = orographic (valley) curve
+#   hollow marker  = smooth-wall curve
+# Layer structure:
+#   Smooth     : viscous(≤5) | buffer(5–30)         | log(30–100)
+#   Orographic : viscous(≤5) | canopy(5–canopy_top) | roughness(canopy_top–75)
+#                | log(75–200)
+###############################################################################
+
+# symbol -> human-readable layer-boundary name (for legends / reference)
+LAYER_MARKER_NAMES = {
+    'o': r'viscous top ($z^+\!\approx\!5$)',
+    's': r'canopy/roughness (oro)',
+    '^': r'log start ($z^+\!\approx\!30/75$)',
+    'D': r'log top ($z^+\!\approx\!100/200$)',
+    'X': r'valley crest $h$',
+}
+
+
+def mark_h(pos, orient='v', label=True, lblpos=0.04, ha='right', ax=None,
+           color='black', linestyle='--', linewidth=0.8):
+    """Mark a reference height with a dashed line labelled 'h'.
+
+    pos    : coordinate value of the line — e.g. y_in[hill_hgt], the valley
+             crest height (z+ = y_in[94]) in inner units.
+    orient : 'v' draws a vertical line (use when z+ is on the x-axis);
+             'h' draws a horizontal line (use when z+ is on the y-axis).
+    The 'h' label is placed in axes-fraction coordinates along the line so it
+    renders correctly on linear or log axes and after axis re-scaling.
+    """
+    import matplotlib.pyplot as plt
+    a = ax if ax is not None else plt.gca()
+    if orient == 'v':
+        a.axvline(x=pos, color=color, linestyle=linestyle, linewidth=linewidth)
+        if label:
+            a.text(pos, lblpos, r'$h$', rotation=90, va='bottom', ha=ha,
+                   fontsize=9, transform=a.get_xaxis_transform())
+    else:
+        a.axhline(y=pos, color=color, linestyle=linestyle, linewidth=linewidth)
+        if label:
+            a.text(lblpos, pos, r'$h$', va='bottom', ha='left',
+                   fontsize=9, transform=a.get_yaxis_transform())
+
+
+def mark_layers(xdata, ydata, idx_dict, ax=None, filled=True, color='black',
+                size=9, zorder=6, edgewidth=0.8):
+    """Place discrete boundary-layer markers on a curve.
+
+    xdata, ydata : the x- and y-data arrays of the curve to mark on (e.g. z+ and
+                   u+, or the (u, w) components of a hodograph).  The markers are
+                   drawn at (xdata[idx], ydata[idx]) so they sit ON the curve.
+    idx_dict     : mapping {marker-symbol: index}, e.g.
+                   {'o': i_visc, 's': i_canopy, '^': i_logstart, 'D': i_logtop}.
+    filled       : True  -> filled marker  (orographic / valley curve);
+                   False -> hollow marker  (smooth-wall curve).
+    """
+    import matplotlib.pyplot as plt
+    a = ax if ax is not None else plt.gca()
+    xdata = np.asarray(xdata)
+    ydata = np.asarray(ydata)
+    n = min(xdata.size, ydata.size)
+    for sym, idx in idx_dict.items():
+        if idx is None or idx < 0 or idx >= n:
+            continue
+        a.plot(xdata[idx], ydata[idx], linestyle='none', marker=sym,
+               markersize=size,
+               markerfacecolor=(color if filled else 'none'),
+               markeredgecolor=color, markeredgewidth=edgewidth, zorder=zorder)
+
+
+def mark_layers_multi(xdata, ydata_list, idx_dict, **kwargs):
+    """Apply mark_layers to several curves that share the same x-data.
+
+    Use this so EVERY curve of a case carries its layer markers, e.g. all the
+    valley term-curves of a momentum budget (shared x = y_inner) or all the
+    smooth term-curves (shared x = y_s_p).
+    """
+    for ydata in ydata_list:
+        mark_layers(xdata, ydata, idx_dict, **kwargs)
+
+
+def layer_legend_handles(symbols=('o', 's', '^', 'D'), oro=True, smooth=True,
+                         markersize=5):
+    """Return Line2D legend handles describing the layer-marker symbols.
+
+    markersize keeps the legend glyphs small (the on-curve markers drawn by
+    mark_layers are deliberately larger).  Pass the result to ax.legend(), or
+    use add_marker_legend() to drop a fine-print legend at the bottom.
+    """
+    from matplotlib.lines import Line2D
+    h = []
+    for sym in symbols:
+        h.append(Line2D([0], [0], ls='none', marker=sym, color='black',
+                        markerfacecolor='black', markeredgecolor='black',
+                        markersize=markersize,
+                        label=LAYER_MARKER_NAMES.get(sym, sym)))
+    if oro:
+        h.append(Line2D([0], [0], ls='none', marker='o', color='black',
+                        markerfacecolor='black', markeredgecolor='black',
+                        markersize=markersize, label='valley (filled)'))
+    if smooth:
+        h.append(Line2D([0], [0], ls='none', marker='o', color='black',
+                        markerfacecolor='none', markeredgecolor='black',
+                        markersize=markersize, label='smooth (hollow)'))
+    return h
+
+
+def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5):
+    """Add a separate, fine-print legend explaining the layer markers at the
+    BOTTOM of the plot, without disturbing the plot's existing (line) legend.
+
+    The on-curve markers are large for visibility; this legend uses small glyphs
+    (markersize) and small text (fontsize) so it reads as a discreet footnote.
+    It sits inside the axes (lower-centre, light semi-transparent box) so it is
+    always captured by savefig regardless of tight_layout / bbox settings.
+    Call it AFTER the main legend has been created on the same axes.
+    """
+    import matplotlib.pyplot as plt
+    a = ax if ax is not None else plt.gca()
+    main = a.get_legend()                 # main (line) legend already on the axes
+    handles = layer_legend_handles(oro=oro, smooth=smooth, markersize=markersize)
+    leg = a.legend(handles=handles, loc='lower center', ncol=min(3, len(handles)),
+                   fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
+                   frameon=True, framealpha=0.7, facecolor='white',
+                   edgecolor='none')
+    if main is not None:
+        a.add_artist(main)                # restore the main legend a.legend() displaced
+    return leg

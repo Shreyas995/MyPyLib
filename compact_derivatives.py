@@ -347,6 +347,207 @@ def compute_y_metrics(y):
     return dydeta, d2ydeta2
 
 
+def _fornberg_weights(x_stencil, x0, m):
+    """
+    Fornberg (1988) finite-difference weights for the m-th derivative at x0
+    using the (arbitrarily spaced) nodes in *x_stencil*.  Returns the weights
+    for derivative order *m* only, shape (len(x_stencil),).
+
+    Self-contained copy kept here so this module has no import dependency on
+    functions.py; identical algorithm to functions.fornberg_weights.
+    """
+    x_stencil = np.asarray(x_stencil, dtype=np.float64)
+    n = len(x_stencil)
+    c = np.zeros((n, m + 1))
+    c1 = 1.0
+    c4 = x_stencil[0] - x0
+    c[0, 0] = 1.0
+    for i in range(1, n):
+        mn = min(i, m)
+        c2 = 1.0
+        c5 = c4
+        c4 = x_stencil[i] - x0
+        for j in range(i):
+            c3 = x_stencil[i] - x_stencil[j]
+            c2 *= c3
+            if j == i - 1:
+                for k in range(mn, 0, -1):
+                    c[i, k] = c1 * (k * c[i - 1, k - 1] - c5 * c[i - 1, k]) / c2
+                c[i, 0] = -c1 * c5 * c[i - 1, 0] / c2
+            for k in range(mn, 0, -1):
+                c[j, k] = (c4 * c[j, k] - k * c[j, k - 1]) / c3
+            c[j, 0] = c4 * c[j, 0] / c3
+        c1 = c2
+    return c[:, m]
+
+
+def _first_deriv_matrix_nonuniform(y, stencil=7):
+    """
+    Build the (Ny, Ny) first-derivative operator on the physical, possibly
+    non-uniform grid *y* using *stencil*-point Fornberg weights.
+
+    Each row j uses a stencil centred on j where possible, shifting to a
+    fully forward/backward stencil near the two boundaries so every node
+    stays in range.  The weights are computed from the actual y values, so an
+    abrupt change in spacing is handled exactly (no kink artifact).
+
+    Returns
+    -------
+    D : ndarray, shape (Ny, Ny)   such that  df/dy ≈ D @ f
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = y.size
+    if n < stencil:
+        raise ValueError(f"y must have at least {stencil} points; got {n}.")
+    half = stencil // 2
+    D = np.zeros((n, n), dtype=np.float64)
+    for j in range(n):
+        start = min(max(j - half, 0), n - stencil)   # keep stencil in [0, n)
+        idx = np.arange(start, start + stencil)
+        D[j, idx] = _fornberg_weights(y[idx], y[j], 1)
+    return D
+
+
+def _nonuniform_compact_operators(y, bnd_stencil=5):
+    """
+    Build the implicit (Padé) operators for a 4th-order **non-uniform**
+    compact first derivative, derived directly in physical space.
+
+    For each interior node i the tridiagonal relation
+
+        α_i f'_{i-1} + f'_i + β_i f'_{i+1}
+            = a_i f_{i-1} + b_i f_i + c_i f_{i+1}
+
+    has its five coefficients (α, β, a, b, c) chosen to cancel Taylor terms
+    up to 4th order on the *actual* spacings h_- = y_i−y_{i-1},
+    h_+ = y_{i+1}−y_i — so a change in spacing is built into the coefficients
+    rather than smeared by a uniform-η metric.  Boundary rows use explicit
+    one-sided Fornberg weights (α = β = 0).
+
+    Returns
+    -------
+    ab : ndarray, shape (3, n)   — packed tridiagonal LHS for solve_banded
+    R  : ndarray, shape (n, n)   — RHS operator, so  f' = solve(ab, R @ f)
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = y.size
+    lower = np.zeros(n)
+    diag  = np.ones(n)
+    upper = np.zeros(n)
+    R = np.zeros((n, n), dtype=np.float64)
+
+    for i in range(1, n - 1):
+        dm = y[i-1] - y[i]      # = -h_-   (offset of left node)
+        dp = y[i+1] - y[i]      # = +h_+   (offset of right node)
+        # Match f^{(1..4)} : unknowns [α, β, a, c]; b fixed by f^{(0)}: a+b+c=0
+        A = np.array([
+            [1.0,      1.0,      -dm,         -dp        ],   # f'
+            [dm,       dp,       -dm**2/2.0,  -dp**2/2.0  ],   # f''
+            [dm**2,    dp**2,    -dm**3/3.0,  -dp**3/3.0  ],   # f'''
+            [dm**3,    dp**3,    -dm**4/4.0,  -dp**4/4.0  ],   # f''''
+        ])
+        rhs = np.array([-1.0, 0.0, 0.0, 0.0])
+        alpha, beta, a, c = np.linalg.solve(A, rhs)
+        b = -(a + c)
+        lower[i] = alpha
+        upper[i] = beta
+        R[i, i-1] = a
+        R[i, i]   = b
+        R[i, i+1] = c
+
+    # Boundary rows: explicit one-sided Fornberg (no implicit coupling)
+    for i, idx in ((0, np.arange(0, bnd_stencil)),
+                   (n - 1, np.arange(n - bnd_stencil, n))):
+        R[i, idx] = _fornberg_weights(y[idx], y[i], 1)
+
+    ab = _pack_banded(lower, diag, upper)
+    return ab, R
+
+
+def _second_deriv_matrix_nonuniform(y, stencil=7):
+    """
+    Build the (Ny, Ny) **second**-derivative operator on the physical,
+    possibly non-uniform grid *y* using *stencil*-point Fornberg weights
+    (Fornberg order m=2).  Direct analogue of
+    :func:`_first_deriv_matrix_nonuniform`; an abrupt change in spacing is
+    handled exactly because the weights use the actual y values.
+
+    Returns
+    -------
+    D2 : ndarray, shape (Ny, Ny)   such that  d²f/dy² ≈ D2 @ f
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = y.size
+    if n < stencil:
+        raise ValueError(f"y must have at least {stencil} points; got {n}.")
+    half = stencil // 2
+    D2 = np.zeros((n, n), dtype=np.float64)
+    for j in range(n):
+        start = min(max(j - half, 0), n - stencil)
+        idx = np.arange(start, start + stencil)
+        D2[j, idx] = _fornberg_weights(y[idx], y[j], 2)
+    return D2
+
+
+def _nonuniform_compact_operators2(y, bnd_stencil=6):
+    """
+    Implicit (Padé) operators for a 4th-order **non-uniform** compact *second*
+    derivative, derived directly in physical space.
+
+    For each interior node i the tridiagonal relation
+
+        α_i f''_{i-1} + f''_i + β_i f''_{i+1}
+            = a_i f_{i-1} + b_i f_i + c_i f_{i+1}
+
+    has its coefficients chosen to cancel Taylor terms through 4th order on the
+    actual spacings.  Matching f^{(0)}, f^{(1)} fixes two constraints
+    (a+b+c = 0 and a·dm + c·dp = 0, i.e. no spurious value/first-derivative
+    leakage); f^{(2..4)} give the operator.  Boundary rows use explicit
+    one-sided Fornberg second-derivative weights (α = β = 0).
+
+    Returns
+    -------
+    ab : ndarray, shape (3, n)   — packed tridiagonal LHS for solve_banded
+    R  : ndarray, shape (n, n)   — RHS operator, so  f'' = solve(ab, R @ f)
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = y.size
+    lower = np.zeros(n)
+    diag  = np.ones(n)
+    upper = np.zeros(n)
+    R = np.zeros((n, n), dtype=np.float64)
+
+    for i in range(1, n - 1):
+        dm = y[i-1] - y[i]      # = -h_-
+        dp = y[i+1] - y[i]      # = +h_+
+        # Unknowns [α, β, a, c]; b from f^{(0)}: a+b+c = 0.
+        # f^{(1)} : a·dm + c·dp = 0
+        # f^{(2)} : α + β + 1 = a·dm²/2 + c·dp²/2
+        # f^{(3)} : α·dm + β·dp = a·dm³/6 + c·dp³/6
+        # f^{(4)} : α·dm²/2 + β·dp²/2 = a·dm⁴/24 + c·dp⁴/24
+        A = np.array([
+            [0.0,        0.0,        dm,            dp           ],   # f'
+            [1.0,        1.0,        -dm**2/2.0,    -dp**2/2.0    ],   # f''
+            [dm,         dp,         -dm**3/6.0,    -dp**3/6.0    ],   # f'''
+            [dm**2/2.0,  dp**2/2.0,  -dm**4/24.0,   -dp**4/24.0   ],   # f''''
+        ])
+        rhs = np.array([0.0, -1.0, 0.0, 0.0])
+        alpha, beta, a, c = np.linalg.solve(A, rhs)
+        b = -(a + c)
+        lower[i] = alpha
+        upper[i] = beta
+        R[i, i-1] = a
+        R[i, i]   = b
+        R[i, i+1] = c
+
+    for i, idx in ((0, np.arange(0, bnd_stencil)),
+                   (n - 1, np.arange(n - bnd_stencil, n))):
+        R[i, idx] = _fornberg_weights(y[idx], y[i], 2)
+
+    ab = _pack_banded(lower, diag, upper)
+    return ab, R
+
+
 # ============================================================
 #  Main class
 # ============================================================
@@ -393,6 +594,16 @@ class CompactDerivatives2D:
 
         # --- Y coordinate-transform metrics ---
         self._dydeta, self._d2ydeta2 = compute_y_metrics(self.y)
+
+        # Lazily built physical-space y-derivative operators (built on first use):
+        #   _Dy_fornberg[stencil]  : explicit Fornberg 1st-derivative matrix
+        #   _nucompact             : (ab, R) for the non-uniform compact 1st deriv
+        #   _D2y_fornberg[stencil] : explicit Fornberg 2nd-derivative matrix
+        #   _nucompact2            : (ab, R) for the non-uniform compact 2nd deriv
+        self._Dy_fornberg  = {}
+        self._nucompact    = None
+        self._D2y_fornberg = {}
+        self._nucompact2   = None
 
         # --- Pre-build banded LHS matrices ---
         # Y direction: always non-periodic (wall-bounded)
@@ -474,12 +685,107 @@ class CompactDerivatives2D:
         """
         return self._diff_x(field, 2)
 
-    def ddy(self, field):
-        """
-        First derivative ∂f/∂y.
+    # Accepted aliases for each first-y-derivative scheme
+    _COMPACT_ALIASES   = ('compact', 'eta', 'pade')
+    _FORNBERG_ALIASES  = ('physical', 'phys', 'fornberg', 'fornberg7',
+                          'nonuniform')
+    _FORNBERG5_ALIASES = ('fornberg5',)
+    _FORNBERG9_ALIASES = ('fornberg9',)
+    _NUCOMPACT_ALIASES = ('compact_nu', 'compact_nonuniform', 'nucompact')
+    _SPLINE_ALIASES    = ('spline', 'cubic')
 
-        Computed in uniform η-space and converted via the chain rule:
-            ∂f/∂y = (∂f/∂η) / (∂y/∂η)
+    def ddy(self, field, method='compact'):
+        """
+        First derivative ∂f/∂y, with a user-selectable scheme.
+
+        Parameters
+        ----------
+        field : array_like, shape (Ny, Nx)
+        method : str, optional
+            Differentiation scheme:
+
+            * ``'compact'`` (default; ``'eta'``, ``'pade'``) — 6th-order Padé
+              in uniform η-space, mapped via ∂f/∂y = (∂f/∂η)/(∂y/∂η).
+              Spectral-like accuracy on a *smooth* mapping y(η).
+            * ``'fornberg'`` / ``'physical'`` (also ``'fornberg7'``) — explicit
+              7-point Fornberg weights on the actual y (see :meth:`ddy_phys`).
+            * ``'fornberg5'`` / ``'fornberg9'`` — 5- / 9-point Fornberg
+              (narrower = more local at a kink; wider = higher formal order).
+            * ``'compact_nu'`` (``'compact_nonuniform'``, ``'nucompact'``) —
+              4th-order **non-uniform** Padé derived directly in physical space
+              (see :meth:`ddy_compact_nu`): compact implicit accuracy with the
+              spacing built into the coefficients.
+            * ``'spline'`` (``'cubic'``) — derivative of a C² cubic spline
+              through the actual y nodes (see :meth:`ddy_spline`).
+
+        Returns
+        -------
+        ndarray, shape (Ny, Nx)
+
+        Notes
+        -----
+        ``'compact'`` assumes a smooth mapping y(η).  Where the physical grid
+        has an abrupt spacing change (e.g. the factor-2 dy step at the top of
+        Zone 1 on the old 1024×832×1024 grid), its centred dy/dη metric is
+        smeared and a spurious wiggle appears.  All other schemes use the real
+        y coordinates and stay smooth there; away from any kink they agree with
+        ``'compact'`` to ~0.1 %.
+        """
+        m = method.lower()
+        if m in self._COMPACT_ALIASES:
+            df_deta = self._diff_eta(field, 1)             # (Ny, Nx)
+            return df_deta / self._dydeta[:, np.newaxis]
+        if m in self._FORNBERG_ALIASES:
+            return self.ddy_phys(field, stencil=7)
+        if m in self._FORNBERG5_ALIASES:
+            return self.ddy_phys(field, stencil=5)
+        if m in self._FORNBERG9_ALIASES:
+            return self.ddy_phys(field, stencil=9)
+        if m in self._NUCOMPACT_ALIASES:
+            return self.ddy_compact_nu(field)
+        if m in self._SPLINE_ALIASES:
+            return self.ddy_spline(field)
+        valid = (self._COMPACT_ALIASES + self._FORNBERG_ALIASES
+                 + self._FORNBERG5_ALIASES + self._FORNBERG9_ALIASES
+                 + self._NUCOMPACT_ALIASES + self._SPLINE_ALIASES)
+        raise ValueError(
+            f"Unknown ddy method {method!r}; choose one of {valid}."
+        )
+
+    def ddy_phys(self, field, stencil=7):
+        """
+        First derivative ∂f/∂y from **explicit** non-uniform Fornberg weights.
+
+        Uses an *stencil*-point finite-difference stencil built from the actual
+        (possibly non-uniform) y coordinates — no computational-space mapping
+        and no dy/dη metric.  Because the weights use the real local spacing,
+        an abrupt change in dy (a grid kink) is differentiated exactly rather
+        than smeared, so the result stays smooth where the η-space ``'compact'``
+        scheme trembles.
+
+        Parameters
+        ----------
+        field   : array_like, shape (Ny, Nx)
+        stencil : int, optional — number of points (default 7).
+
+        Returns
+        -------
+        ndarray, shape (Ny, Nx)
+        """
+        if stencil not in self._Dy_fornberg:
+            self._Dy_fornberg[stencil] = _first_deriv_matrix_nonuniform(
+                self.y, stencil=stencil)
+        f = np.asarray(field, dtype=np.float64)
+        return self._Dy_fornberg[stencil] @ f
+
+    def ddy_compact_nu(self, field):
+        """
+        First derivative ∂f/∂y from the 4th-order **non-uniform compact**
+        (Padé) scheme — implicit/tridiagonal, with coefficients derived from
+        the actual local spacings (see :func:`_nonuniform_compact_operators`).
+
+        Combines compact implicit accuracy with native non-uniform handling,
+        so it stays smooth across grid-spacing changes.
 
         Parameters
         ----------
@@ -489,16 +795,19 @@ class CompactDerivatives2D:
         -------
         ndarray, shape (Ny, Nx)
         """
-        df_deta = self._diff_eta(field, 1)                 # (Ny, Nx)
-        J = self._dydeta[:, np.newaxis]                    # (Ny, 1)
-        return df_deta / J
+        if self._nucompact is None:
+            self._nucompact = _nonuniform_compact_operators(self.y)
+        ab, R = self._nucompact
+        f = np.ascontiguousarray(np.asarray(field, dtype=np.float64))
+        return _solve_banded_system(ab, R @ f)
 
-    def d2dy2(self, field):
+    def ddy_spline(self, field):
         """
-        Second derivative ∂²f/∂y².
+        First derivative ∂f/∂y from a C² cubic spline through the actual y
+        nodes (``scipy.interpolate.CubicSpline``, applied column-wise).
 
-        Chain rule for non-uniform grids:
-            ∂²f/∂y² = [∂²f/∂η² − (∂f/∂η)(∂²y/∂η²)/(∂y/∂η)] / (∂y/∂η)²
+        The natural cubic spline is itself an implicit/compact construction on
+        non-uniform grids, so it handles spacing changes gracefully.
 
         Parameters
         ----------
@@ -508,13 +817,86 @@ class CompactDerivatives2D:
         -------
         ndarray, shape (Ny, Nx)
         """
-        df_deta   = self._diff_eta(field, 1)
-        d2f_deta2 = self._diff_eta(field, 2)
+        from scipy.interpolate import CubicSpline
+        f = np.asarray(field, dtype=np.float64)
+        cs = CubicSpline(self.y, f, axis=0, bc_type='not-a-knot')
+        return cs(self.y, 1)
 
-        J  = self._dydeta[:, np.newaxis]     # ∂y/∂η,  shape (Ny, 1)
-        J2 = self._d2ydeta2[:, np.newaxis]   # ∂²y/∂η², shape (Ny, 1)
+    def d2dy2(self, field, method='compact'):
+        """
+        Second derivative ∂²f/∂y², with a user-selectable scheme.
 
-        return (d2f_deta2 - df_deta * (J2 / J)) / J**2
+        Parameters
+        ----------
+        field : array_like, shape (Ny, Nx)
+        method : str, optional — same option set as :meth:`ddy`:
+            ``'compact'`` (default; η-space Padé chain rule),
+            ``'fornberg5/7/9'`` (explicit non-uniform, :meth:`ddy2_phys`),
+            ``'compact_nu'`` (non-uniform Padé, :meth:`ddy2_compact_nu`),
+            ``'spline'`` (cubic spline, :meth:`ddy2_spline`).
+
+        Returns
+        -------
+        ndarray, shape (Ny, Nx)
+
+        Notes
+        -----
+        Like the first derivative, ``'compact'`` assumes a smooth mapping
+        y(η); at an abrupt spacing change the metric d²y/dη² spikes and the
+        result trembles.  The physical-space schemes use the real y and stay
+        smooth there.
+        """
+        m = method.lower()
+        if m in self._COMPACT_ALIASES:
+            df_deta   = self._diff_eta(field, 1)
+            d2f_deta2 = self._diff_eta(field, 2)
+            J  = self._dydeta[:, np.newaxis]     # ∂y/∂η
+            J2 = self._d2ydeta2[:, np.newaxis]   # ∂²y/∂η²
+            return (d2f_deta2 - df_deta * (J2 / J)) / J**2
+        if m in self._FORNBERG_ALIASES:
+            return self.ddy2_phys(field, stencil=7)
+        if m in self._FORNBERG5_ALIASES:
+            return self.ddy2_phys(field, stencil=5)
+        if m in self._FORNBERG9_ALIASES:
+            return self.ddy2_phys(field, stencil=9)
+        if m in self._NUCOMPACT_ALIASES:
+            return self.ddy2_compact_nu(field)
+        if m in self._SPLINE_ALIASES:
+            return self.ddy2_spline(field)
+        valid = (self._COMPACT_ALIASES + self._FORNBERG_ALIASES
+                 + self._FORNBERG5_ALIASES + self._FORNBERG9_ALIASES
+                 + self._NUCOMPACT_ALIASES + self._SPLINE_ALIASES)
+        raise ValueError(
+            f"Unknown d2dy2 method {method!r}; choose one of {valid}.")
+
+    def ddy2_phys(self, field, stencil=7):
+        """∂²f/∂y² from explicit non-uniform Fornberg weights (order 2).
+
+        Direct physical-space analogue of :meth:`ddy_phys`; robust to grid
+        spacing kinks.  *stencil* = number of points (default 7).
+        """
+        if stencil not in self._D2y_fornberg:
+            self._D2y_fornberg[stencil] = _second_deriv_matrix_nonuniform(
+                self.y, stencil=stencil)
+        f = np.asarray(field, dtype=np.float64)
+        return self._D2y_fornberg[stencil] @ f
+
+    def ddy2_compact_nu(self, field):
+        """∂²f/∂y² from the 4th-order non-uniform compact (Padé) scheme
+        (see :func:`_nonuniform_compact_operators2`)."""
+        if self._nucompact2 is None:
+            self._nucompact2 = _nonuniform_compact_operators2(self.y)
+        ab, R = self._nucompact2
+        f = np.ascontiguousarray(np.asarray(field, dtype=np.float64))
+        return _solve_banded_system(ab, R @ f)
+
+    def ddy2_spline(self, field):
+        """∂²f/∂y² from the second derivative of a C² cubic spline through
+        the actual y nodes (``scipy.interpolate.CubicSpline``)."""
+        from scipy.interpolate import CubicSpline
+        f = np.asarray(field, dtype=np.float64)
+        cs = CubicSpline(self.y, f, axis=0, bc_type='not-a-knot')
+        return cs(self.y, 2)
 
     def gradient(self, field):
         """

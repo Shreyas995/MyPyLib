@@ -41,17 +41,26 @@ from compact_derivatives import (
 # %%
 ###############################################################################
 ############################# Initialize ######################################
-# Parameter decleration
-cwd = str(os.path.dirname(__file__) + '/' )
-# Read grid
-x, y, z = read_grid(cwd)
-# x: streamwise (periodic), y: wall-normal, z: spanwise
-cd = CompactDerivatives2D(x, y, periodic_x=True)
+# Run controls (cal_Avg, postprocess, plotRes, ...), physical scalars
+# (Re, nu, Gx, Gz, u_star, kappa, l_in, ...) and post-processing constants
+# (DY_METHOD, D2Y_METHOD, ghost_depth, recompute_derivatives, smooth_nc_path, ...)
+# all come from config.py via `from config import *` (see imports above).
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Grid & differential operators
+# ─────────────────────────────────────────────────────────────────────────────
+cwd = str(os.path.dirname(__file__) + '/' )
+x, y, z = read_grid(cwd)               # x: streamwise (periodic), y: wall-normal, z: spanwise
 nx = np.size(x)
 ny = np.size(y)
 nz = np.size(z)
-    
+# Wall-normal derivatives use the DY_METHOD / D2Y_METHOD schemes (config.py);
+# x-derivatives stay compact (x is uniform, where Padé is extremely precise).
+cd = CompactDerivatives2D(x, y, periodic_x=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IBM geometry: solid indicator, landmark columns, heights, volume fractions
+# ─────────────────────────────────────────────────────────────────────────────
 # eps is the IBM indicator function: eps[j,i] = 1 inside the solid body, 0 in the fluid.
 # Shape is (ny, nx); cached to disk because epsfield() is expensive.
 try:
@@ -70,8 +79,18 @@ eps_rf = int(nx*0.75)    # horizontal grid position at valley right flank
 eps_hgt = np.sum(eps, axis=0).astype(int)
 hill_hgt = np.max(eps_hgt) - 1 # Directly take hill height from the eps field. THe real height is value -1.
 # If no geomtery is created, there is 1 row where velocity is zero so we have + 1 no of eps
-eps_vol = epsVolume(eps,ny,nx,hill_hgt)
-eps_s = np.mean(eps_vol,axis=1)   # solid volume fraction per y-level (averaged over x)
+eps_fr = epsVolume(eps,ny,nx,hill_hgt)
+
+# Grid spacings (dy non-uniform; dx, dz uniform)
+dy = np.roll(np.append(np.diff(y), np.diff(y)[0]), 1)
+dx = np.diff(x)[0]
+dz = np.diff(z)[0]
+# Per-cell fluid/solid areas: cell area = dx * dy[j] (dy is the wall-normal
+# spacing, independent of x).  Vectorised over (ny, nx); dy[:, None] broadcasts.
+eps_area_f = (1 - eps_fr) * dx * dy[:, None]
+eps_area_s = eps_fr * dx * dy[:, None]
+total_areafr = eps_area_f + eps_area_s
+eps_s = np.mean(eps_fr,axis=1)   # solid volume fraction per y-level (averaged over x)
 eps_f = 1 - eps_s                 # fluid volume fraction per y-level
 
 # flk_hgt: wall-normal index of the flank top; used to mark left/right flank x-columns
@@ -89,12 +108,18 @@ y_oro = y[y_oro.astype(int)]
 y_oro = np.append(0,y_oro)
 y_oro = np.append(y_oro, 0)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Inner-unit (wall) scalings
+# ─────────────────────────────────────────────────────────────────────────────
 x_oro_in = x_oro/l_in
 y_oro_in = y_oro/l_in
 
 x_in = x/l_in
 y_in = y/l_in
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Masks & finite-difference stencil cases
+# ─────────────────────────────────────────────────────────────────────────────
 # Forcing values in solid zero. If not it will introduce error when calculating average in x direction.
 mask0 = 1 - eps
 # New interface-aware mask: zeros only INTERIOR solid cells, preserves the
@@ -116,7 +141,7 @@ mask_intr = (j_idx[:, np.newaxis] >= interior_depth[np.newaxis, :]).astype(float
 # eps_g flags the bottom boundary row (j=0) regardless of solid/fluid state
 eps_g = np.zeros((ny,nx)).astype(int)
 eps_g[0,:] = 1
-mask_v = (eps_vol == 1).astype(int)
+mask_v = (eps_fr == 1).astype(int)
 
 # diff_cases returns stencil-type indices for compact finite-difference schemes
 # near walls (Dirichlet BCs) and at interior/periodic boundaries
@@ -426,115 +451,68 @@ if (1 == postprocess):
     # On subsequent runs the expensive PCHIP interpolation and spectral derivatives
     # are skipped if the files already exist.  Delete the .npy files to force recomputation.
 
+    # All ghost-filled fields and derivatives are cached as .npy via load_or_compute:
+    # with recompute_derivatives=False they are loaded if every file in the group
+    # exists, otherwise (re)computed and saved.  Set recompute_derivatives=True in
+    # config.py (or delete the .npy files) to force fresh computation.
+
     # ── Ghost-cell interpolated fields ────────────────────────────────────────
-    _interp_names = ['AvgPhU_i', 'AvgPhU_j', 'AvgPhV_i', 'AvgPhV_j',
-                     'AvgPhW_i', 'AvgPhW_j', 'AvgP_i',   'AvgP_j'  ]
-    if all(os.path.exists(n + '.npy') for n in _interp_names):
-        print('Loading cached ghost-cell interpolated fields ...')
-        AvgPhU_i = np.load('AvgPhU_i.npy')
-        AvgPhU_j = np.load('AvgPhU_j.npy')
-        AvgPhV_i = np.load('AvgPhV_i.npy')
-        AvgPhV_j = np.load('AvgPhV_j.npy')
-        AvgPhW_i = np.load('AvgPhW_i.npy')
-        AvgPhW_j = np.load('AvgPhW_j.npy')
-        AvgP_i   = np.load('AvgP_i.npy')
-        AvgP_j   = np.load('AvgP_j.npy')
-    else:
-        print('Computing ghost-cell interpolated fields (PCHIP) ...')
-        AvgPhU_i, AvgPhU_j = interpolate_component(x, y, nx, ny, eps, AvgPhU, ghost_depth=5, n_anchor=4, smooth_width=5)
-        AvgPhV_i, AvgPhV_j = interpolate_component(x, y, nx, ny, eps, AvgPhV, ghost_depth=5, n_anchor=4, smooth_width=5)
-        AvgPhW_i, AvgPhW_j = interpolate_component(x, y, nx, ny, eps, AvgPhW, ghost_depth=5, n_anchor=4, smooth_width=5)
-        AvgP_i,   AvgP_j   = interpolate_component(x, y, nx, ny, eps, AvgP,   ghost_depth=5, n_anchor=4, smooth_width=5)
-        np.save('AvgPhU_i.npy', AvgPhU_i)
-        np.save('AvgPhU_j.npy', AvgPhU_j)
-        np.save('AvgPhV_i.npy', AvgPhV_i)
-        np.save('AvgPhV_j.npy', AvgPhV_j)
-        np.save('AvgPhW_i.npy', AvgPhW_i)
-        np.save('AvgPhW_j.npy', AvgPhW_j)
-        np.save('AvgP_i.npy',   AvgP_i)
-        np.save('AvgP_j.npy',   AvgP_j)
-        print('Ghost-cell fields saved.')
+    def _compute_interp():
+        AvgPhU_i, AvgPhU_j = interpolate_component(x, y, nx, ny, eps, AvgPhU, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
+        AvgPhV_i, AvgPhV_j = interpolate_component(x, y, nx, ny, eps, AvgPhV, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
+        AvgPhW_i, AvgPhW_j = interpolate_component(x, y, nx, ny, eps, AvgPhW, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
+        AvgP_i,   AvgP_j   = interpolate_component(x, y, nx, ny, eps, AvgP,   ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
+        return (AvgPhU_i, AvgPhU_j, AvgPhV_i, AvgPhV_j,
+                AvgPhW_i, AvgPhW_j, AvgP_i,   AvgP_j)
+    AvgPhU_i, AvgPhU_j, AvgPhV_i, AvgPhV_j, AvgPhW_i, AvgPhW_j, AvgP_i, AvgP_j = \
+        load_or_compute(['AvgPhU_i', 'AvgPhU_j', 'AvgPhV_i', 'AvgPhV_j',
+                         'AvgPhW_i', 'AvgPhW_j', 'AvgP_i',   'AvgP_j'],
+                        recompute_derivatives, _compute_interp,
+                        label='ghost-cell interpolated fields (PCHIP)')
 
     # ── Velocity gradients ∂u/∂y, ∂u/∂x, ∂v/∂y, ∂v/∂x, ∂w/∂y, ∂w/∂x ───────
-    _vel_deriv_names = ['du_dy', 'du_dx', 'dv_dy', 'dv_dx', 'dw_dy', 'dw_dx']
-    if all(os.path.exists(n + '.npy') for n in _vel_deriv_names):
-        print('Loading cached velocity derivatives ...')
-        du_dy = np.load('du_dy.npy')
-        du_dx = np.load('du_dx.npy')
-        dv_dy = np.load('dv_dy.npy')
-        dv_dx = np.load('dv_dx.npy')
-        dw_dy = np.load('dw_dy.npy')
-        dw_dx = np.load('dw_dx.npy')
-    else:
-        print('Computing velocity derivatives ...')
-        du_dy = cd.ddy(AvgPhU_j) * mask_intr
-        du_dx = cd.ddx(AvgPhU_i) * mask_intr
-        dv_dy = cd.ddy(AvgPhV_j) * mask_intr
-        dv_dx = cd.ddx(AvgPhV_i) * mask_intr
-        dw_dy = cd.ddy(AvgPhW_j) * mask_intr
-        dw_dx = cd.ddx(AvgPhW_i) * mask_intr
-        np.save('du_dy.npy', du_dy)
-        np.save('du_dx.npy', du_dx)
-        np.save('dv_dy.npy', dv_dy)
-        np.save('dv_dx.npy', dv_dx)
-        np.save('dw_dy.npy', dw_dy)
-        np.save('dw_dx.npy', dw_dx)
-        print('Velocity derivatives saved.')
+    # First y-derivatives use the DY_METHOD scheme (config.py).  'fornberg7'
+    # differentiates the accidental factor-2 dy step at the top of Zone 1 exactly,
+    # avoiding the spurious tremble in the viscous shear stress (τ_zx) that the
+    # η-space 'compact' metric produces there.
+    def _compute_vel_deriv():
+        return (cd.ddy(AvgPhU_j, method=DY_METHOD) * mask_intr,
+                cd.ddx(AvgPhU_i) * mask_intr,
+                cd.ddy(AvgPhV_j, method=DY_METHOD) * mask_intr,
+                cd.ddx(AvgPhV_i) * mask_intr,
+                cd.ddy(AvgPhW_j, method=DY_METHOD) * mask_intr,
+                cd.ddx(AvgPhW_i) * mask_intr)
+    du_dy, du_dx, dv_dy, dv_dx, dw_dy, dw_dx = \
+        load_or_compute(['du_dy', 'du_dx', 'dv_dy', 'dv_dx', 'dw_dy', 'dw_dx'],
+                        recompute_derivatives, _compute_vel_deriv,
+                        label='velocity derivatives')
 
     # ── Dispersive velocity gradients ─────────────────────────────────────────
-    _disp_deriv_names = ['dud_dy', 'dvd_dy', 'dwd_dy', 'dud_dx', 'dvd_dx', 'dwd_dx']
-    if all(os.path.exists(n + '.npy') for n in _disp_deriv_names):
-        print('Loading cached dispersive velocity derivatives ...')
-        dud_dy = np.load('dud_dy.npy')
-        dvd_dy = np.load('dvd_dy.npy')
-        dwd_dy = np.load('dwd_dy.npy')
-        dud_dx = np.load('dud_dx.npy')
-        dvd_dx = np.load('dvd_dx.npy')
-        dwd_dx = np.load('dwd_dx.npy')
-    else:
-        print('Computing dispersive velocity derivatives ...')
-        dud_dy = cd.ddy(DispVelU) * mask_intr
-        dvd_dy = cd.ddy(DispVelV) * mask_intr
-        dwd_dy = cd.ddy(DispVelW) * mask_intr
-        dud_dx = cd.ddx(DispVelU) * mask_intr
-        dvd_dx = cd.ddx(DispVelV) * mask_intr
-        dwd_dx = cd.ddx(DispVelW) * mask_intr
-        np.save('dud_dy.npy', dud_dy)
-        np.save('dvd_dy.npy', dvd_dy)
-        np.save('dwd_dy.npy', dwd_dy)
-        np.save('dud_dx.npy', dud_dx)
-        np.save('dvd_dx.npy', dvd_dx)
-        np.save('dwd_dx.npy', dwd_dx)
-        print('Dispersive velocity derivatives saved.')
+    def _compute_disp_deriv():
+        return (cd.ddy(DispVelU, method=DY_METHOD) * mask_intr,
+                cd.ddy(DispVelV, method=DY_METHOD) * mask_intr,
+                cd.ddy(DispVelW, method=DY_METHOD) * mask_intr,
+                cd.ddx(DispVelU) * mask_intr,
+                cd.ddx(DispVelV) * mask_intr,
+                cd.ddx(DispVelW) * mask_intr)
+    dud_dy, dvd_dy, dwd_dy, dud_dx, dvd_dx, dwd_dx = \
+        load_or_compute(['dud_dy', 'dvd_dy', 'dwd_dy', 'dud_dx', 'dvd_dx', 'dwd_dx'],
+                        recompute_derivatives, _compute_disp_deriv,
+                        label='dispersive velocity derivatives')
 
     # ── Second-order velocity derivatives and Reynolds/pressure gradients ─────
-    _misc_deriv_names = ['d2u_dx2', 'd2u_dy2', 'dreyuu_dx', 'dreyuv_dy', 'dP_dx', 'dP_dy']
-    if all(os.path.exists(n + '.npy') for n in _misc_deriv_names):
-        print('Loading cached second-order and stress/pressure derivatives ...')
-        d2u_dx2   = np.load('d2u_dx2.npy')
-        d2u_dy2   = np.load('d2u_dy2.npy')
-        dreyuu_dx = np.load('dreyuu_dx.npy')
-        dreyuv_dy = np.load('dreyuv_dy.npy')
-        dP_dx     = np.load('dP_dx.npy')
-        dP_dy     = np.load('dP_dy.npy')
-    else:
-        print('Computing second-order and stress/pressure derivatives ...')
-        # Second-order streamwise velocity derivatives for the momentum-budget viscous term
-        d2u_dx2   = cd.d2dx2(AvgPhU_i) * mask_intr
-        d2u_dy2   = cd.d2dy2(AvgPhU_j) * mask_intr
-        # Reynolds-stress derivatives for the turbulent-advection term
-        dreyuu_dx = cd.ddx(rey_uu) * mask_intr
-        dreyuv_dy = cd.ddy(rey_uv) * mask_intr
-        # Pressure gradients on the ghost-interpolated field
-        dP_dx     = cd.ddx(AvgP_i) * mask_intr
-        dP_dy     = cd.ddy(AvgP_j) * mask_intr
-        np.save('d2u_dx2.npy',   d2u_dx2)
-        np.save('d2u_dy2.npy',   d2u_dy2)
-        np.save('dreyuu_dx.npy', dreyuu_dx)
-        np.save('dreyuv_dy.npy', dreyuv_dy)
-        np.save('dP_dx.npy',     dP_dx)
-        np.save('dP_dy.npy',     dP_dy)
-        print('Second-order and stress/pressure derivatives saved.')
+    # d2u_dy2 uses the D2Y_METHOD scheme (config.py; default 'compact').
+    def _compute_misc_deriv():
+        return (cd.d2dx2(AvgPhU_i) * mask_intr,                       # ∂²ū/∂x²
+                cd.d2dy2(AvgPhU_j, method=D2Y_METHOD) * mask_intr,    # ∂²ū/∂y²
+                cd.ddx(rey_uu) * mask_intr,                           # turbulent advection
+                cd.ddy(rey_uv, method=DY_METHOD) * mask_intr,
+                cd.ddx(AvgP_i) * mask_intr,                           # pressure gradients
+                cd.ddy(AvgP_j, method=DY_METHOD) * mask_intr)
+    d2u_dx2, d2u_dy2, dreyuu_dx, dreyuv_dy, dP_dx, dP_dy = \
+        load_or_compute(['d2u_dx2', 'd2u_dy2', 'dreyuu_dx', 'dreyuv_dy', 'dP_dx', 'dP_dy'],
+                        recompute_derivatives, _compute_misc_deriv,
+                        label='second-order and stress/pressure derivatives')
 
     # Method 2 — friction velocity from the Ekman momentum-integral balance.
     # Steady-state (∂/∂t = 0) intrinsic-averaged momentum equations:
@@ -546,7 +524,7 @@ if (1 == postprocess):
     # $f \int_0^y \epsilon_{1 2 3}\left(\langle\bar{v}\rangle_k-g_v\right) \mathrm{d} y + \frac{1}{\operatorname{Re} e_{\Lambda}} \frac{\partial\langle\bar{u}\rangle}{\partial y}-\left\langle\overline{u^{\prime} w^{\prime}}\right\rangle $
     # Turining angle is 23.29 degrees
     corr_yx = (AvgPhW - Gz)*mask0
-    I_corr_yx = vIntegral(avg_c(eps, corr_yx, axis=1), ny, y)
+    I_corr_yx = vIntegral(np.mean(corr_yx, axis=1), ny, y)
     visc_yx = (1/Re_lambda) * (avg_c(eps, du_dy, axis=1))
     # Reynolds stresses given by 'rey_uv'
     # Tau_yz(z) = - Temporal - Coriolis + Viscous - Reynolds
@@ -554,7 +532,7 @@ if (1 == postprocess):
 
     # $f \int_0^z \epsilon_{2 1 3}\left(\langle\bar{u}\rangle_k-g_u\right) \mathrm{d} z + \frac{1}{\operatorname{Re} e_{\Lambda}} \frac{\partial\langle\bar{v}\rangle}{\partial z}-\left\langle\overline{v^{\prime} w^{\prime}}\right\rangle $
     corr_yz = (AvgPhU - Gx)*mask0
-    I_corr_yz = vIntegral(avg_c(eps, corr_yz, axis=1), ny, y) # Coriolis is positive
+    I_corr_yz = vIntegral(np.mean(corr_yz, axis=1), ny, y) # Coriolis is positive
     visc_yz = (1/Re_lambda) * dw_dy
     # Reynolds stresses given by 'rey_vw'
     # Tau_yz(z) = - Temporal + Coriolis + Viscous - Reynolds
@@ -632,7 +610,7 @@ if (1 == postprocess):
     # This estimate is only used for the early α_canopy scalar printed to console.
     u_h_plus    = u_plus_rot / u_star        # streamwise (rotated) velocity in inner units
 
-    _fit_lo, _fit_hi = 60.0, 200.0
+    _fit_lo, _fit_hi = loglaw_zmin, loglaw_zmax
     _fit_mask   = (y_in >= _fit_lo) & (y_in <= _fit_hi)
     _z_fit      = y_in[_fit_mask]
     _u_fit      = u_h_plus[_fit_mask]
@@ -652,7 +630,7 @@ if (1 == postprocess):
             if _slope <= 0:
                 continue
             _k = 1.0 / _slope
-            if not (0.40 <= _k <= 0.44):
+            if not (kappa_bounds[0] <= _k <= kappa_bounds[1]):
                 continue
             if _r**2 > _best_r2:
                 _best_r2     = _r**2
@@ -694,7 +672,7 @@ if (1 == postprocess):
     # Fit α over full canopy region (indices 0 … hill_hgt+20) using only
     # fluid-occupied cells (u_h+ > 0) to exclude IBM solid ghost cells.
     h_inner_plus = float(y_in[hill_hgt])
-    _can_end     = min(hill_hgt + 20, ny)
+    _can_end     = min(hill_hgt + canopy_extra_cells, ny)
     _z_can       = y_in[:_can_end]
     _u_can       = u_h_plus[:_can_end]
     _can_valid   = _u_can > 1e-6
@@ -1092,59 +1070,33 @@ if (1 == postprocess):
     
 # %%###########################################################################
     # ─── Smooth case (flat wall, neutral, Re=500) — loaded once, used in all plots ─
-    s1 = nc.Dataset(cwd + 'Re500/ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc', 'r')
-    sy = (s1.variables['y'][:])
-    nys = np.size(sy)
-    U_s = (s1.variables['fU'][:]).T
-    V_s = (s1.variables['fV'][:]).T
-    W_s = (s1.variables['fW'][:]).T
-    su = np.mean(U_s, axis=1)
-    sw = np.mean(W_s, axis=1)
-    alpha_s = (sw/su)   # turning angle profile for smooth case
-    ustr_s1 = np.mean(s1.variables['FrictionVelocity'][:])
-    alpha_str_s = np.mean(s1.variables['FrictionAngle'][:])
-    y_s = s1.variables['y'][:]
-    y_s_p = (y_s*ustr_s1)/nu
-    rU_s = (s1.variables['rU'][:]).T
-    rV_s = (s1.variables['rV'][:]).T
-    rW_s = (s1.variables['rW'][:]).T
-    G_x_s = np.max(U_s)
-    G_z_s = np.max(W_s)
-    G_s = np.sqrt(G_x_s**2 + G_z_s**2)
-    U_s_p = (U_s/ustr_s1)/G_s
-    W_s_p = (W_s/ustr_s1)/G_s
-    GblU_s = np.mean(rU_s, axis=1)
-    GblW_s = np.mean(rW_s, axis=1)
-    Rxx_s = (s1.variables['Rxx'][:]).T
-    Rxy_s = (s1.variables['Rxy'][:]).T
-    Ryy_s = (s1.variables['Ryy'][:]).T
-    Ryz_s = (s1.variables['Ryz'][:]).T
-    Rzz_s = (s1.variables['Rzz'][:]).T
-    TKE_s = 0.5 * (Rxx_s + Ryy_s + Rzz_s)   # TKE = 0.5*(⟨u'u'⟩+⟨v'v'⟩+⟨w'w'⟩)
-    case_v_s = np.zeros((nys,1)).astype(int)
-    case_v_s[:,:] = 4; case_v_s[0,0] = 1; case_v_s[1,0] = 2; case_v_s[2,0] = 3
-    case_v_s[-3,0] = 5; case_v_s[-2,0] = 6; case_v_s[-1,0] = 7
-    cor_yx_s = -(W_s - G_z_s)
-    I_corr_yx_s = vIntegral(np.mean(cor_yx_s, axis=1), y_s.size, y_s)
-    du_dy_s = diffu_dy((np.reshape(GblU_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
-    visc_yx_s = (1/Re_lambda) * du_dy_s
-    tau_yx_s = I_corr_yx_s + np.mean(visc_yx_s, axis=1) - np.mean(Rxy_s, axis=1)
-    cor_yz_s = (U_s - G_x_s)
-    I_corr_yz_s = vIntegral(np.mean(cor_yz_s, axis=1), y_s.size, y_s)
-    dw_dy_s = diffu_dy((np.reshape(GblW_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
-    visc_yz_s = (1/Re_lambda) * dw_dy_s
-    tau_yz_s = -I_corr_yz_s + np.mean(visc_yz_s, axis=1) - np.mean(Ryz_s, axis=1)
-    AVG_TKE_V_s = np.mean(TKE_s, axis=0)
-    x_s = np.linspace(0, 1, 250)
-    AVG_TKE_V_s_i = np.interp(x, x_s, AVG_TKE_V_s)
-    s1.close()
+    # Centralised in functions.load_smooth_case so PhAvg.py and results.py share
+    # exactly one implementation (single source of truth — cannot diverge).
+    _sm = load_smooth_case(cwd + smooth_nc_path, x, nu, Re_lambda)
+    sy = _sm['sy']; nys = _sm['nys']
+    U_s = _sm['U_s']; V_s = _sm['V_s']; W_s = _sm['W_s']
+    su = _sm['su']; sw = _sm['sw']; alpha_s = _sm['alpha_s']
+    ustr_s1 = _sm['ustr_s1']; alpha_str_s = _sm['alpha_str_s']
+    y_s = _sm['y_s']; y_s_p = _sm['y_s_p']
+    rU_s = _sm['rU_s']; rV_s = _sm['rV_s']; rW_s = _sm['rW_s']
+    G_x_s = _sm['G_x_s']; G_z_s = _sm['G_z_s']; G_s = _sm['G_s']
+    U_s_p = _sm['U_s_p']; W_s_p = _sm['W_s_p']
+    GblU_s = _sm['GblU_s']; GblW_s = _sm['GblW_s']
+    Rxx_s = _sm['Rxx_s']; Rxy_s = _sm['Rxy_s']; Ryy_s = _sm['Ryy_s']
+    Ryz_s = _sm['Ryz_s']; Rzz_s = _sm['Rzz_s']
+    TKE_s = _sm['TKE_s']; case_v_s = _sm['case_v_s']
+    cor_yx_s = _sm['cor_yx_s']; I_corr_yx_s = _sm['I_corr_yx_s']
+    du_dy_s = _sm['du_dy_s']; visc_yx_s = _sm['visc_yx_s']; tau_yx_s = _sm['tau_yx_s']
+    cor_yz_s = _sm['cor_yz_s']; I_corr_yz_s = _sm['I_corr_yz_s']
+    dw_dy_s = _sm['dw_dy_s']; visc_yz_s = _sm['visc_yz_s']; tau_yz_s = _sm['tau_yz_s']
+    AVG_TKE_V_s = _sm['AVG_TKE_V_s']; x_s = _sm['x_s']; AVG_TKE_V_s_i = _sm['AVG_TKE_V_s_i']
     SMOOTH_COLOR = 'grey'
     SMOOTH_LS = '--'
 
     # ══════════════════════════════════════════════════════════════════════════
     # ═══  KEY FLOW PARAMETERS — smooth vs orographic comparison  ═════════════
     # ══════════════════════════════════════════════════════════════════════════
-    _fp_intg = getattr(np, 'trapezoid', np.trapz)   # numpy ≥2.0 renamed trapz
+    _fp_intg = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz  # numpy ≥2.0 renamed trapz
 
     # Reference friction velocities
     _fp_ustar_o  = float(u_star2[hill_hgt])   # Method-2 u* at hill-crest height
@@ -1305,13 +1257,109 @@ if (1 == postprocess):
     print(f'{_fp_sep}\n')
     # ══════════════════════════════════════════════════════════════════════════
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # ═══  CONSOLIDATED RESULTS SUMMARY (orographic case)  ═════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    # Single aligned table of the headline geometric and flow quantities, so the
+    # user sees the important values at a glance without hunting through plots.
+    _sum_CD        = float(u_star1)**2 / float(G_inf)**2          # drag coefficient
+    _sum_turn_deg  = float(np.degrees(np.arctan(np.ravel(inst_alpha)[hill_hgt])))
+    print_summary_table('RESULTS SUMMARY — orographic case', [
+        ('section', 'Geometry'),
+        ('Valley crest height h (grid cells)',   hill_hgt,                  'd'),
+        ('Valley crest height h (physical)',     float(y[hill_hgt]),        '.5e'),
+        ('Valley crest height h+ (wall units)',  float(y_in[hill_hgt]),     '.2f'),
+        ('Flank-top index',                      int(flk_hgt),              'd'),
+        ('Flank width (grid cells)',             int(len(flk_wdt)),         'd'),
+        ('section', 'Flow parameters'),
+        ('Reynolds number Re',                   Re,                        '.0f'),
+        ('Friction Reynolds number Re_tau',      Re_tau,                    '.1f'),
+        ('Kinematic viscosity nu',               nu,                        '.5e'),
+        ('Geostrophic speed G_inf',              G_inf,                     '.5f'),
+        ('section', 'Friction velocity (4 methods)'),
+        ('u* - M2 (mean momentum balance)',      u_star,                    '.5f'),
+        ('u* - M2 at crest  u_star2[h]',         float(u_star2[hill_hgt]),  '.5f'),
+        ('u* - M1 (surface integral)',           u_star1,                   '.5f'),
+        ('u* - M3 (shifted column)',             u_star3,                   '.5f'),
+        ('Surface turning angle (deg)',          _sum_turn_deg,             '.2f'),
+        ('section', 'Drag'),
+        ('Orographic form drag D_form',          D_form_oro,                '.6f'),
+        ('Pressure (form) drag P_drag',          P_drag,                    '.6f'),
+        ('Streamwise force Fyx',                  Fyx,                       '.6f'),
+        ('Spanwise force Fyz',                    Fyz,                       '.6f'),
+        ('Drag coefficient CD = u*1^2 / G^2',    _sum_CD,                   '.5f'),
+        ('section', 'Curve fits'),
+        ('Log-law kappa',                        kappa_loglaw,              '.4f'),
+        ('Log-law displacement d_m+',            d_m_loglaw,                '.2f'),
+        ('Log-law roughness z0m+',               z0m_loglaw,                '.5f'),
+        ('Log-law fit R^2',                      _best_r2,                  '.4f'),
+        ('Canopy attenuation alpha',             alpha_canopy,              '.4f'),
+    ])
     # ──────────────────────────────────────────────────────────────────────────
-    
-    
+
+
 # %%
 if (1 == plotRes):
     res_dispz    = np.sqrt(DispVelU**2 + DispVelV**2)
     res_phavg_uv = np.sqrt(AvgPhU**2 + AvgPhV**2)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Valley-crest height + boundary-layer sublayer levels (inner units z+).
+    # The dashed 'h' line (mark_h) sits at y_in[h_idx] = y_in[94] (h_idx defined
+    # below; the crest grid index, not the dynamic hill_hgt which here = 93).
+    # Discrete on-curve markers (see functions.mark_layers / LAYER_MARKER_NAMES):
+    #   'o' viscous top  z+≈5  |  's' canopy top / roughness start (oro)
+    #   '^' log start (smooth z+≈30 / oro z+≈75)
+    #   'D' log top   (smooth z+≈100 / oro z+≈200)
+    # Layer structure (for future reference):
+    #   Smooth     : viscous(≤5) | buffer(5–30)         | log(30–100)
+    #   Orographic : viscous(≤5) | canopy(5–canopy_top) | roughness(canopy_top–75)
+    #                | log(75–200)
+    #   canopy_top = z+ where the x-averaged dispersive stress uv_t (= UV_disp)
+    #                peaks and begins to dissipate (start of the roughness layer).
+    # filled marker = valley curve ; hollow marker = smooth-wall curve.
+    # ─────────────────────────────────────────────────────────────────────
+    def _zidx(z_arr, zval):
+        """Index of inner-unit height array z_arr closest to target z+ = zval."""
+        return int(np.argmin(np.abs(np.asarray(z_arr) - zval)))
+
+    # Valley-crest grid index for the 'h' line.  Fixed at 94 = y_in[94], the
+    # project's crest-index convention (cf. conv_top = AvgPhU[94:,...]).  NOTE:
+    # the dynamic hill_hgt = np.max(eps_hgt) - 1 evaluates to 93 for the eps in
+    # this directory, so 'h' uses h_idx (=94) explicitly, not hill_hgt.
+    h_idx = 94
+
+    # Orographic (valley) sublayer indices on y_in  (= y_inner = y·u*/ν)
+    _iv_visc   = _zidx(y_in,   5)    # viscous sublayer top      z+ ≈ 5
+    _iv_buf    = _zidx(y_in,  30)    # buffer-height reference    z+ ≈ 30 (requested)
+    _iv_logbeg = _zidx(y_in,  75)    # roughness top / log start  z+ ≈ 75
+    _iv_logend = _zidx(y_in, 200)    # log-layer top              z+ ≈ 200
+    # canopy top / roughness-layer start: the (positive) peak of the x-averaged
+    # dispersive stress uv_t (loaded as UV_disp), where it stops rising and
+    # begins to dissipate.  Solid cells are zeroed (UV_disp*mask0) before the
+    # intrinsic (fluid) average, because the dispersive velocity is non-zero
+    # inside the IBM body.  Signed argmax (not |·|): the profile reverses sign
+    # higher up, so the first positive peak ≈ crest height is the canopy top.
+    _disp_uv_prof = avg_c(eps, UV_disp*mask0, axis=1)
+    _iv_canopy = int(np.argmax(_disp_uv_prof[:_iv_logbeg + 1]))
+
+    # Smooth-wall sublayer indices on y_s_p  (smooth inner coordinate)
+    _is_visc   = _zidx(y_s_p,   5)   # viscous sublayer top   z+ ≈ 5
+    _is_buf    = _zidx(y_s_p,  30)   # buffer top / log start z+ ≈ 30
+    _is_logend = _zidx(y_s_p, 100)   # log-layer top          z+ ≈ 100
+
+    # symbol -> index marker dictionaries passed to mark_layers()
+    _LYR_ORO = {'o': _iv_visc, 's': _iv_canopy, '^': _iv_logbeg, 'D': _iv_logend}
+    _LYR_SMO = {'o': _is_visc, '^': _is_buf,    'D': _is_logend}
+
+    print('Sublayer indices (oro): viscous z+=%.1f@%d, canopy z+=%.1f@%d, '
+          'log-start z+=%.1f@%d, log-top z+=%.1f@%d'
+          % (y_in[_iv_visc], _iv_visc, y_in[_iv_canopy], _iv_canopy,
+             y_in[_iv_logbeg], _iv_logbeg, y_in[_iv_logend], _iv_logend))
+    print('Sublayer indices (smooth): viscous z+=%.1f@%d, buffer z+=%.1f@%d, '
+          'log-top z+=%.1f@%d'
+          % (y_s_p[_is_visc], _is_visc, y_s_p[_is_buf], _is_buf,
+             y_s_p[_is_logend], _is_logend))
 
 # %% ###########################################################################
     # All plots use inner-scaled coordinates (x_in = x/l_in, y_in = y/l_in) unless noted.
@@ -1400,11 +1448,17 @@ if (1 == plotRes):
     # Hodograph
     plt.figure(figsize=(8, 6), dpi=300)
     plt.plot(u_plus_rot, w_plus_rot, label='valley', color='blue', linestyle='-')
-    plt.plot(np.mean(rU_s,axis=1) -np.mean(rW_s,axis=1), label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    plt.plot(su, -sw, label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    # z+ is not an axis here, so layer levels + crest h are placed ON the (u,w)
+    # curve via their indices (oro filled, smooth hollow; 'X' = crest h@94).
+    mark_layers(u_plus_rot, w_plus_rot, _LYR_ORO, filled=True)
+    mark_layers(u_plus_rot, w_plus_rot, {'X': h_idx}, filled=True)
+    mark_layers(su, -sw, _LYR_SMO, filled=False)
     plt.title('Hodograph')
     plt.ylabel(r'$\langle \bar{v} \rangle^{-} $')
     plt.xlabel(r'$\langle \bar{u} \rangle^{-} $')
     plt.legend()
+    add_marker_legend()
     plt.grid(True)
     plt.show()
     
@@ -1413,11 +1467,15 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
     plt.plot(y_inner[1:], (inst_alpha[1:]*(180/np.pi)), label='valley', color='blue', linestyle='-')
     plt.plot(y_s_p[1:], -alpha_s[1:]*(180/np.pi), label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    mark_layers(y_inner, inst_alpha*(180/np.pi), _LYR_ORO, filled=True)
+    mark_layers(y_s_p, -alpha_s*(180/np.pi), _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title('Rotation angle')
     plt.ylabel(r'$\alpha (\degree)$')
     plt.xlabel(r'$z^{+}$')
     plt.xscale("log")
     plt.legend()
+    add_marker_legend()
     plt.grid(True)
     plt.show()
     
@@ -1433,6 +1491,11 @@ if (1 == plotRes):
     plt.plot(y_s_p, I_corr_yx_s, color='blue', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, np.mean(visc_yx_s, axis=1), color='red', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, -np.mean(Rxy_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    mark_layers_multi(y_inner, [-I_corr_yx, visc_yx, -np.mean(rey_uv, axis=1),
+                                dudt, total_tau_yx], _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [I_corr_yx_s, np.mean(visc_yx_s, axis=1),
+                              -np.mean(Rxy_s, axis=1)], _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zx}$')
     plt.xlabel(r'$z^{+}$')
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
@@ -1445,6 +1508,7 @@ if (1 == plotRes):
         mlines.Line2D([], [], color='black',      linestyle='-',  label='Valley'),
         mlines.Line2D([], [], color=SMOOTH_COLOR, linestyle=SMOOTH_LS, label='Smooth'),
     ])
+    add_marker_legend()
     plt.grid(True)
     plt.savefig('Shear Stress XY', dpi=300)
     plt.show()
@@ -1464,6 +1528,13 @@ if (1 == plotRes):
     plt.plot(y_s_p, -(np.mean(Rxy_s, axis=1))/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
 
+    mark_layers_multi(y_inner, [-I_corr_yx/u_star**2, visc_yx/u_star**2,
+                                -(avg_c(eps, rey_uv, axis=1))/u_star**2, dudt/u_star**2],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [I_corr_yx_s/ustr_s1**2, np.mean(visc_yx_s, axis=1)/ustr_s1**2,
+                              -(np.mean(Rxy_s, axis=1))/ustr_s1**2, np.zeros(nys)],
+                      _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zx}$')
     plt.xlabel(r'$z^{+}$')
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
@@ -1475,6 +1546,7 @@ if (1 == plotRes):
         mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
         mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
     ])
+    add_marker_legend()
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.1, 1.0)
@@ -1493,6 +1565,12 @@ if (1 == plotRes):
     plt.plot(y_s_p, -I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, np.mean(visc_yz_s, axis=1), color='red', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    mark_layers_multi(y_inner, [-I_corr_yz, avg_c(eps, visc_yz, axis=1),
+                                avg_c(eps, rey_vw, axis=1), dwdt, -total_tau_yz],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [-I_corr_yz_s, np.mean(visc_yz_s, axis=1),
+                              np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')
     plt.xlabel(r'$z^{+}$')
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
@@ -1504,6 +1582,7 @@ if (1 == plotRes):
         mlines.Line2D([], [], color='black',       linestyle='-',       label='Total / Valley'),
         mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
     ])
+    add_marker_legend()
     plt.grid(True)
     plt.savefig('Shear Stress ZY', dpi=300)
     plt.show()
@@ -1523,6 +1602,13 @@ if (1 == plotRes):
     plt.plot(y_s_p, np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
     plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
 
+    mark_layers_multi(y_inner, [-I_corr_yz/u_star**2, avg_c(eps, visc_yz, axis=1)/u_star**2,
+                                avg_c(eps, rey_vw, axis=1)/u_star**2, dwdt/u_star**2],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [-I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
+                              np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
+                      _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')
     plt.xlabel(r'$z^{+}$')
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
@@ -1534,6 +1620,7 @@ if (1 == plotRes):
         mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
         mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
     ])
+    add_marker_legend()
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.5, 1)
@@ -1581,6 +1668,7 @@ if (1 == plotRes):
     # Friction Velocity Profile
     plt.figure(figsize=(8, 8), dpi=300)
     plt.plot(u_star2[:210], y_in[:210], label='u_{star}', color='blue', linestyle='-')
+    mark_h(y_in[h_idx], 'h')
     plt.title('Friction Velocity')
     plt.ylabel(r'$z^+$')
     plt.xlabel(r'$u_{*}$')
@@ -1617,11 +1705,16 @@ if (1 == plotRes):
         Line2D([0], [0], color='black',      linestyle='--', lw=2),
         Line2D([0], [0], color=SMOOTH_COLOR, linestyle='-',  lw=2)]
     custom_handles = color_handles + style_handles
+    # Valley curves use surface-relative (shifted) z+, so absolute-z+ layer
+    # markers are placed only on the smooth (unshifted) profile.
+    mark_layers_multi(y_s_p, [GblU_s/ustr_s1, -GblW_s/ustr_s1], _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title('Velocity Profile')
     plt.ylabel(r'$\langle \bar{u}_i \rangle ^+$')
     plt.xlabel(r'$z^{+}$')
     plt.xscale("log")
     plt.legend(custom_handles, custom_labels, loc='upper left')
+    add_marker_legend(oro=False)
     plt.grid(True)
     plt.savefig('fig/LogLaw', dpi=300)
     plt.show()
@@ -1639,8 +1732,9 @@ if (1 == plotRes):
     plt.plot(y_in[eps_hgt[512]:limity]-y_in[eps_hgt[512]],w_plus[eps_hgt[512]:limity,512], label='Bottom', color='red', linestyle='--')
     plt.plot(y_in[(eps_hgt[eps_rf]-1):limity]-y_in[(eps_hgt[eps_rf]-1)],w_plus[(eps_hgt[eps_rf]-1):limity,eps_rf], label='Flank right', color='magenta', linestyle='--')
     
-    plt.axvline(x=(y[hill_hgt]*u_star/nu), color='black', linestyle='--', linewidth=1)
-    plt.text((y[hill_hgt]*u_star/nu), 0.5, '$h$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    # Valley curves are surface-relative (shifted) and there is no smooth curve
+    # here, so only the crest line h is marked (absolute-z+ layer markers omitted).
+    mark_h(y_in[h_idx], 'v')
     plt.axvline(x=(Re_tau), color='black', linestyle='--', linewidth=1)
     plt.text((Re_tau), 0.5, r'$\delta$', rotation=90, verticalalignment='center', horizontalalignment='right')
     
@@ -1839,8 +1933,9 @@ if (1 == plotRes):
     plt.plot(_z_can_v, u_canopy_v, color='green', linestyle='--')
     plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
     plt.text((Re_tau), 0.5, r'$\delta_{o}$', rotation=90, verticalalignment='center', horizontalalignment='right')
-    plt.axvline(x=(y_in[hill_hgt]), color='black', linestyle='--', linewidth=1)
-    plt.text((y_in[hill_hgt]), 0.5, r'$h$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    mark_layers_multi(y_in, [_valley_u, w_plus_rot/0.0617], _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [_smooth_u, -np.mean(W_s_p, axis=1)], _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
 
     plt.xscale('log')
     plt.xlabel(r'$z^+$')
@@ -1856,7 +1951,9 @@ if (1 == plotRes):
                label=rf'Log-law smooth ($\kappa$={kappa_sml:.3f}, $z^+\!\in\![23,100]$)'),
         Line2D([0], [0], color='green',      linestyle='--',      label=canopy_legend),
     ]
+    # This is the reference plot for the layer-marker key (filled=oro, hollow=smooth).
     plt.legend(handles=legend_elements, fontsize=7)
+    add_marker_legend()
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
     plt.title("Velocity Profile with and without Orography")
     plt.savefig('fig/Velocity_Profile_with_and_without_Orography', dpi=300)
@@ -1866,6 +1963,7 @@ if (1 == plotRes):
     # Velocity Profile in Roughness layer
     plt.figure(figsize=(8,6))
     plt.plot(y_in[:157], np.log(u_plus_rot/u_star)[:157], color='red', linestyle='-')
+    mark_h(y_in[h_idx], 'v')
     plt.xscale('log')  # Logarithmic x-axis
     plt.xlabel(r'$z^+$')  # x-axis label
     # plt.yscale('log')  # Logarithmic x-axis
@@ -1887,13 +1985,15 @@ if (1 == plotRes):
     plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90, verticalalignment='center', horizontalalignment='right',
              color=SMOOTH_COLOR)
     
-    plt.axvline(x=(y[hill_hgt]/l_in), color='black', linestyle='-', linewidth=1)
-    plt.text((y[hill_hgt]/l_in), 0.5, '$h$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    mark_layers(y_in, avg_c(eps, TKE, axis=1)/ustr_s1**2, _LYR_ORO, filled=True)
+    mark_layers(y_s_p, np.mean(TKE_s, axis=1)/ustr_s1**2, _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
     plt.title('TKE profile')
     plt.xlabel(r'$z^{+}$')
     plt.ylabel(r'$TKE^+$')
     plt.xscale('log')
     plt.legend()
+    add_marker_legend()
     plt.grid(True)
     plt.savefig('TKE_profile', dpi=300)
     plt.show()
@@ -1922,10 +2022,14 @@ if (1 == plotRes):
     plt.plot(conv_lf[:450],     y_in[:450], label='Left flank', color="red")
     plt.plot(conv_bottom[:450], y_in[:450], label='Valley bottom', color="black")
     plt.plot(conv_rf[:450],     y_in[:450], label='Right flank', color="blue")
+    for _cv in (conv_top, conv_lf, conv_bottom, conv_rf):    # oro layers on every flank curve
+        mark_layers(_cv, y_in, _LYR_ORO, filled=True)
+    mark_h(y_in[h_idx], 'h')
     plt.xlabel(r'$u_{j} \frac{\partial u_i}{\partial x_j}$')
     plt.ylabel('$z^{+}$')
     plt.title("Advection ")
     plt.legend()
+    add_marker_legend(smooth=False)
     # Vertical grid lines only
     plt.grid(axis='x')
     plt.grid(axis='y')
@@ -1940,10 +2044,14 @@ if (1 == plotRes):
     plt.plot(conv_lf[:200],     y_in[:200], label='Left flank', color="red")
     plt.plot(conv_bottom[:200], y_in[:200], label='Valley bottom', color="black")
     plt.plot(conv_rf[:200],     y_in[:200], label='Right flank', color="blue")
+    for _cv in (conv_top, conv_lf, conv_bottom, conv_rf):    # oro layers on every flank curve
+        mark_layers(_cv, y_in, _LYR_ORO, filled=True)
+    mark_h(y_in[h_idx], 'h')
     plt.xlabel(r'$u_{j} \frac{\partial u_i}{\partial x_j}$')
     plt.ylabel('$z^{+}$')
     plt.title("Advection ")
     plt.legend()
+    add_marker_legend(smooth=False)
     # Vertical grid lines only
     plt.grid(axis='x')
     plt.grid(axis='y')
