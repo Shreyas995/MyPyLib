@@ -1374,89 +1374,8 @@ if (1 == plotRes):
           % (y_s_p[_is_visc], _is_visc, y_s_p[_is_buf], _is_buf,
              y_s_p[_is_logend], _is_logend))
 
-# %% ###########################################################################
-    # All plots use inner-scaled coordinates (x_in = x/l_in, y_in = y/l_in) unless noted.
-    # Orography outline (x_oro_in, y_oro_in) is overlaid on 2-D colour maps.
-    # Phase Average
-    plot2D_div(x_in, y_in[:limity], AvgPhU[:limity,:],'',r'$\left\langle\overline{(U_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgU' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], AvgPhV[:limity,:],'',r'$\left\langle\overline{(W_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgW' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], AvgPhW[:limity,:],'',r'$\left\langle\overline{(V_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgV' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], AvgP[:limity,:],'',r'$\left\langle\overline{(P_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], AvgScal[:limity,:],'',r'$\left\langle\overline{(\theta)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Potential Temperature' + '.png', x_oro_in, y_oro_in, 1000)
-    plot_phavg_velocity_3D(x_in, y_in[:limity],
-                           AvgPhU[:limity,:], AvgPhV[:limity,:], AvgPhW[:limity,:],
-                           eps[:limity,:], 1000,
-                           x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'PhAvg_3D_velocity.png')
 
-# %% ###########################################################################
-    # Dispersive Velocity Component
-    plot2D_div(x_in, y_in[:limity], DispVelU[:limity,:],'',r'$\widetilde{U}_y(x,z) = \left\langle\overline{(U_y)}\right\rangle(x, z) - (\langle \overline{U}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispU' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], DispVelV[:limity,:],'',r'$\widetilde{W}_y(x,z) = \left\langle\overline{(W_y)}\right\rangle(x, z) - (\langle \overline{W}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispW' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:],'',r'$\widetilde{V}_y(x,z) = \left\langle\overline{(V_y)}\right\rangle(x, z) - (\langle \overline{V}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
-    plot_phavg_velocity_3D(x_in, y_in[:limity],
-                           DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
-                           eps[:limity,:], 1000,
-                           x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'Disp_3D_velocity.png')
-    
-# %% ###########################################################################    
-    # Streamlines and vorticity
-    plot2D_div(x_in, y_in[:limity], (vort_z[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \overline{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_div(x_in, y_in[:limity], (disp_vortz[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \widetilde{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Disp_Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
-    plot2D_streamlines_vorticity(x_in, y_in[:limity], DispVelU[:limity,:], DispVelV[:limity,:],res_dispz[:limity,:],eps[:limity,:],'Dispersive Resultant','',r'$x$',r'$z$', cwd + '/fig/' + 'Dispersive Resultant' + '.png', x_oro_in, y_oro_in ,1000)
-    plot2D_streamlines_vorticity(x_in, y_in[:limity], AvgPhU[:limity,:], AvgPhV[:limity,:],res_phavg_uv[:limity,:],eps[:limity,:],'Resultant flow','',r'$x$',r'$z$', cwd + '/fig/' + 'Resultant flow' + '.png', x_oro_in, y_oro_in,1000)
-
-# %% This cannnot be calculated unless one has 3D fields
-    # plot2D_streamlines_vorticityX(x, y[:limity], DispVelV[:limity,:], DispVelW[:limity,:],disp_vortx[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlineyz' + '.png', x_oro, y_oro,1000)
-    # plot2D_streamlines_vorticityX(x, y[:limity], DispVelU[:limity,:], DispVelW[:limity,:],disp_vorty[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinezx' + '.png', x_oro, y_oro,1000)
-    
-# %% ###########################################################################
-    # Plot derivatives
-    plot2D_div(x, y[:limity], dv_dx[:limity,:],'', 'dv_dx',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'dv_dx' + '.png', x_oro, y_oro ,1000) # quantity dv/dx where v is vertical component 
-    # Streamlines of the phase average
-    plot2D_streamlines_vorticityZ(x_in, y_in[:200], DispVelU[:200,:], DispVelV[:200,:], disp_vortz[:200,:],'Stream--vorticity',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinexy' + '.png', x_oro_in, y_oro_in,1000)
-    plot2D_div(x, y[:limity], res_phavg_uv[:limity,:],'', 'ResPhXY',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'ResPhXY' + '.png', x_oro, y_oro ,1000)
-    
-# %%###########################################################################
-    # orographic wave drag
-    # plot2D_div(x, y, AvgPhU,'','Phase Avg U',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgU_f' + '.png', x_oro, y_oro, 20)
-    # plot2D_div(x, y, AvgPhV,'','Phase Avg W',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgW_f' + '.png', x_oro, y_oro, 20)
-    # plot2D_div(x, y, AvgPhW,'','Phase Avg V',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgV_f' + '.png', x_oro, y_oro, 20)
-    
-# %%###########################################################################
-    # TKE
-    plot2D_div(x_in, y_in[:limity], TKE[:limity,:], '', 'TKE', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'TKE' + '.png', x_oro_in, y_oro_in, 1000)
-    
-# %%###########################################################################
-    # Reynolds stresses
-    plot2D_div(x, y[:limity], rey_uu[:limity,:], '', 'Reynolds stress (Ruu)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruu' + '.png', x_oro, y_oro, 1000)
-    plot2D_div(x, y[:limity], rey_uv[:limity,:], '', 'Reynolds stress (Ruw)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruw' + '.png', x_oro, y_oro, 1000)
-    plot2D_div(x, y[:limity], rey_uw[:limity,:], '', 'Reynolds stress (Ruv)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruv' + '.png', x_oro, y_oro, 1000)
-    plot2D_div(x, y[:limity], rey_vv[:limity,:], '', 'Reynolds stress (Rww)', r'$x$',r'$z$', cwd + '/fig/' + 'Rww' + '.png', x_oro, y_oro, 1000)
-    plot2D_div(x, y[:limity], rey_vw[:limity,:], '', 'Reynolds stress (Rwv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rwv' + '.png', x_oro, y_oro, 1000)
-    plot2D_div(x, y[:limity], rey_ww[:limity,:], '', 'Reynolds stress (Rvv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rvv' + '.png', x_oro, y_oro, 1000)
-    
-# %%###########################################################################
-    # Vorticity
-    # plot2D_div(x, y[:limity], omega_x[:limity,:], '', 'Vorticity X', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityX' + '.png', x_oro, y_oro, 50)
-    # plot2D_div(x, y[:300], omega_y[:300,:], '', 'Vorticity Z', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityZ' + '.png', x_oro, y_oro, 50)
-    # plot2D_div(x, y[:200], omega_z[:200,:], '', 'Vorticity Y', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityY' + '.png', x_oro, y_oro, 50)
-    # plot2D_streamlines_vorticityX(x, y[:limity], AvgPhU[:limity,:], AvgPhV[:limity,:],omega_y[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinezx' + '.png', x_oro, y_oro,1000)
-    
-# %%###########################################################################
-    # Vorticity contour map
-    plt.figure(figsize=(8,6))
-    plt.contourf(x, y[:limity], disp_vortz[:limity,:], levels=50, cmap='RdBu_r')  # transpose to match x-y orientation
-    plt.colorbar(label='Vorticity (ωz)')
-    plt.xlabel('X (streamwise)')
-    plt.ylabel('Z (vertical)')
-    plt.title('Dispersion velocity vorticity in XZ plane')
-    # plt.savefig(savename, dpi=300)
-    plt.show()
-    
-
+    # ==========================  WIND  /  VELOCITY  PROFILES  ==========================
 # %%###########################################################################
     # Hodograph
     plt.figure(figsize=(8, 6), dpi=300)
@@ -1490,204 +1409,6 @@ if (1 == plotRes):
     plt.legend()
     add_marker_legend()
     plt.grid(True)
-    plt.show()
-    
-# %%###########################################################################
-    # Shear Stress XY
-    # do not change the sign of the terms below. THey are particulary set for plotting convenience
-    plt.figure(figsize=(10, 6))
-    plt.plot(y_inner[:], -I_corr_yx[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], visc_yx[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], -(np.mean(rey_uv, axis=1))[:], label='Rey Stress', color='orange', linestyle='-')
-    plt.plot(y_inner[:], dudt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], total_tau_yx[:], label='Total', color='black', linestyle='-')
-    plt.plot(y_s_p, I_corr_yx_s, color='blue', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(visc_yx_s, axis=1), color='red', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, -np.mean(Rxy_s, axis=1), color='orange', linestyle=SMOOTH_LS)
-    mark_layers_multi(y_inner, [-I_corr_yx, visc_yx, -np.mean(rey_uv, axis=1),
-                                dudt, total_tau_yx], _LYR_ORO, filled=True)
-    mark_layers_multi(y_s_p, [I_corr_yx_s, np.mean(visc_yx_s, axis=1),
-                              -np.mean(Rxy_s, axis=1)], _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zx}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
-    plt.legend(handles=[
-        mlines.Line2D([], [], color='blue',       linestyle='-',  label='Coriolis'),
-        mlines.Line2D([], [], color='red',        linestyle='-',  label='Viscous'),
-        mlines.Line2D([], [], color='orange',     linestyle='-',  label='Rey Stress'),
-        mlines.Line2D([], [], color='saddlebrown',linestyle='-',  label='Temporal'),
-        mlines.Line2D([], [], color='black',      linestyle='-',  label='Total'),
-        mlines.Line2D([], [], color='black',      linestyle='-',  label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR, linestyle=SMOOTH_LS, label='Smooth'),
-    ])
-    add_marker_legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'Shear Stress XY.png'), dpi=300)
-    plt.show()
-    
-# %%###########################################################################
-    # Zoomed plot
-    plt.figure(figsize=(8, 6), dpi=300)
-    
-    # Valley case (solid lines)
-    plt.plot(y_inner[:limity], -I_corr_yx[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], visc_yx[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], -(avg_c(eps, rey_uv, axis=1))[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
-    plt.plot(y_inner[:limity], dudt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
-    # Smooth case (dashed)
-    plt.plot(y_s_p, I_corr_yx_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(visc_yx_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, -(np.mean(Rxy_s, axis=1))/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
-
-    mark_layers_multi(y_inner, [-I_corr_yx/u_star**2, visc_yx/u_star**2,
-                                -(avg_c(eps, rey_uv, axis=1))/u_star**2, dudt/u_star**2],
-                      _LYR_ORO, filled=True)
-    mark_layers_multi(y_s_p, [I_corr_yx_s/ustr_s1**2, np.mean(visc_yx_s, axis=1)/ustr_s1**2,
-                              -(np.mean(Rxy_s, axis=1))/ustr_s1**2, np.zeros(nys)],
-                      _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zx}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
-    plt.legend(handles=[
-        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
-        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
-    ])
-    add_marker_legend()
-    plt.grid(True)
-    plt.xlim(0, 200)
-    plt.ylim(-0.1, 1.0)
-    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress XY.png'), dpi=300)
-    plt.show()
-    
-# %%###########################################################################
-    # Shear Stress ZY
-    # do not change the sign of the terms below. THey are particulary set for plotting convenience
-    plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(y_inner[:], -I_corr_yz[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], (avg_c(eps, visc_yz, axis=1))[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], (avg_c(eps, rey_vw, axis=1))[:], label='Rey Stress', color='orange', linestyle='-')
-    plt.plot(y_inner[:], dwdt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], -total_tau_yz[:], label='Total', color='black', linestyle='-')
-    plt.plot(y_s_p, -I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(visc_yz_s, axis=1), color='red', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
-    mark_layers_multi(y_inner, [-I_corr_yz, avg_c(eps, visc_yz, axis=1),
-                                avg_c(eps, rey_vw, axis=1), dwdt, -total_tau_yz],
-                      _LYR_ORO, filled=True)
-    mark_layers_multi(y_s_p, [-I_corr_yz_s, np.mean(visc_yz_s, axis=1),
-                              np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zy}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
-    plt.legend(handles=[
-        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
-        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Total / Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
-    ])
-    add_marker_legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'Shear Stress ZY.png'), dpi=300)
-    plt.show()
-    
-# %%###########################################################################    
-    # Zoomed plot
-    plt.figure(figsize=(8, 6), dpi=300)
-
-    # Valley case (solid lines)
-    plt.plot(y_inner[:limity], -I_corr_yz[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], (avg_c(eps, visc_yz, axis=1))[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], (avg_c(eps, rey_vw, axis=1))[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
-    plt.plot(y_inner[:limity], dwdt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
-    # Smooth case (dashed)
-    plt.plot(y_s_p, -I_corr_yz_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(visc_yz_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
-    plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
-
-    mark_layers_multi(y_inner, [-I_corr_yz/u_star**2, avg_c(eps, visc_yz, axis=1)/u_star**2,
-                                avg_c(eps, rey_vw, axis=1)/u_star**2, dwdt/u_star**2],
-                      _LYR_ORO, filled=True)
-    mark_layers_multi(y_s_p, [-I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
-                              np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
-                      _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zy}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
-    plt.legend(handles=[
-        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
-        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
-    ])
-    add_marker_legend()
-    plt.grid(True)
-    plt.xlim(0, 200)
-    plt.ylim(-0.5, 1)
-    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress ZY.png'), dpi=300)
-    plt.show()
-
-# %%###########################################################################
-    # Streamwise Momentum Budget
-    # LHS: Temporal + MeanAdv + TurbAdv  =  RHS: Viscous + NetCoriolis
-    # _ny_mb = 200
-    # _us2   = u_star**2
-    # plt.figure(figsize=(10, 6), dpi=300)
-    # plt.plot(y_inner[:_ny_mb], mom_temporal[:_ny_mb] / _us2,  color='saddlebrown', linestyle='-', label='Temporal')
-    # plt.plot(y_inner[:_ny_mb], mom_mean_adv[:_ny_mb] / _us2,  color='green',       linestyle='-', label='Mean Advection')
-    # plt.plot(y_inner[:_ny_mb], mom_turb_adv[:_ny_mb] / _us2,  color='orange',      linestyle='-', label='Turbulent Advection')
-    # plt.plot(y_inner[:_ny_mb], mom_visc[:_ny_mb]     / _us2,  color='red',         linestyle='-', label='Viscous')
-    # plt.plot(y_inner[:_ny_mb], mom_coriolis[:_ny_mb] / _us2,  color='blue',        linestyle='-', label='Net Coriolis + Pressure')
-    # plt.title(r'Streamwise Momentum Budget $\langle \bar{u} \rangle$')
-    # plt.xlabel(r'$z^{+}$')
-    # plt.ylabel(r'Terms / $u_*^2$')
-    # plt.legend(handles=[
-    #     mlines.Line2D([], [], color='saddlebrown', linestyle='-', label='Temporal'),
-    #     mlines.Line2D([], [], color='green',       linestyle='-', label='Mean Advection'),
-    #     mlines.Line2D([], [], color='orange',      linestyle='-', label='Turbulent Advection'),
-    #     mlines.Line2D([], [], color='red',         linestyle='-', label='Viscous'),
-    #     mlines.Line2D([], [], color='blue',        linestyle='-', label='Net Coriolis + Pressure'),
-    # ])
-    # plt.grid(True)
-    # plt.savefig('fig/Momentum Budget', dpi=300)
-    # plt.show()
-
-# %%###########################################################################
-    # Wind profile
-    # plt.figure(figsize=(8, 6), dpi=300)
-    # plt.plot(avg_c(eps, corr_yx, axis=1), y, label='coriolis', color='blue', linestyle='-')
-    # plt.title('Wind profile')
-    # plt.ylabel(r'$z^{+}$')
-    # plt.xlabel(r'$wind$')
-    # plt.legend()
-    # plt.grid(True)
-    # plt.savefig('fig/Wind', dpi=300)
-    # plt.show()
-    
-# %%###########################################################################
-    # Friction Velocity Profile
-    plt.figure(figsize=(8, 8), dpi=300)
-    plt.plot(u_star2[:210], y_in[:210], label='u_{star}', color='blue', linestyle='-')
-    mark_h(y_in[h_idx], 'h')
-    plt.title('Friction Velocity')
-    plt.ylabel(r'$z^+$')
-    plt.xlabel(r'$u_{*}$')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'Friction velocity.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1769,13 +1490,6 @@ if (1 == plotRes):
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Zoomed_LogLaw.png'), dpi=300)
     plt.show()
-    
-# %%###########################################################################
-    # Monin Obukhov log layer — smooth-case comparison omitted (not available in PhAvg.py)
-    # plt.figure(figsize=(8,6))
-    # plt.plot(y_s_p, np.mean(U_s_p, axis=1),color='blue', linestyle='-' )
-    # plt.plot(y_s_p, np.mean(V_s_p, axis=1),color='red', linestyle='-')
-    # plt.plot(y_s_p, -np.mean(W_s_p, axis=1),color='black', linestyle='-')
     
 # %%###########################################################################
     # Velocity profile with and without orography.
@@ -1985,47 +1699,167 @@ if (1 == plotRes):
     plt.savefig(os.path.join(fig_dir, 'Velocity_profile_roughness_layer.png'), dpi=300)
     plt.show()
     
+
+    # =======================  MOMENTUM  /  SHEAR-STRESS  BALANCE  =====================
 # %%###########################################################################
-    # TKE Horizontal profile
-    plt.figure(figsize=(8,6))
-    
-    plt.plot(y_in[:460], (avg_c(eps, TKE, axis=1)/ustr_s1**2)[:460], label='valley', color='blue', linestyle='-')
-    plt.plot(y_s_p[:130], (np.mean(TKE_s, axis=1)/ustr_s1**2)[:130], label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
-    
-    plt.text((Re_tau), 0.5, r'$\delta_{v}$', rotation=90, verticalalignment='center', horizontalalignment='right')
-    plt.axvline(x=ustr_s1**2/nu, color=SMOOTH_COLOR, linestyle=':', linewidth=1)
-    plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90, verticalalignment='center', horizontalalignment='right',
-             color=SMOOTH_COLOR)
-    
-    mark_layers(y_in, avg_c(eps, TKE, axis=1)/ustr_s1**2, _LYR_ORO, filled=True)
-    mark_layers(y_s_p, np.mean(TKE_s, axis=1)/ustr_s1**2, _LYR_SMO, filled=False)
+    # Shear Stress XY
+    # do not change the sign of the terms below. THey are particulary set for plotting convenience
+    plt.figure(figsize=(10, 6))
+    plt.plot(y_inner[:], -I_corr_yx[:], label='Coriolis', color='blue', linestyle='-')
+    plt.plot(y_inner[:], visc_yx[:], label='Viscous', color='red', linestyle='-')
+    plt.plot(y_inner[:], -(np.mean(rey_uv, axis=1))[:], label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(y_inner[:], dudt, label='Temporal', color='saddlebrown', linestyle='-')
+    plt.plot(y_inner[:], total_tau_yx[:], label='Total', color='black', linestyle='-')
+    plt.plot(y_s_p, I_corr_yx_s, color='blue', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(visc_yx_s, axis=1), color='red', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, -np.mean(Rxy_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    mark_layers_multi(y_inner, [-I_corr_yx, visc_yx, -np.mean(rey_uv, axis=1),
+                                dudt, total_tau_yx], _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [I_corr_yx_s, np.mean(visc_yx_s, axis=1),
+                              -np.mean(Rxy_s, axis=1)], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
-    plt.title('TKE profile')
+    plt.title(r'Shear stress $\tau_{zx}$')
     plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'$TKE^+$')
-    plt.xscale('log')
-    plt.legend()
+    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
+    plt.legend(handles=[
+        mlines.Line2D([], [], color='blue',       linestyle='-',  label='Coriolis'),
+        mlines.Line2D([], [], color='red',        linestyle='-',  label='Viscous'),
+        mlines.Line2D([], [], color='orange',     linestyle='-',  label='Rey Stress'),
+        mlines.Line2D([], [], color='saddlebrown',linestyle='-',  label='Temporal'),
+        mlines.Line2D([], [], color='black',      linestyle='-',  label='Total'),
+        mlines.Line2D([], [], color='black',      linestyle='-',  label='Valley'),
+        mlines.Line2D([], [], color=SMOOTH_COLOR, linestyle=SMOOTH_LS, label='Smooth'),
+    ])
     add_marker_legend()
     plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'TKE_profile.png'), dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Shear Stress XY.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
-    # TKE distribution (streamwise variation of y-averaged TKE)
+    # Zoomed plot
     plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(x_in, AVG_TKE_V / (ustr_s1**2), label="valley", color="blue", linestyle="-")
-    plt.plot(x_in, AVG_TKE_V_s_i / (ustr_s1**2), label="smooth", color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    # Orography outline
-    black_line = (y[hill_hgt] / u_star) * (1 + np.cos(2 * x_in * np.pi / x_in[-1]))
-    plt.fill_between(x_in, black_line, color="black", alpha=1.0, label="IBM solid")
-    plt.plot(x_in, black_line, color="black", linestyle="-")
-    plt.title("TKE distribution")
-    plt.xlabel(r"$x^{+}$")
-    plt.ylabel(r"$TKE^+$")
+    
+    # Valley case (solid lines)
+    plt.plot(y_inner[:limity], -I_corr_yx[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
+    plt.plot(y_inner[:limity], visc_yx[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], -(avg_c(eps, rey_uv, axis=1))[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], dudt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
+    # Smooth case (dashed)
+    plt.plot(y_s_p, I_corr_yx_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(visc_yx_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, -(np.mean(Rxy_s, axis=1))/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
+
+    mark_layers_multi(y_inner, [-I_corr_yx/u_star**2, visc_yx/u_star**2,
+                                -(avg_c(eps, rey_uv, axis=1))/u_star**2, dudt/u_star**2],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [I_corr_yx_s/ustr_s1**2, np.mean(visc_yx_s, axis=1)/ustr_s1**2,
+                              -(np.mean(Rxy_s, axis=1))/ustr_s1**2, np.zeros(nys)],
+                      _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
+    plt.title(r'Shear stress $\tau_{zx}$')
+    plt.xlabel(r'$z^{+}$')
+    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
+    plt.legend(handles=[
+        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
+        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
+        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
+        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
+    ])
+    add_marker_legend()
+    plt.grid(True)
+    plt.xlim(0, 200)
+    plt.ylim(-0.1, 1.0)
+    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress XY.png'), dpi=300)
+    plt.show()
+    
+# %%###########################################################################
+    # Shear Stress ZY
+    # do not change the sign of the terms below. THey are particulary set for plotting convenience
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.plot(y_inner[:], -I_corr_yz[:], label='Coriolis', color='blue', linestyle='-')
+    plt.plot(y_inner[:], (avg_c(eps, visc_yz, axis=1))[:], label='Viscous', color='red', linestyle='-')
+    plt.plot(y_inner[:], (avg_c(eps, rey_vw, axis=1))[:], label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(y_inner[:], dwdt, label='Temporal', color='saddlebrown', linestyle='-')
+    plt.plot(y_inner[:], -total_tau_yz[:], label='Total', color='black', linestyle='-')
+    plt.plot(y_s_p, -I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(visc_yz_s, axis=1), color='red', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    mark_layers_multi(y_inner, [-I_corr_yz, avg_c(eps, visc_yz, axis=1),
+                                avg_c(eps, rey_vw, axis=1), dwdt, -total_tau_yz],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [-I_corr_yz_s, np.mean(visc_yz_s, axis=1),
+                              np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
+    plt.title(r'Shear stress $\tau_{zy}$')
+    plt.xlabel(r'$z^{+}$')
+    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
+    plt.legend(handles=[
+        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
+        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
+        mlines.Line2D([], [], color='black',       linestyle='-',       label='Total / Valley'),
+        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
+    ])
+    add_marker_legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'Shear Stress ZY.png'), dpi=300)
+    plt.show()
+    
+# %%###########################################################################    
+    # Zoomed plot
+    plt.figure(figsize=(8, 6), dpi=300)
+
+    # Valley case (solid lines)
+    plt.plot(y_inner[:limity], -I_corr_yz[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
+    plt.plot(y_inner[:limity], (avg_c(eps, visc_yz, axis=1))[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], (avg_c(eps, rey_vw, axis=1))[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], dwdt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
+    # Smooth case (dashed)
+    plt.plot(y_s_p, -I_corr_yz_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(visc_yz_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    plt.plot(y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
+
+    mark_layers_multi(y_inner, [-I_corr_yz/u_star**2, avg_c(eps, visc_yz, axis=1)/u_star**2,
+                                avg_c(eps, rey_vw, axis=1)/u_star**2, dwdt/u_star**2],
+                      _LYR_ORO, filled=True)
+    mark_layers_multi(y_s_p, [-I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
+                              np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
+                      _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
+    plt.title(r'Shear stress $\tau_{zy}$')
+    plt.xlabel(r'$z^{+}$')
+    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
+    plt.legend(handles=[
+        mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
+        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
+        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
+        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
+    ])
+    add_marker_legend()
+    plt.grid(True)
+    plt.xlim(0, 200)
+    plt.ylim(-0.5, 1)
+    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress ZY.png'), dpi=300)
+    plt.show()
+
+# %%###########################################################################
+    # Friction Velocity Profile
+    plt.figure(figsize=(8, 8), dpi=300)
+    plt.plot(u_star2[:limity], y_in[:limity], label='u_{star}', color='blue', linestyle='-')
+    mark_h(y_in[h_idx], 'h')
+    plt.title('Friction Velocity')
+    plt.ylabel(r'$z^+$')
+    plt.xlabel(r'$u_{*}$')
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'TKE_Distribution.png'), dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Friction velocity.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -2072,6 +1906,180 @@ if (1 == plotRes):
     plt.savefig(os.path.join(fig_dir, 'Advection.png'), dpi=300)
     plt.show()
 
+
+    # =============================  TURBULENCE  (TKE)  ===============================
+# %%###########################################################################
+    # TKE Horizontal profile
+    plt.figure(figsize=(8,6))
+    
+    plt.plot(y_in[:460], (avg_c(eps, TKE, axis=1)/ustr_s1**2)[:460], label='valley', color='blue', linestyle='-')
+    plt.plot(y_s_p[:130], (np.mean(TKE_s, axis=1)/ustr_s1**2)[:130], label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
+    
+    plt.text((Re_tau), 0.5, r'$\delta_{v}$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    plt.axvline(x=ustr_s1**2/nu, color=SMOOTH_COLOR, linestyle=':', linewidth=1)
+    plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90, verticalalignment='center', horizontalalignment='right',
+             color=SMOOTH_COLOR)
+    
+    mark_layers(y_in, avg_c(eps, TKE, axis=1)/ustr_s1**2, _LYR_ORO, filled=True)
+    mark_layers(y_s_p, np.mean(TKE_s, axis=1)/ustr_s1**2, _LYR_SMO, filled=False)
+    mark_h(y_in[h_idx], 'v')
+    plt.title('TKE profile')
+    plt.xlabel(r'$z^{+}$')
+    plt.ylabel(r'$TKE^+$')
+    plt.xscale('log')
+    plt.legend()
+    add_marker_legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'TKE_profile.png'), dpi=300)
+    plt.show()
+    
+# %%###########################################################################
+    # TKE distribution (streamwise variation of y-averaged TKE)
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.plot(x_in, AVG_TKE_V / (ustr_s1**2), label="valley", color="blue", linestyle="-")
+    plt.plot(x_in, AVG_TKE_V_s_i / (ustr_s1**2), label="smooth", color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    # Orography outline
+    black_line = (y[hill_hgt] / u_star) * (1 + np.cos(2 * x_in * np.pi / x_in[-1]))
+    plt.fill_between(x_in, black_line, color="black", alpha=1.0, label="IBM solid")
+    plt.plot(x_in, black_line, color="black", linestyle="-")
+    plt.title("TKE distribution")
+    plt.xlabel(r"$x^{+}$")
+    plt.ylabel(r"$TKE^+$")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'TKE_Distribution.png'), dpi=300)
+    plt.show()
+    
+
+    # ===============  FIELD  MAPS  &  SURFACE / IBM  DIAGNOSTICS  ====================
+# %% ###########################################################################
+    # All plots use inner-scaled coordinates (x_in = x/l_in, y_in = y/l_in) unless noted.
+    # Orography outline (x_oro_in, y_oro_in) is overlaid on 2-D colour maps.
+    # Phase Average
+    plot2D_div(x_in, y_in[:limity], AvgPhU[:limity,:],'',r'$\left\langle\overline{(U_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgU' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgPhV[:limity,:],'',r'$\left\langle\overline{(W_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgW' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgPhW[:limity,:],'',r'$\left\langle\overline{(V_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgV' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgP[:limity,:],'',r'$\left\langle\overline{(P_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgScal[:limity,:],'',r'$\left\langle\overline{(\theta)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Potential Temperature' + '.png', x_oro_in, y_oro_in, 1000)
+    plot_phavg_velocity_3D(x_in, y_in[:limity],
+                           AvgPhU[:limity,:], AvgPhV[:limity,:], AvgPhW[:limity,:],
+                           eps[:limity,:], 1000,
+                           x_oro_in, y_oro_in,
+                           cwd + '/fig/' + 'PhAvg_3D_velocity.png')
+
+# %% ###########################################################################
+    # Dispersive Velocity Component
+    plot2D_div(x_in, y_in[:limity], DispVelU[:limity,:],'',r'$\widetilde{U}_y(x,z) = \left\langle\overline{(U_y)}\right\rangle(x, z) - (\langle \overline{U}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispU' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispVelV[:limity,:],'',r'$\widetilde{W}_y(x,z) = \left\langle\overline{(W_y)}\right\rangle(x, z) - (\langle \overline{W}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispW' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:],'',r'$\widetilde{V}_y(x,z) = \left\langle\overline{(V_y)}\right\rangle(x, z) - (\langle \overline{V}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
+    plot_phavg_velocity_3D(x_in, y_in[:limity],
+                           DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
+                           eps[:limity,:], 1000,
+                           x_oro_in, y_oro_in,
+                           cwd + '/fig/' + 'Disp_3D_velocity.png')
+    
+# %% ###########################################################################    
+    # Streamlines and vorticity
+    plot2D_div(x_in, y_in[:limity], (vort_z[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \overline{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], (disp_vortz[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \widetilde{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Disp_Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_streamlines_vorticity(x_in, y_in[:limity], DispVelU[:limity,:], DispVelV[:limity,:],res_dispz[:limity,:],eps[:limity,:],'Dispersive Resultant','',r'$x$',r'$z$', cwd + '/fig/' + 'Dispersive Resultant' + '.png', x_oro_in, y_oro_in ,1000)
+    plot2D_streamlines_vorticity(x_in, y_in[:limity], AvgPhU[:limity,:], AvgPhV[:limity,:],res_phavg_uv[:limity,:],eps[:limity,:],'Resultant flow','',r'$x$',r'$z$', cwd + '/fig/' + 'Resultant flow' + '.png', x_oro_in, y_oro_in,1000)
+
+# %% This cannnot be calculated unless one has 3D fields
+    # plot2D_streamlines_vorticityX(x, y[:limity], DispVelV[:limity,:], DispVelW[:limity,:],disp_vortx[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlineyz' + '.png', x_oro, y_oro,1000)
+    # plot2D_streamlines_vorticityX(x, y[:limity], DispVelU[:limity,:], DispVelW[:limity,:],disp_vorty[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinezx' + '.png', x_oro, y_oro,1000)
+    
+# %% ###########################################################################
+    # Plot derivatives
+    plot2D_div(x, y[:limity], dv_dx[:limity,:],'', 'dv_dx',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'dv_dx' + '.png', x_oro, y_oro ,1000) # quantity dv/dx where v is vertical component 
+    # Streamlines of the phase average
+    plot2D_streamlines_vorticityZ(x_in, y_in[:200], DispVelU[:200,:], DispVelV[:200,:], disp_vortz[:200,:],'Stream--vorticity',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinexy' + '.png', x_oro_in, y_oro_in,1000)
+    plot2D_div(x, y[:limity], res_phavg_uv[:limity,:],'', 'ResPhXY',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'ResPhXY' + '.png', x_oro, y_oro ,1000)
+    
+# %%###########################################################################
+    # orographic wave drag
+    # plot2D_div(x, y, AvgPhU,'','Phase Avg U',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgU_f' + '.png', x_oro, y_oro, 20)
+    # plot2D_div(x, y, AvgPhV,'','Phase Avg W',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgW_f' + '.png', x_oro, y_oro, 20)
+    # plot2D_div(x, y, AvgPhW,'','Phase Avg V',r'$x$',r'$z$', cwd + '/fig/' + 'PhAvgV_f' + '.png', x_oro, y_oro, 20)
+    
+# %%###########################################################################
+    # TKE
+    plot2D_div(x_in, y_in[:limity], TKE[:limity,:], '', 'TKE', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'TKE' + '.png', x_oro_in, y_oro_in, 1000)
+    
+# %%###########################################################################
+    # Reynolds stresses
+    plot2D_div(x, y[:limity], rey_uu[:limity,:], '', 'Reynolds stress (Ruu)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruu' + '.png', x_oro, y_oro, 1000)
+    plot2D_div(x, y[:limity], rey_uv[:limity,:], '', 'Reynolds stress (Ruw)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruw' + '.png', x_oro, y_oro, 1000)
+    plot2D_div(x, y[:limity], rey_uw[:limity,:], '', 'Reynolds stress (Ruv)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruv' + '.png', x_oro, y_oro, 1000)
+    plot2D_div(x, y[:limity], rey_vv[:limity,:], '', 'Reynolds stress (Rww)', r'$x$',r'$z$', cwd + '/fig/' + 'Rww' + '.png', x_oro, y_oro, 1000)
+    plot2D_div(x, y[:limity], rey_vw[:limity,:], '', 'Reynolds stress (Rwv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rwv' + '.png', x_oro, y_oro, 1000)
+    plot2D_div(x, y[:limity], rey_ww[:limity,:], '', 'Reynolds stress (Rvv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rvv' + '.png', x_oro, y_oro, 1000)
+    
+# %%###########################################################################
+    # Vorticity
+    # plot2D_div(x, y[:limity], omega_x[:limity,:], '', 'Vorticity X', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityX' + '.png', x_oro, y_oro, 50)
+    # plot2D_div(x, y[:300], omega_y[:300,:], '', 'Vorticity Z', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityZ' + '.png', x_oro, y_oro, 50)
+    # plot2D_div(x, y[:200], omega_z[:200,:], '', 'Vorticity Y', r'$x$',r'$z$', cwd + '/fig/' + 'VorticityY' + '.png', x_oro, y_oro, 50)
+    # plot2D_streamlines_vorticityX(x, y[:limity], AvgPhU[:limity,:], AvgPhV[:limity,:],omega_y[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinezx' + '.png', x_oro, y_oro,1000)
+    
+# %%###########################################################################
+    # Vorticity contour map
+    plt.figure(figsize=(8,6))
+    plt.contourf(x, y[:limity], disp_vortz[:limity,:], levels=50, cmap='RdBu_r')  # transpose to match x-y orientation
+    plt.colorbar(label='Vorticity (ωz)')
+    plt.xlabel('X (streamwise)')
+    plt.ylabel('Z (vertical)')
+    plt.title('Dispersion velocity vorticity in XZ plane')
+    # plt.savefig(savename, dpi=300)
+    plt.show()
+    
+
+# %%###########################################################################
+    # Streamwise Momentum Budget
+    # LHS: Temporal + MeanAdv + TurbAdv  =  RHS: Viscous + NetCoriolis
+    # _ny_mb = 200
+    # _us2   = u_star**2
+    # plt.figure(figsize=(10, 6), dpi=300)
+    # plt.plot(y_inner[:_ny_mb], mom_temporal[:_ny_mb] / _us2,  color='saddlebrown', linestyle='-', label='Temporal')
+    # plt.plot(y_inner[:_ny_mb], mom_mean_adv[:_ny_mb] / _us2,  color='green',       linestyle='-', label='Mean Advection')
+    # plt.plot(y_inner[:_ny_mb], mom_turb_adv[:_ny_mb] / _us2,  color='orange',      linestyle='-', label='Turbulent Advection')
+    # plt.plot(y_inner[:_ny_mb], mom_visc[:_ny_mb]     / _us2,  color='red',         linestyle='-', label='Viscous')
+    # plt.plot(y_inner[:_ny_mb], mom_coriolis[:_ny_mb] / _us2,  color='blue',        linestyle='-', label='Net Coriolis + Pressure')
+    # plt.title(r'Streamwise Momentum Budget $\langle \bar{u} \rangle$')
+    # plt.xlabel(r'$z^{+}$')
+    # plt.ylabel(r'Terms / $u_*^2$')
+    # plt.legend(handles=[
+    #     mlines.Line2D([], [], color='saddlebrown', linestyle='-', label='Temporal'),
+    #     mlines.Line2D([], [], color='green',       linestyle='-', label='Mean Advection'),
+    #     mlines.Line2D([], [], color='orange',      linestyle='-', label='Turbulent Advection'),
+    #     mlines.Line2D([], [], color='red',         linestyle='-', label='Viscous'),
+    #     mlines.Line2D([], [], color='blue',        linestyle='-', label='Net Coriolis + Pressure'),
+    # ])
+    # plt.grid(True)
+    # plt.savefig('fig/Momentum Budget', dpi=300)
+    # plt.show()
+
+# %%###########################################################################
+    # Wind profile
+    # plt.figure(figsize=(8, 6), dpi=300)
+    # plt.plot(avg_c(eps, corr_yx, axis=1), y, label='coriolis', color='blue', linestyle='-')
+    # plt.title('Wind profile')
+    # plt.ylabel(r'$z^{+}$')
+    # plt.xlabel(r'$wind$')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.savefig('fig/Wind', dpi=300)
+    # plt.show()
+    
+# %%###########################################################################
+    # Monin Obukhov log layer — smooth-case comparison omitted (not available in PhAvg.py)
+    # plt.figure(figsize=(8,6))
+    # plt.plot(y_s_p, np.mean(U_s_p, axis=1),color='blue', linestyle='-' )
+    # plt.plot(y_s_p, np.mean(V_s_p, axis=1),color='red', linestyle='-')
+    # plt.plot(y_s_p, -np.mean(W_s_p, axis=1),color='black', linestyle='-')
+    
 # %%###########################################################################
     # Plot 1: IBM body-force magnitude |B|(x,z) near the IBM surface.
     # IBM_B_mag computed in postprocess; shown here restricted to z+ < 200.

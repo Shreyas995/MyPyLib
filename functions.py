@@ -1202,7 +1202,7 @@ def mark_h(pos, orient='v', label=True, lblpos=0.04, ha='right', ax=None,
 
 
 def mark_layers(xdata, ydata, idx_dict, ax=None, filled=True, color='black',
-                size=9, zorder=6, edgewidth=0.8):
+                size=6, zorder=6, edgewidth=0.8):
     """Place discrete boundary-layer markers on a curve.
 
     xdata, ydata : the x- and y-data arrays of the curve to mark on (e.g. z+ and
