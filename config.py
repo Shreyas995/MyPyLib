@@ -44,6 +44,7 @@ hill_hgt          = 94        # placeholder; overwritten from eps field at runti
 canopy_extra_cells = 20       # canopy top = hill_hgt + this many grid cells
 
 # ── 6. Runtime control flags ──────────────────────────────────────────────────
+# Each flag below takes only {0, 1}  (0 = off / skip, 1 = on / execute).
 cal_Avg        = 0  # 1 → recompute phase-average from raw field files
 verify_TimeAvg = 0  # 1 → run time-average verification checks
 save_avg       = 0  # 1 → write averaged fields to disk
@@ -54,7 +55,20 @@ plotRes        = 1  # 1 → generate result plots
 animate        = 0  # 1 → produce animation frames
 
 # ── 7. Derivative & interpolation settings ────────────────────────────────────
-# DY_METHOD: 'fornberg7' wins the kink benchmark on this grid (test_ddy_schemes.py)
+# DY_METHOD / D2Y_METHOD — wall-normal derivative scheme (CompactDerivatives2D).
+# Allowed values (case-insensitive; accepted aliases in parentheses):
+#   'compact'    (eta, pade)                 — 6th-order η-space Padé; best on a
+#                                              smooth mapping, but trembles at an
+#                                              abrupt spacing change (Zone-1 top).
+#   'fornberg7'  (fornberg, physical, phys,
+#                 nonuniform)                — 7-pt Fornberg on the actual y nodes;
+#                                              stays smooth across a grid kink.
+#   'fornberg5'                              — 5-pt Fornberg (more local at a kink).
+#   'fornberg9'                              — 9-pt Fornberg (higher formal order).
+#   'compact_nu' (compact_nonuniform,
+#                 nucompact)                 — 4th-order non-uniform Padé.
+#   'spline'     (cubic)                     — derivative of a C² cubic spline.
+# 'fornberg7' wins the kink benchmark on this grid (test_ddy_schemes.py).
 recompute_derivatives = True   # False → use cached .npy derivatives if available
 DY_METHOD  = 'fornberg7'       # first y-derivative scheme (CompactDerivatives2D)
 D2Y_METHOD = 'compact'         # second y-derivative scheme

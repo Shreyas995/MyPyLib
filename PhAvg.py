@@ -4,8 +4,18 @@
 #   Method 1: momentum-integral balance (u_star via total_tau_yx / total_tau_yz profiles)
 #   Method 2: direct surface integration of shear and pressure over the IBM body (u_star1)
 import os
-import re
 import sys
+# ── Per-simulation bootstrap ─────────────────────────────────────────────────
+# This file is normally run as a SYMLINK that lives in the simulation/data
+# directory but points to the master MyPyLib copy.  For a symlinked script
+# Python sets sys.path[0] to the *resolved* master dir, so a per-simulation
+# `config.py` placed next to the symlink would be ignored.  Prepend the data
+# directory (= dir of the symlink, via the un-resolved __file__) so a LOCAL
+# config.py / module overrides the master one; the master still supplies every
+# other module.  Falls back to the master config when no local copy exists.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ─────────────────────────────────────────────────────────────────────────────
+import re
 import csv
 import struct
 import math
