@@ -60,6 +60,9 @@ from compact_derivatives import (
 # Grid & differential operators
 # ─────────────────────────────────────────────────────────────────────────────
 cwd = str(os.path.dirname(__file__) + '/' )
+# All figures/plots are written to <data dir>/fig/ (created here if absent).
+fig_dir = os.path.join(cwd, 'fig')
+os.makedirs(fig_dir, exist_ok=True)
 x, y, z = read_grid(cwd)               # x: streamwise (periodic), y: wall-normal, z: spanwise
 nx = np.size(x)
 ny = np.size(y)
@@ -1082,7 +1085,7 @@ if (1 == postprocess):
     # ─── Smooth case (flat wall, neutral, Re=500) — loaded once, used in all plots ─
     # Centralised in functions.load_smooth_case so PhAvg.py and results.py share
     # exactly one implementation (single source of truth — cannot diverge).
-    _sm = load_smooth_case(cwd + smooth_nc_path, x, nu, Re_lambda)
+    _sm = load_smooth_case(smooth_nc_path, x, nu, Re_lambda)
     sy = _sm['sy']; nys = _sm['nys']
     U_s = _sm['U_s']; V_s = _sm['V_s']; W_s = _sm['W_s']
     su = _sm['su']; sw = _sm['sw']; alpha_s = _sm['alpha_s']
@@ -1520,7 +1523,7 @@ if (1 == plotRes):
     ])
     add_marker_legend()
     plt.grid(True)
-    plt.savefig('Shear Stress XY', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Shear Stress XY.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1560,7 +1563,7 @@ if (1 == plotRes):
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.1, 1.0)
-    plt.savefig('Zoomed Shear Stress XY', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress XY.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1594,7 +1597,7 @@ if (1 == plotRes):
     ])
     add_marker_legend()
     plt.grid(True)
-    plt.savefig('Shear Stress ZY', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Shear Stress ZY.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################    
@@ -1634,7 +1637,7 @@ if (1 == plotRes):
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.5, 1)
-    plt.savefig('Zoomed Shear Stress ZY', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Zoomed Shear Stress ZY.png'), dpi=300)
     plt.show()
 
 # %%###########################################################################
@@ -1684,7 +1687,7 @@ if (1 == plotRes):
     plt.xlabel(r'$u_{*}$')
     plt.legend()
     plt.grid(True)
-    plt.savefig('Friction velocity', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Friction velocity.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1726,7 +1729,7 @@ if (1 == plotRes):
     plt.legend(custom_handles, custom_labels, loc='upper left')
     add_marker_legend(oro=False)
     plt.grid(True)
-    plt.savefig('fig/LogLaw', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'LogLaw.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1764,7 +1767,7 @@ if (1 == plotRes):
     plt.xscale("log")
     plt.legend(custom_handles, custom_labels, loc='upper left')
     plt.grid(True)
-    plt.savefig('fig/Zoomed_LogLaw', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Zoomed_LogLaw.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1966,7 +1969,7 @@ if (1 == plotRes):
     add_marker_legend()
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
     plt.title("Velocity Profile with and without Orography")
-    plt.savefig('fig/Velocity_Profile_with_and_without_Orography', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Velocity_Profile_with_and_without_Orography.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -1979,7 +1982,7 @@ if (1 == plotRes):
     # plt.yscale('log')  # Logarithmic x-axis
     plt.ylabel(r'$\langle \bar{u_i} \rangle^+$')  # y-axis label
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.savefig('fig/Velocity_profile_roughness_layer', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Velocity_profile_roughness_layer.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -2005,7 +2008,7 @@ if (1 == plotRes):
     plt.legend()
     add_marker_legend()
     plt.grid(True)
-    plt.savefig('TKE_profile', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'TKE_profile.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -2022,7 +2025,7 @@ if (1 == plotRes):
     plt.ylabel(r"$TKE^+$")
     plt.legend()
     plt.grid(True)
-    plt.savefig('TKE_Distribution', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'TKE_Distribution.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -2044,7 +2047,7 @@ if (1 == plotRes):
     plt.grid(axis='x')
     plt.grid(axis='y')
     plt.tight_layout()
-    plt.savefig('Streamwise_Advection', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Streamwise_Advection.png'), dpi=300)
     plt.show()
     
 # %%###########################################################################
@@ -2066,7 +2069,7 @@ if (1 == plotRes):
     plt.grid(axis='x')
     plt.grid(axis='y')
     plt.tight_layout()
-    plt.savefig('fig/Advection', dpi=300)
+    plt.savefig(os.path.join(fig_dir, 'Advection.png'), dpi=300)
     plt.show()
 
 # %%###########################################################################
