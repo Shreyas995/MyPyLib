@@ -1772,3 +1772,122 @@ if (1 == plotRes):
     _save_layers_y(cwd+'fig'+'/'+'Advection_landmarks_allFr',
                    r'Streamwise advection at orographic landmarks — rough-wall cases, Re=500')
     plt.show()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ░░  CROSS-CASE RESEARCH AGGREGATION  ░░   (Research.md:536-550)
+    # The matrix views a single-run PhAvg_rotated.py cannot build: each Fr placed
+    # on the stability axis, dispersive share / scales / similarity / intermittency
+    # tracked vs Ri_B, and Re=500-vs-750 (gated until the 750 data exists).
+    # Reads the per-run research keys pickled by PhAvg_rotated.py; skips silently
+    # for any case whose pickle lacks them.
+    # ═══════════════════════════════════════════════════════════════════════
+    _FR = {'nu_oro': np.inf, 'fr_1e2_oro': 1e-2, 'fr_1e4_oro': 1e-4,
+           'fr_1e5_oro': 1e-5, 'fr_1e6_oro': 1e-6}
+    _xc = [c for c in CASES
+           if c['name'] in sims and gv('Ri_B', c['name']) is not None]
+    if len(_xc) == 0:
+        print('[results] cross-case research aggregation: no pickles carry the '
+              'research diagnostics yet — run PhAvg_rotated.py per case first.')
+    else:
+        _figdir_x = cwd + 'fig' + '/'
+        _os.makedirs(_figdir_x, exist_ok=True)
+        _nm  = [c['name'] for c in _xc]
+        _lab = [c['label'] for c in _xc]
+        _col = [c['color'] for c in _xc]
+        _mk  = [c['marker'] for c in _xc]
+        _RiB = np.array([float(gv('Ri_B', n)) for n in _nm])
+        _Lp  = np.array([float(gv('L_col_plus', n)) for n in _nm])
+
+        def _scl(n, key, meth='M2'):
+            s = gv('scales', n)
+            return float(s[meth][key]) if (s is not None and meth in s) else np.nan
+        def _share_BL(n, key):
+            v = gv(key, n)
+            if v is None:
+                return np.nan
+            jt = gv('bl_top_j', n)
+            seg = v[:max(int(jt), 1)] if jt is not None else v
+            return float(np.nanmean(seg)) if np.size(seg) else np.nan
+        def _depmean(n, key):
+            d = gv(key, n)
+            if d is None:
+                return np.nan
+            vals = [v for v in d.values() if np.isfinite(v)]
+            return float(np.mean(vals)) if vals else np.nan
+
+        # ── [X1] Stability axis: each Fr at its measured Ri_B + Ansorge bins ──
+        fig, ax = plt.subplots(figsize=(9, 3.6), dpi=300)
+        _hi = max(0.2, float(np.nanmax(np.abs(_RiB))) * 1.3)
+        ax.axvspan(0,    0.05, color='green',  alpha=0.10)
+        ax.axvspan(0.05, 0.15, color='orange', alpha=0.10)
+        ax.axvspan(0.15, _hi,  color='red',    alpha=0.10)
+        for i, n in enumerate(_nm):
+            ax.scatter(_RiB[i], 0.0, color=_col[i], marker=_mk[i], s=90, zorder=5, label=_lab[i])
+        ax.set_yticks([]); ax.set_xlim(0, _hi)
+        ax.set_xlabel(r'$Ri_B = B_0\,\delta_{neu}/G^2$')
+        ax.set_title('Stability axis (Goal 1): weak | intermediate | strong')
+        ax.legend(fontsize=7, ncol=3, loc='upper center')
+        fig.savefig(_figdir_x + 'Xcase_stability_axis.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
+        # ── [X2] Dispersive share vs Ri_B (momentum & buoyancy; Goal 4) ───────
+        _sm = np.array([_share_BL(n, 'disp_share_mom')  for n in _nm])
+        _sb = np.array([_share_BL(n, 'disp_share_buoy') for n in _nm])
+        fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
+        ax.plot(_RiB, _sm, 'bo-',  label='momentum')
+        ax.plot(_RiB, _sb, 'rs--', label='buoyancy')
+        ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel('BL-mean dispersive share')
+        ax.set_title('Dispersive share vs $Ri_B$ (Goal 4)')
+        ax.legend(); ax.grid(True, ls='--', lw=0.5)
+        fig.savefig(_figdir_x + 'Xcase_dispshare_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
+        # ── [X3] Scales & Obukhov vs Ri_B (Goals 3 & 1) ───────────────────────
+        _panels = [('u_star', 'u*'), ('delta', r'$\delta$'), ('Psi', r'$\Psi=L_x/2\delta$'),
+                   ('H_delta', r'$H/\delta$'), ('H_plus', r'$H^+$')]
+        fig, axs = plt.subplots(2, 3, figsize=(14, 8), dpi=300)
+        for axi, (key, ttl) in zip(axs.flat, _panels):
+            axi.plot(_RiB, [_scl(n, key) for n in _nm], 'ko-')
+            axi.set_xlabel(r'$Ri_B$'); axi.set_title(ttl); axi.grid(True, ls='--', lw=0.5)
+        axs.flat[5].plot(_RiB, _Lp, 'ko-'); axs.flat[5].set_title(r'$L_{col}^+$')
+        axs.flat[5].axhline(100, color='r', ls=':', label='collapse ~100')
+        axs.flat[5].set_xlabel(r'$Ri_B$'); axs.flat[5].legend(fontsize=7); axs.flat[5].grid(True, ls='--', lw=0.5)
+        fig.suptitle('Scales & Obukhov length vs $Ri_B$ (Goals 3 & 1)')
+        fig.tight_layout()
+        fig.savefig(_figdir_x + 'Xcase_scales_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
+        # ── [X4] Similarity departure vs Ri_B (Goal 5) ────────────────────────
+        fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
+        ax.plot(_RiB, [_depmean(n, 'phi_m_dep') for n in _nm], 'bo-',  label=r'$\phi_m$')
+        ax.plot(_RiB, [_depmean(n, 'phi_h_dep') for n in _nm], 'rs--', label=r'$\phi_h$')
+        ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel('RMS departure from MOST (station mean)')
+        ax.set_title('Similarity departure vs $Ri_B$ (Goal 5)')
+        ax.legend(); ax.grid(True, ls='--', lw=0.5)
+        fig.savefig(_figdir_x + 'Xcase_phidep_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
+        # ── [X5] Intermittency collapse vs Ri_B (Goal 6; only if γ computed) ──
+        _gc = []
+        for n in _nm:
+            g = gv('gamma_z', n); jt = gv('bl_top_j', n)
+            _gc.append(float(np.nanmean(g[:max(int(jt), 1)] if jt is not None else g))
+                       if g is not None else np.nan)
+        _gc = np.array(_gc)
+        if np.any(np.isfinite(_gc)):
+            fig, ax = plt.subplots(figsize=(7, 5), dpi=300)
+            ax.plot(_RiB, _gc, 'ko-')
+            ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel(r'BL-mean intermittency $\gamma$')
+            ax.set_title('Intermittency collapse vs $Ri_B$ (Goal 6)')
+            ax.grid(True, ls='--', lw=0.5)
+            fig.savefig(_figdir_x + 'Xcase_gamma_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
+        # ── Console matrix summary + Goal 8 (Re 500 vs 750) status ────────────
+        print('\n=== CROSS-CASE RESEARCH MATRIX (Re_D=500) ===')
+        print(f"  {'case':<12}{'Ri_B':>11}{'L_col+':>10}{'class':>22}{'Psi':>8}{'H/delta':>9}")
+        for n in _nm:
+            _s = gv('scales', n)
+            _ps = _s['M2']['Psi']     if _s else float('nan')
+            _hd = _s['M2']['H_delta'] if _s else float('nan')
+            print(f"  {n:<12}{float(gv('Ri_B', n)):>11.3e}{float(gv('L_col_plus', n)):>10.1f}"
+                  f"{str(gv('stab_class', n)):>22}{_ps:>8.3f}{_hd:>9.4f}")
+        _re_set = {int(gv('Re', n)) for n in _nm if gv('Re', n) is not None}
+        print('  Reynolds numbers present: %s' % sorted(_re_set))
+        if 750 not in _re_set:
+            print('  Goal 8 (Re_D=750): data absent — inner-vs-outer collapse test pending 750 pickles.')

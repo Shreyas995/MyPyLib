@@ -152,4 +152,37 @@ var_names = [
     # -------------------------------------------------------------------------
     'u_most', 'u_most_v', 'y0',
 
+    # -------------------------------------------------------------------------
+    # RESEARCH DIAGNOSTICS — 8 prioritised goals (Research.md:536-550)
+    # Per-run quantities; cross-case aggregation done in results.py.
+    # -------------------------------------------------------------------------
+    # Buoyancy field & its double-average split (scalar IS buoyancy b)
+    'AvgScal', 'b_xmean', 'DispScal',
+
+    # Wall-normal (v = meteorological vertical) buoyancy fluxes  ⟨w'θ'⟩
+    'vtheta_disp', 'vtheta_temp', 'utheta_disp', 'thetavar',
+    'Bflux_disp', 'Bflux_temp', 'Bflux',
+
+    # Goal 1 — control translation (Ri_B, Obukhov, stability axis)
+    'B_0', 'Ri_B', 'delta_neu_eff', 'B_s', 'b_star', 'G_mag',
+    'L_obukhov_col', 'L_col_plus', 'L_loc', 'stab_class', 'collapse_flag',
+
+    # Goal 3 — scales per run (3 methods) + headline (Method 2)
+    'scales', 'delta_run', 'H_phys', 'Psi', 'H_delta', 'H_plus_r', 'Lx_plus',
+
+    # Goal 4 — flux decomposition (x-averaged profiles + dispersive shares)
+    'rey_uv_x', 'UV_disp_x', 'disp_share_mom', 'disp_share_buoy',
+
+    # Goal 5 — local similarity φ_m, φ_h at windward/floor/lee (+ MOST departure)
+    'phi_m_st', 'phi_h_st', 'zeta_st', 'phi_m_dep', 'phi_h_dep',
+
+    # Goal 6 — intermittency (None unless compute_intermittency=1)
+    'gamma_z', 'gamma_field',
+
+    # Goal 7 — wave diagnostics + sponge guard
+    'wave_mom_flux', 'wave_buoy_flux', 'sponge_j', 'bl_top_j', 'reflection_ok', 'Ly',
+
+    # Goal 2 / Goal 8 — reference + Reynolds-robustness status
+    'strat_ref_available', 're750_note',
+
 ]

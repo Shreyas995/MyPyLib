@@ -1250,6 +1250,214 @@ if (1 == postprocess):
     tau_wz = nu * dw_dy[_j_surf_idx, np.arange(nx)] / u_star**2
     tau_wm = np.sqrt(tau_wx**2 + tau_wz**2)
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # ░░  RESEARCH DIAGNOSTICS  ░░   (8 prioritised goals — Research.md:536-550)
+    # ──────────────────────────────────────────────────────────────────────────
+    # Per-run, gracefully gated: every stratification term degrades to
+    # neutral / N/A / Obukhov→∞ when the run carries no buoyancy or the reference
+    # data is absent.  Cross-case aggregation (Fr on the stability axis,
+    # dispersive-share vs Ri_B, Re=500 vs 750) lives in results.py.
+    # Engineering arrays: u=streamwise, v=WALL-NORMAL, w=spanwise; the
+    # meteorological "vertical" buoyancy flux ⟨w'θ'⟩ is the wall-normal ⟨v'θ'⟩.
+    # ══════════════════════════════════════════════════════════════════════════
+    _FLUX_EPS = 1e-12
+    G_mag = float(np.hypot(Gx, Gz))            # geostrophic magnitude (rotated → = Gx)
+
+    # ── Buoyancy field (scalar IS buoyancy b) and its double-average split ─────
+    b_xmean  = avg_c(eps, AvgScal, axis=1)                       # ⟨b⟩(z), fluid-only
+    DispScal = (AvgScal - b_xmean[:, None]) * mask0              # dispersive b̃(x,z)
+    _finite_bx = b_xmean[np.isfinite(b_xmean)]
+    _strat = bool(_finite_bx.size and np.ptp(_finite_bx) > 1e-9) # buoyancy actually varies?
+
+    # ── Buoyancy cross-moments (Route C) from PhAvgAllPlanes.py, if present ────
+    try:
+        MeanUTheta = np.load('MeanUTheta.npy')
+        MeanVTheta = np.load('MeanVTheta.npy')
+        MeanWTheta = np.load('MeanWTheta.npy')
+        MeanThTh   = np.load('MeanThTh.npy')
+        _have_flux = True
+    except (FileNotFoundError, OSError):
+        MeanUTheta = MeanVTheta = MeanWTheta = MeanThTh = np.zeros_like(AvgScal)
+        _have_flux = False
+        print("[research] Mean*Theta.npy absent — turbulent buoyancy flux = 0 "
+              "(run PhAvgAllPlanes.py with save_avg=1 to generate them).")
+
+    # Wall-normal (v = meteorological vertical) buoyancy flux ⟨w'θ'⟩ components:
+    #   dispersive (form-induced)  ṽ·b̃          — exact, from the mean fields
+    #   temporal   (Route C)       ⟨v̄·θ̄⟩_t − v̄·θ̄  — resolved / wave-scale covariance
+    vtheta_disp = DispVelV * DispScal
+    utheta_disp = DispVelU * DispScal                       # rotated streamwise (DispVelU already rotated)
+    if _have_flux:
+        vtheta_temp = (MeanVTheta - AvgPhV * AvgScal) * mask0
+        thetavar    = (MeanThTh  - AvgScal * AvgScal) * mask0   # scalar variance ⟨θ'θ'⟩ (temporal)
+    else:                                                   # no cross-moments → temporal flux unknown (0)
+        vtheta_temp = np.zeros_like(AvgScal)
+        thetavar    = np.zeros_like(AvgScal)
+
+    Bflux_disp = avg_c(eps, vtheta_disp, axis=1)            # ⟨ṽb̃⟩(z)
+    Bflux_temp = avg_c(eps, vtheta_temp, axis=1)            # ⟨v'θ'⟩(z) temporal
+    Bflux      = Bflux_disp + Bflux_temp                    # total wall-normal buoyancy flux(z)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 1 — Translate the control: B_0, Ri_B, Obukhov length, stability axis
+    # ──────────────────────────────────────────────────────────────────────────
+    _surf_j = np.minimum(eps_hgt, ny - 1)                   # local wall (first-fluid) row per column
+    B_0 = float(np.mean(AvgScal[_surf_j, np.arange(nx)]))   # surface buoyancy (x-mean Dirichlet)
+
+    delta_run = float(u_star / f)                           # this run's depth δ = u*/f
+    if delta_neutral is not None:
+        delta_neu_eff = float(delta_neutral)
+    else:
+        delta_neu_eff = delta_run
+        print("[research] config.delta_neutral is None — using this run's δ = "
+              f"{delta_run:.5f} for Ri_B (set it to the matched neutral depth).")
+    Ri_B = float(B_0 * delta_neu_eff / G_mag**2)
+
+    # Surface wall-normal buoyancy flux: first level fully fluid for all x (crest+1)
+    _j_surf_ref = min(int(hill_hgt) + 1, ny - 1)
+    B_s    = float(Bflux[_j_surf_ref])                      # x-mean surface buoyancy flux
+    b_star = (-B_s / u_star) if abs(u_star) > _FLUX_EPS else float('nan')
+
+    def _obukhov(us, bs):
+        """Obukhov length L = -u*^3 / (kappa * B_s); +∞ in the neutral limit."""
+        if (not np.isfinite(bs)) or abs(bs) < _FLUX_EPS or us <= 0:
+            return float('inf')
+        return -us**3 / (kappa * bs)
+
+    L_obukhov_col = _obukhov(u_star, B_s)                   # column (domain) Obukhov length
+    L_col_plus    = L_obukhov_col * u_star / nu             # in wall units
+
+    # Local (per-station) friction velocity from near-wall shear, and local L⁺
+    _tau_loc   = nu * np.sqrt(du_dy[_surf_j, np.arange(nx)]**2 + dw_dy[_surf_j, np.arange(nx)]**2)
+    u_star_loc = np.sqrt(np.abs(_tau_loc))                  # per-column u*(x)
+    _vtheta_tot = vtheta_disp + vtheta_temp
+    def _local_L(i):                                        # physical local Obukhov length
+        js = int(min(eps_hgt[i], ny - 1))
+        return _obukhov(float(u_star_loc[i]), float(_vtheta_tot[js, i]))
+
+    # Stations: windward = left flank, floor = valley bottom, lee = right flank
+    _stn  = {nm: int(fr * nx) for nm, fr in station_fracs.items()}
+    L_loc = {nm: (_local_L(i) * u_star / nu) for nm, i in _stn.items()}   # L⁺ per station
+
+    def _stab_class(ri):
+        if (not np.isfinite(ri)) or abs(ri) < 1e-6:        return 'neutral'
+        if ri < Ri_B_bins[0]:                              return 'weakly stable'
+        if ri < Ri_B_bins[1]:                              return 'intermediately stable'
+        return 'strongly stable'
+    stab_class    = _stab_class(Ri_B)
+    collapse_flag = bool(np.isfinite(L_col_plus) and abs(L_col_plus) < Lplus_collapse)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 3 — u*, δ, Ψ, H/δ, H⁺ per run (3 friction-velocity methods, joint)
+    # ──────────────────────────────────────────────────────────────────────────
+    H_phys = float(y[hill_hgt])                             # valley crest height (physical)
+    def _scales(us):
+        d = us / f
+        return {'u_star': float(us), 'delta': float(d),
+                'Psi':     float(L_x / (2.0 * d)),
+                'H_delta': float(H_phys / d),
+                'H_plus':  float(H_phys * us / nu),
+                'Lx_plus': float(L_x * us / nu)}
+    scales   = {'M2': _scales(u_star), 'M1': _scales(u_star1), 'M3': _scales(u_star3)}
+    Psi      = scales['M2']['Psi']                          # headline (Method 2)
+    H_delta  = scales['M2']['H_delta']
+    H_plus_r = scales['M2']['H_plus']
+    Lx_plus  = scales['M2']['Lx_plus']
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 4 — Double-average + split fluxes (momentum & buoyancy); disp. share
+    # ──────────────────────────────────────────────────────────────────────────
+    rey_uv_x  = avg_c(eps, rey_uv,  axis=1)                 # turbulent ⟨u'v'⟩(z)  (v = wall-normal)
+    UV_disp_x = avg_c(eps, UV_disp, axis=1)                 # dispersive ũṽ(z)
+    disp_share_mom  = np.abs(UV_disp_x) / (np.abs(UV_disp_x) + np.abs(rey_uv_x) + _FLUX_EPS)
+    disp_share_buoy = np.abs(Bflux_disp) / (np.abs(Bflux_disp) + np.abs(Bflux_temp) + _FLUX_EPS)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 5 — Local similarity φ_m, φ_h at windward / floor / lee vs MOST
+    # ──────────────────────────────────────────────────────────────────────────
+    db_dy = cd.ddy(AvgScal, method=DY_METHOD) * mask_intr   # ∂⟨b⟩/∂z (approximate at the interface)
+    phi_m_st = {}; phi_h_st = {}; zeta_st = {}; phi_m_dep = {}; phi_h_dep = {}
+    for nm, i in _stn.items():
+        js = int(min(eps_hgt[i], ny - 1))
+        zc = y[js:] - y[js]                                 # height above the local surface
+        Lloc = _local_L(i)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            phim = (kappa * zc / u_star) * du_dy[js:, i]
+            zeta = (zc / Lloc) if np.isfinite(Lloc) else np.zeros_like(zc)
+            if _strat and np.isfinite(b_star) and abs(b_star) > _FLUX_EPS:
+                phih = (kappa * zc / b_star) * db_dy[js:, i]
+            else:
+                phih = np.full_like(zc, np.nan)
+            phim_most = 1.0  + beta_m * zeta
+            phih_most = Pr_t + beta_h * zeta
+        phi_m_st[nm] = phim; phi_h_st[nm] = phih; zeta_st[nm] = zeta
+        _mm = np.isfinite(phim) & np.isfinite(phim_most)
+        _mh = np.isfinite(phih) & np.isfinite(phih_most)
+        phi_m_dep[nm] = float(np.sqrt(np.mean((phim[_mm] - phim_most[_mm])**2))) if _mm.any() else float('nan')
+        phi_h_dep[nm] = float(np.sqrt(np.mean((phih[_mh] - phih_most[_mh])**2))) if _mh.any() else float('nan')
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 7 — Wave diagnostics: wall-normal wave fluxes + sponge reflection guard
+    # ──────────────────────────────────────────────────────────────────────────
+    Ly       = float(y[-1])
+    sponge_j = int(min(np.searchsorted(y, sponge_frac * Ly), ny - 1))   # sponge bottom index
+    bl_top_j = int(min(max(np.searchsorted(y, delta_run), 1), ny - 1))  # BL top ≈ δ
+    wave_mom_flux  = UV_disp_x.copy()                       # standing-wave momentum flux(z)
+    wave_buoy_flux = Bflux.copy()                           # wall-normal wave buoyancy flux(z)
+    # Reflection guard: between BL top and sponge base the wave flux must not grow.
+    _w = np.abs(wave_mom_flux)
+    if (sponge_j > bl_top_j + 2) and np.isfinite(_w[bl_top_j]) and (_w[bl_top_j] > _FLUX_EPS):
+        reflection_ok = bool(_w[sponge_j - 1] <= _w[bl_top_j])
+    else:
+        reflection_ok = True
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 2 — Flat-wall stratified reference (hook; data-gated)
+    # ──────────────────────────────────────────────────────────────────────────
+    strat_ref_available = bool(len(stratified_ref_paths) > 0)
+    if not strat_ref_available:
+        print("[research] flat-wall stratified reference: data absent "
+              "(all .nc are ri00.00 = neutral); neutral baseline overlaid only.")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 8 — Reynolds robustness: emit inner & outer measures (Re-agnostic)
+    # ──────────────────────────────────────────────────────────────────────────
+    re750_note = ("Re_D=750: data absent (neutral run 'running, no statistics')"
+                  if int(Re) != 750 else "Re_D=750 active")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # GOAL 6 — Intermittency γ(z) from instantaneous planesK enstrophy (gated)
+    # ──────────────────────────────────────────────────────────────────────────
+    gamma_z = None; gamma_field = None
+    if (1 == compute_intermittency):
+        import glob as _glob
+        _pk = sorted(_glob.glob(cwd + 'planesK.*'))
+        if (len(_pk) == 0):
+            print("[research] intermittency: no planesK.* files found — γ(z) skipped.")
+        else:
+            _NK, _NV, _KP = 1, 5, 0          # N_KPLANES, NVARS, KPLANE_IDX (see animation block)
+            _acc = np.zeros((ny, nx)); _ng = 0
+            for _fp in _pk:
+                try:
+                    _pl = read_all_planes(_fp, nx, ny, _NK, _NV, _KP)
+                except (ValueError, OSError):
+                    continue
+                _u, _v = _pl[0], _pl[1]                     # tlab idx0=u, idx1=v (wall-normal)
+                _up = (_u - _u.mean(axis=1, keepdims=True)) * mask0
+                _vp = (_v - _v.mean(axis=1, keepdims=True)) * mask0
+                _om = (cd.ddx(_vp) - cd.ddy(_up, method=DY_METHOD)) * mask0   # spanwise ω'
+                _en = 0.5 * _om**2
+                _mx = float(np.nanmax(_en))
+                if _mx <= 0:
+                    continue
+                _acc += (_en > enstrophy_thresh * _mx).astype(float)
+                _ng  += 1
+            if (_ng > 0):
+                gamma_field = (_acc / _ng) * mask0
+                gamma_z = avg_c(eps, gamma_field, axis=1)
+                print(f"[research] intermittency γ(z) from {_ng} planesK frame(s).")
+    # ══════════════════════════════════════════════════════════════════════════
+
     # Bundle all post-processed fields listed in var_names (defined in config) into a dict
     # and pickle it so compile_results.py can assemble multi-case comparisons.
     # save varaibels in library for compiling results
@@ -1518,6 +1726,72 @@ if (1 == postprocess):
         ('Log-law roughness z0m+',               z0m_loglaw,                '.5f'),
         ('Log-law fit R^2',                      _best_r2,                  '.4f'),
         ('Canopy attenuation alpha',             alpha_canopy,              '.4f'),
+    ])
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ═══  RESEARCH DIAGNOSTICS SUMMARY  (8 goals — Research.md:536-550)  ════════
+    # ══════════════════════════════════════════════════════════════════════════
+    def _Lfmt(Lp):                                          # Obukhov length (wall units)
+        return '+inf (neutral)' if not np.isfinite(Lp) else f'{Lp:.1f}'
+    def _trio(a, b, c, fmt='.5f'):                          # "M2 | M1 | M3" side by side
+        return f'{format(a, fmt)} | {format(b, fmt)} | {format(c, fmt)}'
+
+    # BL-averaged dispersive shares (surface→BL top), with empty-slice guard
+    _lo, _hi = _j_surf_ref, max(bl_top_j, _j_surf_ref + 1)
+    _share_mom_BL  = float(np.mean(disp_share_mom[_lo:_hi]))  if _hi > _lo else float('nan')
+    _share_buoy_BL = float(np.mean(disp_share_buoy[_lo:_hi])) if _hi > _lo else float('nan')
+    _wmom_pk = float(np.nanmax(np.abs(wave_mom_flux)))
+    _wbuo_pk = float(np.nanmax(np.abs(wave_buoy_flux)))
+    _g_crest = float(gamma_z[hill_hgt]) if gamma_z is not None else None
+    _g_bltop = float(gamma_z[bl_top_j]) if gamma_z is not None else None
+
+    print_summary_table('RESEARCH DIAGNOSTICS — per-run (cross-case in results.py)', [
+        ('section', 'Goal 1 — control translation'),
+        ('Buoyancy active in this run',          'yes' if _strat else 'no (neutral)', 's'),
+        ('Surface buoyancy B_0',                 B_0,                       '.5e'),
+        ('delta_neutral used (Ri_B)',            delta_neu_eff,             '.5f'),
+        ('Bulk Richardson Ri_B',                 Ri_B,                      '.5e'),
+        ('Surface buoyancy flux B_s',            B_s,                       '.5e'),
+        ('Obukhov length L_col (phys)',          (None if not np.isfinite(L_obukhov_col) else L_obukhov_col), '.5e'),
+        ('Obukhov length L_col+ (wall units)',   _Lfmt(L_col_plus),         's'),
+        ('Stability class',                      stab_class,                's'),
+        ('Collapse (L+ < %.0f)' % Lplus_collapse, 'yes' if collapse_flag else 'no', 's'),
+        ('Local L+ windward | floor | lee',
+            f"{_Lfmt(L_loc['windward'])} | {_Lfmt(L_loc['floor'])} | {_Lfmt(L_loc['lee'])}", 's'),
+        ('section', 'Goal 3 — scales per run (M2 | M1 | M3)'),
+        ('u* friction velocity',                 _trio(u_star, u_star1, u_star3),                                           's'),
+        ('delta = u*/f',                         _trio(scales['M2']['delta'],  scales['M1']['delta'],  scales['M3']['delta']),  's'),
+        ('Psi = Lx/(2 delta)',                   _trio(scales['M2']['Psi'],    scales['M1']['Psi'],    scales['M3']['Psi'],    '.3f'), 's'),
+        ('Blocking ratio H/delta',               _trio(scales['M2']['H_delta'],scales['M1']['H_delta'],scales['M3']['H_delta'],'.4f'), 's'),
+        ('H+ (inner)',                           _trio(scales['M2']['H_plus'], scales['M1']['H_plus'], scales['M3']['H_plus'], '.1f'), 's'),
+        ('Lx+ (inner)',                          _trio(scales['M2']['Lx_plus'],scales['M1']['Lx_plus'],scales['M3']['Lx_plus'],'.0f'), 's'),
+        ('section', 'Goal 4 — flux decomposition (dispersive share, BL mean)'),
+        ('Momentum dispersive share',            _share_mom_BL,             '.4f'),
+        ('Buoyancy dispersive share',            _share_buoy_BL,            '.4f'),
+        ('Turbulent buoyancy flux available',    'yes' if _have_flux else 'no (Route C cross-moments absent)', 's'),
+        ('section', 'Goal 5 — local similarity departure (RMS vs MOST)'),
+        ('phi_m dep. windward | floor | lee',
+            f"{phi_m_dep['windward']:.3f} | {phi_m_dep['floor']:.3f} | {phi_m_dep['lee']:.3f}", 's'),
+        ('phi_h dep. windward | floor | lee',
+            (f"{phi_h_dep['windward']:.3f} | {phi_h_dep['floor']:.3f} | {phi_h_dep['lee']:.3f}"
+             if _strat else 'n/a (neutral)'), 's'),
+        ('section', 'Goal 6 — intermittency gamma(z)'),
+        ('gamma at crest | BL top',
+            (f"{_g_crest:.3f} | {_g_bltop:.3f}" if gamma_z is not None
+             else 'skipped (set compute_intermittency=1)'), 's'),
+        ('section', 'Goal 7 — wave diagnostics'),
+        ('Peak |wave momentum flux|',            _wmom_pk,                  '.5e'),
+        ('Peak |wave buoyancy flux|',            _wbuo_pk,                  '.5e'),
+        ('BL top z+ | sponge z+',                f"{y_in[bl_top_j]:.1f} | {y_in[sponge_j]:.1f}", 's'),
+        ('Sponge reflection OK',                 'yes' if reflection_ok else 'no (flux grows aloft)', 's'),
+        ('section', 'Goal 8 — Reynolds robustness (inner vs outer)'),
+        ('Re_D | Re_tau',                        f"{int(Re)} | {Re_tau:.1f}", 's'),
+        ('Inner: H+ | Lx+',                      f"{H_plus_r:.1f} | {Lx_plus:.0f}", 's'),
+        ('Outer: H/delta | Psi',                 f"{H_delta:.4f} | {Psi:.3f}", 's'),
+        ('Status',                               re750_note,                's'),
+        ('section', 'Goal 2 — flat-wall stratified reference'),
+        ('Stratified reference loaded',          'yes' if strat_ref_available else 'no (data absent)', 's'),
     ])
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -2808,6 +3082,95 @@ if (1 == plotRes):
     plt.tight_layout()
     plt.savefig(cwd + '/fig/UWy_inlet_outlet_Coleman.png', dpi=300)
     plt.show()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ░░  RESEARCH DIAGNOSTICS PLOTS  ░░   (8 goals — Research.md:536-550)
+    # All saved to fig_rotated/; gated terms degrade gracefully in the neutral run.
+    # ══════════════════════════════════════════════════════════════════════════
+    _zr   = y_in[:limity]
+    _cols = {'windward': 'b', 'floor': 'g', 'lee': 'r'}
+
+    # ── [R1] Turbulent vs dispersive flux split — momentum & buoyancy (Goal 4) ─
+    figR, (axRm, axRb) = plt.subplots(1, 2, figsize=(12, 6), dpi=300)
+    axRm.plot(rey_uv_x[:limity],  _zr, 'b-',  lw=1.5, label=r"turbulent $\langle u'v'\rangle$")
+    axRm.plot(UV_disp_x[:limity], _zr, 'r--', lw=1.5, label=r'dispersive $\tilde u\tilde v$')
+    axRm.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8, label='crest $h$')
+    axRm.set_xlabel('wall-normal momentum flux'); axRm.set_ylabel(r'$z^+$')
+    axRm.set_title('Momentum flux split'); axRm.legend(fontsize=8); axRm.grid(True, ls='--', lw=0.5)
+    axRb.plot(Bflux_temp[:limity], _zr, 'b-',  lw=1.5, label=r"turbulent (Route C)")
+    axRb.plot(Bflux_disp[:limity], _zr, 'r--', lw=1.5, label=r'dispersive $\tilde w\tilde\theta$')
+    axRb.plot(Bflux[:limity],      _zr, 'k:',  lw=1.5, label='total')
+    axRb.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8)
+    axRb.set_xlabel(r"wall-normal buoyancy flux $\langle w'\theta'\rangle$"); axRb.set_ylabel(r'$z^+$')
+    axRb.set_title('Buoyancy flux split' + ('' if _strat else '  (neutral $\\approx$ 0)'))
+    axRb.legend(fontsize=8); axRb.grid(True, ls='--', lw=0.5)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_flux_split.png'), dpi=300); plt.close(figR)
+
+    # ── [R2] Dispersive flux share — momentum & buoyancy (Goal 4) ──────────────
+    figR, axR = plt.subplots(figsize=(7, 6), dpi=300)
+    axR.plot(disp_share_mom[:limity],  _zr, 'b-',  lw=1.5, label='momentum')
+    axR.plot(disp_share_buoy[:limity], _zr, 'r--', lw=1.5, label='buoyancy')
+    axR.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8, label='crest $h$')
+    axR.set_xlim(0, 1); axR.set_xlabel('dispersive share  |disp| / (|disp|+|turb|)')
+    axR.set_ylabel(r'$z^+$'); axR.set_title('Dispersive flux share (Goal 4)')
+    axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_dispersive_share.png'), dpi=300); plt.close(figR)
+
+    # ── [R3] Local similarity φ_m, φ_h vs z+ at 3 stations vs MOST (Goal 5) ─────
+    figR, (axPm, axPh) = plt.subplots(1, 2, figsize=(12, 6), dpi=300)
+    for nm, i in _stn.items():
+        js = int(min(eps_hgt[i], ny - 1))
+        zcp = (y[js:js + len(phi_m_st[nm])] - y[js]) * (u_star / nu)
+        axPm.plot(phi_m_st[nm], zcp, _cols[nm] + '-', lw=1.3, label=nm)
+        if _strat:
+            axPh.plot(phi_h_st[nm], zcp, _cols[nm] + '-', lw=1.3, label=nm)
+    axPm.axvline(1.0, color='k', ls=':', lw=0.8, label='MOST neutral ($\\phi_m{=}1$)')
+    axPm.set_xlabel(r'$\phi_m$'); axPm.set_ylabel(r'$z^+$ (from local surface)')
+    axPm.set_title('φ_m by station (Goal 5)'); axPm.legend(fontsize=8); axPm.grid(True, ls='--', lw=0.5)
+    if _strat:
+        axPh.axvline(Pr_t, color='k', ls=':', lw=0.8, label=r'MOST neutral ($\phi_h{=}Pr_t$)')
+        axPh.legend(fontsize=8)
+    else:
+        axPh.text(0.5, 0.5, 'neutral run:\nφ_h undefined', ha='center', va='center',
+                  transform=axPh.transAxes, fontsize=11)
+    axPh.set_xlabel(r'$\phi_h$'); axPh.set_ylabel(r'$z^+$ (from local surface)')
+    axPh.set_title('φ_h by station (Goal 5)'); axPh.grid(True, ls='--', lw=0.5)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_similarity_phi.png'), dpi=300); plt.close(figR)
+
+    # ── [R4] Wave fluxes + sponge reflection guard (Goal 7) ────────────────────
+    _top = int(min(sponge_j + 10, ny))
+    figR, axR = plt.subplots(figsize=(7, 7), dpi=300)
+    axR.plot(wave_mom_flux[:_top], y_in[:_top], 'b-', lw=1.5, label=r'wave momentum flux $\tilde u\tilde v$')
+    if _strat:
+        axR.plot(wave_buoy_flux[:_top], y_in[:_top], 'r--', lw=1.5, label='wave buoyancy flux')
+    axR.axhline(y_in[bl_top_j], color='g', ls='-.', lw=0.9, label=r'BL top $z^+{=}%.0f$' % y_in[bl_top_j])
+    axR.axhline(y_in[sponge_j], color='m', ls=':',  lw=1.1, label=r'sponge $z^+{=}%.0f$' % y_in[sponge_j])
+    axR.set_xlabel('wall-normal wave flux'); axR.set_ylabel(r'$z^+$')
+    axR.set_title('Wave fluxes + sponge guard (Goal 7) — reflection OK: %s'
+                  % ('yes' if reflection_ok else 'NO'))
+    axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_wave_flux.png'), dpi=300); plt.close(figR)
+
+    # ── [R5] Stability axis — this run's Ri_B vs Ansorge bins (Goal 1) ─────────
+    figR, axR = plt.subplots(figsize=(8, 3.2), dpi=300)
+    _hi = max(Ri_B_bins[1] * 2.0, abs(Ri_B) * 1.3, Ri_B_bins[1] + 0.05)
+    axR.axvspan(0,             Ri_B_bins[0], color='green',  alpha=0.12, label='weak')
+    axR.axvspan(Ri_B_bins[0],  Ri_B_bins[1], color='orange', alpha=0.12, label='intermediate')
+    axR.axvspan(Ri_B_bins[1],  _hi,          color='red',    alpha=0.12, label='strong')
+    axR.axvline(Ri_B, color='k', lw=2.0, label=f'this run  $Ri_B$={Ri_B:.2e}')
+    axR.set_xlim(0, _hi); axR.set_yticks([]); axR.set_xlabel(r'$Ri_B = B_0\,\delta_{neu}/G^2$')
+    axR.set_title('Stability axis (Goal 1) — class: %s' % stab_class)
+    axR.legend(fontsize=8, loc='upper right', ncol=2)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_stability_axis.png'), dpi=300); plt.close(figR)
+
+    # ── [R6] Intermittency γ(z) (Goal 6; only if computed) ─────────────────────
+    if gamma_z is not None:
+        figR, axR = plt.subplots(figsize=(6, 7), dpi=300)
+        axR.plot(gamma_z[:limity], _zr, 'k-', lw=1.5)
+        axR.axhline(y_in[hill_hgt], color='b', ls=':', lw=0.8, label='crest $h$')
+        axR.set_xlim(0, 1.02); axR.set_xlabel(r'intermittency $\gamma$'); axR.set_ylabel(r'$z^+$')
+        axR.set_title('Intermittency γ(z) (Goal 6)'); axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
+        plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_intermittency_gamma.png'), dpi=300); plt.close(figR)
 
     # %%###########################################################################
     # animate: read_plane / read_all_planes are defined in functions.py and imported
