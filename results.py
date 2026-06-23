@@ -486,7 +486,15 @@ f = 1
 alpha = -0.430511
 Gx = np.cos(alpha)
 Gz = -np.sin(alpha)
-u_star = 0.068
+# SINGLE-REFERENCE friction velocity for ALL cross-case nondimensionalisation.
+# Settled choice: every case (smooth + neutral + all finite-Fr orographic) is
+# scaled by the Re=500 Fr=inf smooth-neutral reference u* = 0.0618 (the smooth
+# .nc stored FrictionVelocity, == ustr_s1), NOT by each case's own u_star2.  This
+# fixes inner units (z+, u+), outer units (y/u*), stress/u*^2 and the BL-thickness
+# markers onto one common yardstick so the comparison is on equal footing.
+# (The per-case PHYSICAL u* — Method-2 plateau of u_star2 — is still pickled per
+#  case and used for each case's own physical scales: delta, Re_tau, C_D, Psi.)
+u_star = 0.0618
 kappa = 0.42
 Re_tau = (u_star**2)/nu
 l_visc = nu/u_star
@@ -513,27 +521,34 @@ animate = 0
 ############################# Main Code #######################################
 
 # Parameter decleration
+# cwd = the directory in which THIS results.py lives.  It is meant to sit in the
+# central "examples" tree that holds every simulation directory, so all case
+# paths are taken relative to it (os.path.dirname(__file__) follows the symlink's
+# own location, not its MyPyLib target, so the script is relocatable: move the
+# whole examples tree and the paths still resolve).
 cwd = str(os.path.dirname(__file__) + '/' )
-# Five simulations ordered by decreasing Froude number (increasing stratification):
 # Six cases ordered by decreasing Froude number (increasing stratification), Re = 500 for all.
 # Smooth (NetCDF): flat wall, Fr = ∞  — loaded separately below from Re500 NetCDF.
-# Re=500 Froude ladder (neutral + Fr = 1, 0.1, 0.01).  The stratified runs live
-# on a finer grid (1056x672x1056) in a separate subtree, so use the absolute
-# data paths rather than the __file__-relative pattern.  Re=750 not yet available.
-_base = os.path.expanduser('~/Documents/PhD/Code/examples')
-cwd1 = _base + '/Ekman18/'                       # Neutral      Fr = ∞    (valley present)
-cwd2 = _base + '/1056x672x1056/EkRe500Fr1/'      # Strat        Fr = 1    (valley present)
-cwd3 = _base + '/1056x672x1056/EkRe500Fr0.1/'    # Strat        Fr = 0.1  (valley present)
-cwd4 = _base + '/1056x672x1056/EkRe500Fr0.01/'   # Strat        Fr = 0.01 (valley present)
-# Read grid
-x, y, z = read_grid(cwd)
+# Re=500 Froude ladder (neutral + Fr = 1, 0.1, 0.01).  The neutral run lives in
+# Ekman18/; the stratified runs live on a finer grid (1056x672x1056) in a
+# separate subtree.  All are sub-directories of cwd (the examples root), so the
+# data is found wherever that root is placed.  Re=750 not yet available.
+_base = cwd                                      # examples root = where results.py sits
+cwd1 = _base + 'Ekman18/'                        # Neutral      Fr = ∞    (valley present)
+cwd2 = _base + '1056x672x1056/EkRe500Fr1/'       # Strat        Fr = 1    (valley present)
+cwd3 = _base + '1056x672x1056/EkRe500Fr0.1/'     # Strat        Fr = 0.1  (valley present)
+cwd4 = _base + '1056x672x1056/EkRe500Fr0.01/'    # Strat        Fr = 0.01 (valley present)
+# Reference grid + IBM geometry come from the NEUTRAL case (cwd1): the central
+# examples/ root holds no grid of its own, and the valley geometry (eps, nx, ny,
+# hill_hgt) used for the 2-D orographic plots is the neutral-case grid.
+x, y, z = read_grid(cwd1)
 
 nx = np.size(x)
 ny = np.size(y)
 nz = np.size(z)
     
 try:
-    eps = np.load(cwd + 'eps_save.npy')
+    eps = np.load(cwd1 + 'eps_save.npy')   # IBM indicator from the neutral case grid
     print('eps loaded')
 except:
     print('Needed to read eps field')
@@ -671,9 +686,21 @@ for _name, _sd in sims.items():
     if 'rey_uv' in _sd and 'du_dy' in _sd:
         _sd['P'] = -_sd['rey_uv'] * _sd['du_dy']
     if 'TKE' in _sd and 'AvgPhU' in _sd and 'AvgPhV' in _sd:
-        _sd['dTKE_dx'] = diffu_dx(_sd['TKE'], ny, nx, eps, x)
-        _sd['dTKE_dy'] = diffu_dy(_sd['TKE'], ny, nx, eps, x)
-        _sd['Adv']     = _sd['AvgPhU'] * _sd['dTKE_dx'] + _sd['AvgPhV'] * _sd['dTKE_dy']
+        # Each pickle is self-contained: use THIS case's own grid + eps (saved by
+        # saveresults.py) so cases on a different grid than the neutral reference
+        # (the stratified runs are 1056x672x1056) are differentiated correctly.
+        # Fall back to the neutral globals only if a (legacy) pickle lacks them.
+        _eps = _sd.get('eps', eps)
+        _nx  = _sd.get('nx',  nx)
+        _ny  = _sd.get('ny',  ny)
+        _xg  = _sd.get('x',   x)
+        if _sd['TKE'].shape == _eps.shape:
+            _sd['dTKE_dx'] = diffu_dx(_sd['TKE'], _ny, _nx, _eps, _xg)
+            _sd['dTKE_dy'] = diffu_dy(_sd['TKE'], _ny, _nx, _eps, _xg)
+            _sd['Adv']     = _sd['AvgPhU'] * _sd['dTKE_dx'] + _sd['AvgPhV'] * _sd['dTKE_dy']
+        else:
+            print(f'Note: {_name} TKE shape {_sd["TKE"].shape} != its eps grid '
+                  f'{_eps.shape}; skipping TKE-advection (grid/eps inconsistent).')
 
 ###############################################################################
 # Load instantaneous plane data (flow.*.1-3, scal.*.1) for each rough-wall case.
@@ -682,22 +709,35 @@ for _name, _sd in sims.items():
 # Turbulent fluctuation = plane minus x-averaged profile (function of y only),
 # then solid region zeroed with mask0.
 ###############################################################################
+# Use each file's OWN header dimensions (read_header returns nx, ny) so a case on
+# a different grid than the neutral reference is read at the right shape, and mask
+# the solid region with THAT case's own pickled mask0 (falling back to the neutral
+# mask0 only for a legacy pickle that lacks it / matches the neutral grid).
+def _inst_fluct(_path, _mask):
+    _ihdr, _inx, _iny, *_ = read_header(_path)
+    if _ihdr is None:
+        return None
+    _ipl  = readplane(_path, _inx, _iny, 1, _ihdr)
+    _fluc = _ipl - _ipl.mean(axis=1, keepdims=True)
+    if _mask is not None and _fluc.shape == _mask.shape:
+        _fluc = _fluc * _mask
+    return _fluc
+
 for _iname, _idir in SIM_DIRS.items():
     if _iname not in sims:
         sims[_iname] = {}
+    _mask = sims[_iname].get('mask0', mask0)
     for _comp, _ikey in [('1', 'inst_u'), ('2', 'inst_v'), ('3', 'inst_w')]:
         _hits = sorted(_glob.glob(_idir + 'flow.*.' + _comp))
         if _hits:
-            _ihdr, *_ = read_header(_hits[-1])
-            if _ihdr is not None:
-                _ipl = readplane(_hits[-1], nx, ny, 1, _ihdr)
-                sims[_iname][_ikey] = (_ipl - _ipl.mean(axis=1, keepdims=True)) * mask0
+            _f = _inst_fluct(_hits[-1], _mask)
+            if _f is not None:
+                sims[_iname][_ikey] = _f
     _hits = sorted(_glob.glob(_idir + 'scal.*.1'))
     if _hits:
-        _ihdr, *_ = read_header(_hits[-1])
-        if _ihdr is not None:
-            _ipl = readplane(_hits[-1], nx, ny, 1, _ihdr)
-            sims[_iname]['inst_scal'] = (_ipl - _ipl.mean(axis=1, keepdims=True)) * mask0
+        _f = _inst_fluct(_hits[-1], _mask)
+        if _f is not None:
+            sims[_iname]['inst_scal'] = _f
 
 # Plot results
 if (1 == plotRes):
@@ -733,6 +773,18 @@ if (1 == plotRes):
     def gv(name, case='nu_oro'):
         """Return sims[case][name]; None if absent."""
         return sims.get(case, {}).get(name)
+
+    def gy_in(case='nu_oro'):
+        """Per-case wall-normal grid in SINGLE-REFERENCE inner units.
+
+        Returns the case's own physical grid y (which may have a different ny
+        than the neutral grid) divided by l_in = nu/0.0618, i.e. scaled by the
+        common reference u* — NOT by the case's own u_star2.  Use this instead of
+        the pickled per-case 'y_inner' (which is scaled by that case's own
+        Method-2 u*) wherever a profile is plotted on the shared z+ axis.
+        """
+        _yg = sims.get(case, {}).get('y')
+        return None if _yg is None else _yg / l_in
 
     def all_handles():
         """Legend handles for active cases (smooth if loaded + active rough-wall)."""
@@ -787,6 +839,30 @@ if (1 == plotRes):
     ###########################################################################
     _DIVERGING_CMAPS = {'RdBu_r', 'coolwarm', 'seismic', 'PiYG', 'bwr', 'RdYlBu'}
 
+    # --- per-case 2D axes helpers -------------------------------------------
+    # Each case carries its OWN grid + orography in its pickle (saveresults.py),
+    # so a case on a different grid than the neutral reference (the stratified
+    # runs are 1056x672x1056) is plotted against its own coordinates.  Inner
+    # units use the SINGLE-REFERENCE l_in (common z+ yardstick) per the cross-
+    # case scaling convention, NOT each case's own u*.
+    def _case_grid(cn, use_inner=True):
+        _sd = sims.get(cn, {})
+        _xc = _sd.get('x', x);         _yc = _sd.get('y', y)
+        _xo = _sd.get('x_oro', x_oro); _yo = _sd.get('y_oro', y_oro)
+        if use_inner:
+            return _xc / l_in, _yc / l_in, _xo / l_in, _yo / l_in
+        return _xc, _yc, _xo, _yo
+
+    def _row_to_height(ylim, use_inner=True):
+        """Physical/inner z-height of neutral reference row index `ylim` — used
+        as a common z-extent so all panels show the same height across grids."""
+        _ref = y_in if use_inner else y
+        return _ref[ylim] if ylim < len(_ref) else _ref[-1]
+
+    def _clip_rows(_yp, _zmax):
+        _j = int(np.searchsorted(_yp, _zmax)) + 1
+        return min(max(_j, 1), len(_yp))
+
     def plot2D_allFr(field_key, suptitle, cmap_name, savename,
                      ylim=None, use_inner=True):
         if ylim is None:
@@ -798,23 +874,28 @@ if (1 == plotRes):
             return
         nsims = len(_avail)
 
+        # sharey=False: each panel has its own grid; a common z-extent (_zmax)
+        # keeps them visually comparable across different grids.
         fig, axes = plt.subplots(1, nsims, figsize=(4 * nsims + 1.0, 5),
-                                 sharey=True)
+                                 sharey=False)
         if nsims == 1:
             axes = [axes]
 
         fig.subplots_adjust(left=0.07, bottom=0.12, top=0.87, wspace=0.04)
 
-        _xp = x_in if use_inner else x
-        _yp = y_in[:ylim] if use_inner else y[:ylim]
-        _xo = x_oro_in if use_inner else x_oro
-        _yo = y_oro_in if use_inner else y_oro
+        _zmax = _row_to_height(ylim, use_inner)
 
-        # Global colour limits: single scale shared by every panel,
-        # computed from actual min/max across all available Fr cases
+        # Per-case axes + row-clip to the common physical height _zmax
+        _cax = {}
+        for cn, _ in _avail:
+            _xp, _yp, _xo, _yo = _case_grid(cn, use_inner)
+            _cax[cn] = (_xp, _yp, _xo, _yo, _clip_rows(_yp, _zmax))
+
+        # Global colour limits: single scale shared by every panel, from the
+        # actual min/max across all available Fr cases (each clipped to _zmax)
         _epsilon = 1e-4
-        _gmin = min(np.nanmin(gv(field_key, cn)[:ylim, :]) for cn, _ in _avail)
-        _gmax = max(np.nanmax(gv(field_key, cn)[:ylim, :]) for cn, _ in _avail)
+        _gmin = min(np.nanmin(gv(field_key, cn)[:_cax[cn][4], :]) for cn, _ in _avail)
+        _gmax = max(np.nanmax(gv(field_key, cn)[:_cax[cn][4], :]) for cn, _ in _avail)
         _has_neg = _gmin < -_epsilon
         _diverging = (cmap_name in _DIVERGING_CMAPS) and _has_neg
         if _diverging:
@@ -826,10 +907,12 @@ if (1 == plotRes):
 
         _pcm = None
         for _i, (ax, (case, lbl)) in enumerate(zip(axes, _avail)):
-            _fld = gv(field_key, case)[:ylim, :]
-            _pcm = ax.pcolormesh(_xp, _yp, _fld, cmap=cmap_name,
+            _xp, _yp, _xo, _yo, _jl = _cax[case]
+            _fld = gv(field_key, case)[:_jl, :]
+            _pcm = ax.pcolormesh(_xp, _yp[:_jl], _fld, cmap=cmap_name,
                                  vmin=_vmin, vmax=_vmax, shading='auto')
             ax.fill(_xo, _yo, color='dimgray')
+            ax.set_ylim(0, _zmax)
             ax.set_title(lbl, fontsize=9)
             ax.set_xlabel(r'$x^+$' if use_inner else r'$x$')
             if _i > 0:
@@ -947,10 +1030,13 @@ if (1 == plotRes):
     # TKE shear production — all active cases in one subplot figure
     _dvdx_n = _n0.get('dv_dx')
     _prod_panels = []
+    _zmax_lim = _row_to_height(limity, use_inner=False)
     for _cname, _clbl in zip(SIM_NAMES, SIM_LABELS):
         _P_c = sims.get(_cname, {}).get('P')
         if _P_c is not None:
-            _prod_panels.append((_clbl, x, y[:limity], _P_c[:limity, :], x_oro, y_oro))
+            _xc, _yc, _xo, _yo = _case_grid(_cname, use_inner=False)
+            _jl = _clip_rows(_yc, _zmax_lim)
+            _prod_panels.append((_clbl, _xc, _yc[:_jl], _P_c[:_jl, :], _xo, _yo))
     if _prod_panels:
         plot2D_div_allcases(
             _prod_panels,
@@ -966,7 +1052,9 @@ if (1 == plotRes):
     for _cname, _clbl in zip(SIM_NAMES, SIM_LABELS):
         _Adv_c = sims.get(_cname, {}).get('Adv')
         if _Adv_c is not None:
-            _adv_panels.append((_clbl, x, y[:limity], _Adv_c[:limity, :], x_oro, y_oro))
+            _xc, _yc, _xo, _yo = _case_grid(_cname, use_inner=False)
+            _jl = _clip_rows(_yc, _zmax_lim)
+            _adv_panels.append((_clbl, _xc, _yc[:_jl], _Adv_c[:_jl, :], _xo, _yo))
     if _adv_panels:
         plot2D_div_allcases(
             _adv_panels,
@@ -1129,9 +1217,11 @@ if (1 == plotRes):
             continue
         plt.plot(y_in, _upr/ustr_s1, color=clr, linestyle=ls)
         plt.plot(y_in, _wpr/ustr_s1, color=clr, linestyle=ls, alpha=0.4)
-        # Per-case BL thickness: δ⁺ = u_*(h) × u_star_ref / ν
+        # BL thickness on the SINGLE-REFERENCE axis: δ⁺ = u*_ref²/(f·ν) = Re_tau
+        # (f = 1).  Same yardstick for every case (settled single-reference choice),
+        # so this line coincides with the smooth δ marker above.
         if _us2 is not None:
-            _delta_case = _us2[hill_hgt] * u_star / nu
+            _delta_case = Re_tau
             plt.axvline(x=_delta_case, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
     if _smooth_loaded:
         plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
@@ -1218,11 +1308,9 @@ if (1 == plotRes):
         _i_3h = np.argmin(np.abs(y_in - 3*y_in[hill_hgt]))
         _ax_hodo.plot(_un[_i_3h], _wn[_i_3h],
                       marker=mrkr, color=clr, ms=5, markeredgecolor='k', **_mkw)
-        # δ_o — large marker; per-case BL depth: δ⁺ = u_*(h) × u_star_ref / ν
-        if _us2 is not None:
-            _delta_plus = _us2[hill_hgt] * u_star / nu
-        else:
-            _delta_plus = Re_tau
+        # δ_o — large marker; BL depth on the SINGLE-REFERENCE axis:
+        # δ⁺ = u*_ref²/(f·ν) = Re_tau (f = 1), the same yardstick for every case.
+        _delta_plus = Re_tau
         _id = np.argmin(np.abs(y_in - _delta_plus))
         _ax_hodo.plot(_un[_id], _wn[_id],
                       marker=mrkr, color=clr, ms=6, markeredgecolor='k', **_mkw)
@@ -1309,7 +1397,7 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
         _ia = gv('inst_alpha', case)
-        _yi = gv('y_inner', case)
+        _yi = gy_in(case)
         if _ia is None or _yi is None:
             continue
         plt.plot(_yi[1:], _ia[1:]*(180/np.pi), color=clr, linestyle=ls, label=lbl)
@@ -1532,7 +1620,7 @@ if (1 == plotRes):
         _vx = gv('visc_yx',   case)
         _rv = gv('rey_uv',    case)
         _dt = gv('dudt',      case)
-        _yi = gv('y_inner',   case)
+        _yi = gy_in(case)
         if _Ic is None or _yi is None:
             continue
         _yn = _yi[:limity]
@@ -1572,7 +1660,7 @@ if (1 == plotRes):
         _vz = gv('visc_yz',   case)
         _rw = gv('rey_vw',    case)
         _dw = gv('dwdt',      case)
-        _yi = gv('y_inner',   case)
+        _yi = gy_in(case)
         if _Iz is None or _yi is None:
             continue
         _yn = _yi[:limity]

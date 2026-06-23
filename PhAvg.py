@@ -679,8 +679,14 @@ if (1 == postprocess):
     # Resultant surface stress magnitude; square-root twice because stress ~ u*²
     # u_star2 = ((total_tau_yx**2 + total_tau_yz**2 + tau_corrctn**2)**0.5)**0.5
     u_star2 = ((total_tau_yx**2 + total_tau_yz**2)**0.5)**0.5
-    # u_star: domain-averaged friction velocity used for inner scaling throughout
-    u_star = np.mean(u_star2)
+    # u_star: this case's representative Method-2 friction velocity, used for inner
+    # scaling throughout.  Use the constant-flux-layer PLATEAU of the u_star2(z)
+    # profile (NOT the column mean): in a rotating layer the direct stress decays
+    # monotonically with height, so the mean is biased low — the plateau is the
+    # representative wall value (settled choice; cf. CLAUDE.md "Method 2").  This
+    # overrides config.u_star (the prescribed 0.076 is the grid-generation value
+    # only).  For a finite-Fr run this is genuinely different from the neutral u*.
+    u_star = plateau_value(u_star2, y)
 
     # ── Friction velocity from the alternative (integrate→cavg) Coriolis term ──
     # Same momentum-balance formula, but using I_corr_*_c (per-column vertical
@@ -694,7 +700,23 @@ if (1 == postprocess):
 
     y_inner =  y*(u_star/nu)
     y_outer = y/u_star
-    
+
+    # ── Refresh all inner/outer-unit scalings to this case's Method-2 u_star ──
+    # x_in/y_in (and x_oro_in/y_oro_in, Re_tau, l_visc/wall_units, l_out) were built
+    # at module load from config's PRESCRIBED u_star (0.076 — the grid-generation
+    # value).  Re-derive them here from the per-case plateau u_star so every pickled
+    # inner-unit array is consistent with y_inner/y_outer/u_plus (= y_in now equals
+    # y_inner).  config.u_star itself is left untouched (still used by EditGrid).
+    l_in       = nu / u_star
+    l_visc     = l_in
+    wall_units = l_in
+    l_out      = u_star
+    Re_tau     = (u_star**2) / nu
+    x_in       = x / l_in
+    y_in       = y / l_in
+    x_oro_in   = x_oro / l_in
+    y_oro_in   = y_oro / l_in
+
     # Turbulent Kinetic Energy
     TKE = 0.5*(rey_uu + rey_vv + rey_ww)
 
@@ -1167,9 +1189,9 @@ if (1 == postprocess):
     print(f"  u_star3                        : {u_star3:.6f}")
     print(f"  columns used                   : {nx} / {nx}")
 
-    print("\n══ Three-method comparison (ref = u_star = mean of Method 2 profile) ══")
+    print("\n══ Three-method comparison (ref = u_star = plateau of Method 2 profile) ══")
     ref = u_star
-    for label, val in [("Method 2 mean (reference) ", u_star),
+    for label, val in [("Method 2 plateau (reference)", u_star),
                         ("Method 1 (surface integ.) ", u_star1),
                         ("Method 2 [z=0]            ", u_star2[0]),
                         ("Method 3 (col-shift)      ", u_star3)]:
@@ -1499,7 +1521,7 @@ if (1 == postprocess):
         ('Kinematic viscosity nu',               nu,                        '.5e'),
         ('Geostrophic speed G_inf',              G_inf,                     '.5f'),
         ('section', 'Friction velocity (4 methods)'),
-        ('u* - M2 (mean momentum balance)',      u_star,                    '.5f'),
+        ('u* - M2 (plateau momentum balance)',   u_star,                    '.5f'),
         ('u* - M2 at crest  u_star2[h]',         float(u_star2[hill_hgt]),  '.5f'),
         ('u* - M1 (surface integral)',           u_star1,                   '.5f'),
         ('u* - M3 (shifted column)',             u_star3,                   '.5f'),
@@ -2010,7 +2032,6 @@ if (1 == plotRes):
     plot_fig4_budget(smooth_nc_path, nu,       'smooth_Re500',    fig_dir)
     plot_fig4_budget(rough_nc_path,  nu_rough, 'rough_r1_Re1000', fig_dir)
 
-    STOP
     # %%###########################################################################
     # Velocity profile
     # [PLOT 34] Velocity Profile
