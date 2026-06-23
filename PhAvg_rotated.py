@@ -1,4 +1,15 @@
 # %%
+# ============================================================================
+# ROTATED-FRAME variant of PhAvg.py.
+# The horizontal mean / dispersive velocity fields and the wall-normal Reynolds
+# momentum-flux pair are rotated by `alpha` (the ~25° geostrophic tilt) AFTER the
+# ghost-cell interpolation and BEFORE the derivatives, so the geostrophic wind is
+# aligned with x — matching the frame of the Kostelecky & Ansorge reference .nc
+# cases.  Everything else (derivatives, Method-2 budget, plots) runs unchanged.
+# Outputs go to fig_rotated/ and derivative caches use a *_rot suffix, so this
+# script never clobbers the unrotated PhAvg.py run.  See the "FRAME ROTATION"
+# block for the exact transformation.
+# ============================================================================
 # Phase-averaging postprocessor for DNS of rotating (Ekman layer) flow over a sinusoidal valley.
 # Computes friction velocity via two independent methods:
 #   Method 1: momentum-integral balance (u_star via total_tau_yx / total_tau_yz profiles)
@@ -148,8 +159,8 @@ def plot_fig4_budget(nc_path, nu_case, label, fig_dir, top_frac=0.8):
 # Grid & differential operators
 # ─────────────────────────────────────────────────────────────────────────────
 cwd = str(os.path.dirname(__file__) + '/' )
-# All figures/plots are written to <data dir>/fig/ (created here if absent).
-fig_dir = os.path.join(cwd, 'fig')
+# All figures/plots are written to <data dir>/fig_rotated/ (rotated-frame variant).
+fig_dir = os.path.join(cwd, 'fig_rotated')
 os.makedirs(fig_dir, exist_ok=True)
 x, y, z = read_grid(cwd)               # x: streamwise (periodic), y: wall-normal, z: spanwise
 nx = np.size(x)
@@ -571,6 +582,32 @@ if (1 == postprocess):
                         recompute_derivatives, _compute_interp,
                         label='ghost-cell interpolated fields (PCHIP)')
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # ░░  FRAME ROTATION  ░░  (this is the ONLY physics change vs PhAvg.py)
+    # Rotate the horizontal components by `alpha` (config; the ~25° geostrophic
+    # tilt) so the geostrophic wind aligns with x — the frame of the reference
+    # .nc cases.  Applied AFTER interpolation and BEFORE the derivatives, so the
+    # derivative/budget pipeline below operates on the rotated fields unchanged.
+    #   proper rotation R(alpha):  u' = u·cosα − w·sinα,  w' = u·sinα + w·cosα
+    # Rotated (vectors): mean U,W and their _i/_j interpolations; dispersive U,W;
+    # and the wall-normal momentum-flux pair (rey_uv=⟨u'w'⟩, rey_vw=⟨v'w'⟩).
+    # Unchanged: wall-normal V (axis of rotation); in-plane stresses rey_uu/uw/ww
+    # (do not enter the τ_z· balance; TKE trace is rotation-invariant).
+    # u* = ‖τ_w‖ is rotation-invariant — only the τ_zx / τ_zy split changes.
+    _rc, _rs = np.cos(alpha), np.sin(alpha)
+    def _rotate_pair(a, b):
+        return a * _rc - b * _rs, a * _rs + b * _rc
+    AvgPhU,   AvgPhW   = _rotate_pair(AvgPhU,   AvgPhW)
+    AvgPhU_i, AvgPhW_i = _rotate_pair(AvgPhU_i, AvgPhW_i)
+    AvgPhU_j, AvgPhW_j = _rotate_pair(AvgPhU_j, AvgPhW_j)
+    DispVelU, DispVelW = _rotate_pair(DispVelU, DispVelW)
+    rey_uv,   rey_vw   = _rotate_pair(rey_uv,   rey_vw)
+    # geostrophic vector in the rotated frame: aligned with x → spanwise comp = 0
+    Gx, Gz = float(np.hypot(Gx, Gz)), 0.0
+    print(f"[ROTATED] fields rotated by alpha={alpha:.4f} rad "
+          f"({np.degrees(alpha):.1f}°); geostrophic now (Gx,Gz)=({Gx:.3f},{Gz:.3f})")
+    # ══════════════════════════════════════════════════════════════════════════
+
     # ── Velocity gradients ∂u/∂y, ∂u/∂x, ∂v/∂y, ∂v/∂x, ∂w/∂y, ∂w/∂x ───────
     # First y-derivatives use the DY_METHOD scheme (config.py).  'fornberg7'
     # differentiates the accidental factor-2 dy step at the top of Zone 1 exactly,
@@ -584,9 +621,9 @@ if (1 == postprocess):
                 cd.ddy(AvgPhW_j, method=DY_METHOD) * mask_intr,
                 cd.ddx(AvgPhW_i) * mask_intr)
     du_dy, du_dx, dv_dy, dv_dx, dw_dy, dw_dx = \
-        load_or_compute(['du_dy', 'du_dx', 'dv_dy', 'dv_dx', 'dw_dy', 'dw_dx'],
+        load_or_compute(['du_dy_rot', 'du_dx_rot', 'dv_dy_rot', 'dv_dx_rot', 'dw_dy_rot', 'dw_dx_rot'],
                         recompute_derivatives, _compute_vel_deriv,
-                        label='velocity derivatives')
+                        label='velocity derivatives (rotated frame)')
 
     # ── Dispersive velocity gradients ─────────────────────────────────────────
     def _compute_disp_deriv():
@@ -597,9 +634,9 @@ if (1 == postprocess):
                 cd.ddx(DispVelV) * mask_intr,
                 cd.ddx(DispVelW) * mask_intr)
     dud_dy, dvd_dy, dwd_dy, dud_dx, dvd_dx, dwd_dx = \
-        load_or_compute(['dud_dy', 'dvd_dy', 'dwd_dy', 'dud_dx', 'dvd_dx', 'dwd_dx'],
+        load_or_compute(['dud_dy_rot', 'dvd_dy_rot', 'dwd_dy_rot', 'dud_dx_rot', 'dvd_dx_rot', 'dwd_dx_rot'],
                         recompute_derivatives, _compute_disp_deriv,
-                        label='dispersive velocity derivatives')
+                        label='dispersive velocity derivatives (rotated frame)')
 
     # ── Second-order velocity derivatives and Reynolds/pressure gradients ─────
     # d2u_dy2 uses the D2Y_METHOD scheme (config.py; default 'compact').
@@ -611,7 +648,7 @@ if (1 == postprocess):
                 cd.ddx(AvgP_i) * mask_intr,                           # pressure gradients
                 cd.ddy(AvgP_j, method=DY_METHOD) * mask_intr)
     d2u_dx2, d2u_dy2, dreyuu_dx, dreyuv_dy, dP_dx, dP_dy = \
-        load_or_compute(['d2u_dx2', 'd2u_dy2', 'dreyuu_dx', 'dreyuv_dy', 'dP_dx', 'dP_dy'],
+        load_or_compute(['d2u_dx2_rot', 'd2u_dy2_rot', 'dreyuu_dx_rot', 'dreyuv_dy_rot', 'dP_dx_rot', 'dP_dy_rot'],
                         recompute_derivatives, _compute_misc_deriv,
                         label='second-order and stress/pressure derivatives')
 
@@ -639,11 +676,14 @@ if (1 == postprocess):
     turb_yz = avg_c(eps, rey_vw, axis=1)
     # Reynolds stresses given by 'rey_vw'
     # Tau_yz(z) = - Temporal + Coriolis + Viscous - Reynolds
-    total_tau_yz = -I_corr_yz + visc_yz + turb_yz
-    # Display total for the τ_zy PLOTS = sum of the component curves AS PLOTTED
-    # (Total = Coriolis + Viscous + Reynolds; signs kept as set for plotting convenience).
-    # NB: distinct from total_tau_yz (the physical balance used for u_star).
-    tau_disp_yz = -I_corr_yz + visc_yz + turb_yz
+    # ROTATED-FRAME / Fig-4 convention: Reynolds enters with a MINUS sign,
+    #   Ty = C_zy + V_zy + R_zy   with   C_zy = -I_corr_yz,  V_zy = visc_yz,  R_zy = -turb_yz.
+    # This matches the validated loader (functions.py: tau_yz = -I_corr_yz + visc_yz - Ryz)
+    # and plot_fig4_budget.  The unrotated PhAvg.py keeps the old +turb_yz plotting
+    # convention; here we correct it so u_star2 below is paper-consistent.
+    total_tau_yz = -I_corr_yz + visc_yz - turb_yz
+    # tau_disp_yz retained as an alias of the (now Fig-4-consistent) total for the τ_zy plots.
+    tau_disp_yz = total_tau_yz
 
     # ── Alternative Coriolis integral: integrate per-column, THEN intrinsic avg ──
     # The existing I_corr_y* x-average (np.mean, EXTRINSIC over all nx columns)
@@ -716,13 +756,17 @@ if (1 == postprocess):
     
     alphacos = np.cos(alpha)
     alphasin = np.sin(alpha)
-    u_pl_rot2D = AvgPhU/Gx*alphacos - AvgPhW/Gz*alphasin
-    w_pl_rot2D = -AvgPhU/Gx*alphasin + AvgPhW/Gz*alphacos
+    # ROTATED frame: the fields are ALREADY rotated to the geostrophic-aligned x-axis
+    # (see FRAME ROTATION block above, Gz=0), so the hodograph/velocity-profile
+    # quantities use them directly — no further rotation, and no division by Gz.
+    # Normalise by the geostrophic magnitude Gx (= |G|; spanwise geo = 0).
+    u_pl_rot2D = AvgPhU / Gx
+    w_pl_rot2D = AvgPhW / Gx
     # Cache intrinsic x-averages once; reused for both components to avoid 4 redundant calls
     _avgU_1d = avg_c(eps, AvgPhU, axis=1)
     _avgW_1d = avg_c(eps, AvgPhW, axis=1)
-    u_plus_rot = _avgU_1d * alphacos - _avgW_1d * alphasin
-    w_plus_rot = -(_avgU_1d * alphasin + _avgW_1d * alphacos)
+    u_plus_rot = _avgU_1d
+    w_plus_rot = -_avgW_1d
     
     # Turning angle
     # inst_alpha = ((avg_c(eps,AvgPhW,axis=1))/(avg_c(eps,AvgPhU,axis=1)))
@@ -1690,26 +1734,52 @@ if (1 == plotRes):
     plt.show()
     
     # %%###########################################################################
-    # Shear Stress XY
-    # do not change the sign of the terms below. THey are particulary set for plotting convenience
+    # ── Fig-4 convention assembly (single sign convention shared with plot_fig4_budget) ──
+    # In the ROTATED frame the geostrophic wind is g ∥ x = (Gx,Gz) = (1,0) for ALL three
+    # cases (orographic from config-rotation; smooth/rough from the loader, G_x=1,G_z=0).
+    # Each component's curves are built identically (meteorological u=streamwise, v=spanwise,
+    # z=wall-normal; Rxy=⟨u'w'⟩, Ryz=⟨v'w'⟩):
+    #     C = ∫₀ᶻ(g⊥ − vel) dz' = −I_corr_*     (Coriolis; small near wall, grows outward)
+    #     V = +ν d⟨vel⟩/dz                       (Viscous; ≈+1 at wall ÷u*², →0 by z+≈40–60)
+    #     R = −⟨flux⟩                            (Reynolds; +hump ≈0.6–0.8 at z+≈30–50)
+    #     T = C + V + R                          (Total; ≈const O(1) = surface-stress comp.)
+    #   τ_zx:  C_zx=∫(g2−v), V_zx=ν du/dz, R_zx=−Rxy ;  τ_zy:  C_zy=∫(g1−u), V_zy=ν dv/dz, R_zy=−Ryz
+    # This is the SAME convention validated against Kostelecky & Ansorge (2024) fig. 4
+    # (plots 33a–d).  u* = (T_zx_plateau² + T_zy_plateau²)^¼ is rotation-invariant.
+    # orographic (rotated; 1-D intrinsic profiles already)
+    Czx_o = -I_corr_yx; Vzx_o = visc_yx; Rzx_o = -turb_yx; Tzx_o = total_tau_yx
+    Czy_o = -I_corr_yz; Vzy_o = visc_yz; Rzy_o = -turb_yz; Tzy_o = total_tau_yz
+    # smooth reference (loader; collapse the (ny,nt)/(ny,1) arrays to 1-D profiles)
+    Czx_s = -I_corr_yx_s; Vzx_s = np.mean(visc_yx_s, axis=1); Rzx_s = -np.mean(Rxy_s, axis=1)
+    Tzx_s = Czx_s + Vzx_s + Rzx_s
+    Czy_s = -I_corr_yz_s; Vzy_s = np.mean(visc_yz_s, axis=1); Rzy_s = -np.mean(Ryz_s, axis=1)
+    Tzy_s = Czy_s + Vzy_s + Rzy_s
+    # rough r1 reference (loader)
+    Czx_r = -I_corr_yx_r; Vzx_r = np.mean(visc_yx_r, axis=1); Rzx_r = -np.mean(Rxy_r, axis=1)
+    Tzx_r = Czx_r + Vzx_r + Rzx_r
+    Czy_r = -I_corr_yz_r; Vzy_r = np.mean(visc_yz_r, axis=1); Rzy_r = -np.mean(Ryz_r, axis=1)
+    Tzy_r = Czy_r + Vzy_r + Rzy_r
+
+    # %%###########################################################################
+    # Shear Stress XY  (Fig-4 convention: Coriolis +C, Viscous +V, Reynolds −⟨flux⟩, Total C+V+R)
     # [PLOT 29] Shear stress $\tau_{zx}$
     plt.figure(figsize=(10, 6))
-    plt.plot(y_inner[:], -I_corr_yx[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], visc_yx[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], -(np.mean(rey_uv, axis=1))[:], label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(y_inner[:], Czx_o[:], label='Coriolis', color='blue', linestyle='-')
+    plt.plot(y_inner[:], Vzx_o[:], label='Viscous', color='red', linestyle='-')
+    plt.plot(y_inner[:], Rzx_o[:], label='Rey Stress', color='orange', linestyle='-')
     plt.plot(y_inner[:], dudt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], total_tau_yx[:], label='Total', color='black', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p, I_corr_yx_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(visc_yx_s, axis=1), color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, -np.mean(Rxy_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    plt.plot(y_inner[:], Tzx_o[:], label='Total', color='black', linestyle='-')
+    ref_plot(plot_ref_smooth, y_s_p, Czx_s, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzx_s, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzx_s, color='orange', linestyle=SMOOTH_LS)
     # rough r1 (Re=1000) overlay — Method-2 terms, own inner units (y_r_p)
-    ref_plot(plot_ref_rough, y_r_p, I_corr_yx_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(visc_yx_r, axis=1), color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, -np.mean(Rxy_r, axis=1), color='orange', linestyle=ROUGH_LS)
-    mark_layers_multi(y_inner, [-I_corr_yx, visc_yx, -np.mean(rey_uv, axis=1),
-                                dudt, total_tau_yx], _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [I_corr_yx_s, np.mean(visc_yx_s, axis=1),
-                              -np.mean(Rxy_s, axis=1)], _LYR_SMO, filled=False)
+    ref_plot(plot_ref_rough, y_r_p, Czx_r, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzx_r, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzx_r, color='orange', linestyle=ROUGH_LS)
+    mark_layers_multi(y_inner, [Czx_o, Vzx_o, Rzx_o,
+                                dudt, Tzx_o], _LYR_ORO, filled=True)
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czx_s, Vzx_s,
+                              Rzx_s], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zx}$')
     plt.xlabel(r'$z^{+}$')
@@ -1734,27 +1804,27 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
     
     # Valley case (solid lines)
-    plt.plot(y_inner[:limity], -I_corr_yx[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], visc_yx[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], -turb_yx[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], Czx_o[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
+    plt.plot(y_inner[:limity], Vzx_o[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], Rzx_o[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
     plt.plot(y_inner[:limity], dudt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
-    plt.plot(y_inner[:limity], total_tau_yx[:limity]/u_star**2, color='black', linestyle='-', label='Total')
+    plt.plot(y_inner[:limity], Tzx_o[:limity]/u_star**2, color='black', linestyle='-', label='Total')
     # Smooth case (dashed)
-    ref_plot(plot_ref_smooth, y_s_p, I_corr_yx_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(visc_yx_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, -(np.mean(Rxy_s, axis=1))/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Czx_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzx_s/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzx_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
     # rough r1 — own inner units (ustr_r1)
-    ref_plot(plot_ref_rough, y_r_p, I_corr_yx_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(visc_yx_r, axis=1)/ustr_r1**2, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, -(np.mean(Rxy_r, axis=1))/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Czx_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzx_r/ustr_r1**2, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzx_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
 
-    mark_layers_multi(y_inner, [-I_corr_yx/u_star**2, visc_yx/u_star**2,
-                                -turb_yx/u_star**2, dudt/u_star**2,
-                                total_tau_yx/u_star**2],
+    mark_layers_multi(y_inner, [Czx_o/u_star**2, Vzx_o/u_star**2,
+                                Rzx_o/u_star**2, dudt/u_star**2,
+                                Tzx_o/u_star**2],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [I_corr_yx_s/ustr_s1**2, np.mean(visc_yx_s, axis=1)/ustr_s1**2,
-                              -(np.mean(Rxy_s, axis=1))/ustr_s1**2, np.zeros(nys)],
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czx_s/ustr_s1**2, Vzx_s/ustr_s1**2,
+                              Rzx_s/ustr_s1**2, np.zeros(nys)],
                       _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zx}$')
@@ -1777,27 +1847,26 @@ if (1 == plotRes):
     plt.show()
     
     # %%###########################################################################
-    # Shear Stress ZY
-    # do not change the sign of the terms below. THey are particulary set for plotting convenience
+    # Shear Stress ZY  (Fig-4 convention: Coriolis +C, Viscous +V, Reynolds −⟨flux⟩, Total C+V+R)
     # [PLOT 31] Shear stress $\tau_{zy}$
     plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(y_inner[:], -I_corr_yz[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], -visc_yz[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], turb_yz[:], label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(y_inner[:], Czy_o[:], label='Coriolis', color='blue', linestyle='-')
+    plt.plot(y_inner[:], Vzy_o[:], label='Viscous', color='red', linestyle='-')
+    plt.plot(y_inner[:], Rzy_o[:], label='Rey Stress', color='orange', linestyle='-')
     plt.plot(y_inner[:], dwdt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], tau_disp_yz[:], label='Total', color='black', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p, -I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(visc_yz_s, axis=1), color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    plt.plot(y_inner[:], Tzy_o[:], label='Total', color='black', linestyle='-')
+    ref_plot(plot_ref_smooth, y_s_p, Czy_s, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzy_s, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzy_s, color='orange', linestyle=SMOOTH_LS)
     # rough r1 (Re=1000) overlay — Method-2 terms, own inner units (y_r_p)
-    ref_plot(plot_ref_rough, y_r_p, -I_corr_yz_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(visc_yz_r, axis=1), color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(Ryz_r, axis=1), color='orange', linestyle=ROUGH_LS)
-    mark_layers_multi(y_inner, [-I_corr_yz, visc_yz,
-                                turb_yz, dwdt, tau_disp_yz],
+    ref_plot(plot_ref_rough, y_r_p, Czy_r, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzy_r, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzy_r, color='orange', linestyle=ROUGH_LS)
+    mark_layers_multi(y_inner, [Czy_o, Vzy_o,
+                                Rzy_o, dwdt, Tzy_o],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [-I_corr_yz_s, np.mean(visc_yz_s, axis=1),
-                              np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czy_s, Vzy_s,
+                              Rzy_s], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')
     plt.xlabel(r'$z^{+}$')
@@ -1821,27 +1890,27 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
 
     # Valley case (solid lines)
-    plt.plot(y_inner[:limity], -I_corr_yz[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], -visc_yz[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], turb_yz[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], Czy_o[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
+    plt.plot(y_inner[:limity], Vzy_o[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], Rzy_o[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
     plt.plot(y_inner[:limity], dwdt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
-    plt.plot(y_inner[:limity], tau_disp_yz[:limity]/u_star**2, color='black', linestyle='-', label='Total')
+    plt.plot(y_inner[:limity], Tzy_o[:limity]/u_star**2, color='black', linestyle='-', label='Total')
     # Smooth case (dashed)
-    ref_plot(plot_ref_smooth, y_s_p, -I_corr_yz_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, -np.mean(visc_yz_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Czy_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzy_s/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzy_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
     # rough r1 — own inner units (ustr_r1)
-    ref_plot(plot_ref_rough, y_r_p, -I_corr_yz_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, -np.mean(visc_yz_r, axis=1)/ustr_r1**2, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(Ryz_r, axis=1)/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Czy_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzy_r/ustr_r1**2, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzy_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
 
-    mark_layers_multi(y_inner, [-I_corr_yz/u_star**2, visc_yz/u_star**2,
-                                turb_yz/u_star**2, dwdt/u_star**2,
-                                tau_disp_yz/u_star**2],
+    mark_layers_multi(y_inner, [Czy_o/u_star**2, Vzy_o/u_star**2,
+                                Rzy_o/u_star**2, dwdt/u_star**2,
+                                Tzy_o/u_star**2],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [-I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
-                              np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czy_s/ustr_s1**2, Vzy_s/ustr_s1**2,
+                              Rzy_s/ustr_s1**2, np.zeros(nys)],
                       _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')

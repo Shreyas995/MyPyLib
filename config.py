@@ -86,3 +86,54 @@ smooth_nc_path = (
     '/home/shreyad95/postprocessing/Code/Re500/'
     'ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'
 )
+
+# Rough reference case (Kostelecky & Ansorge r1, Re_D = 1000) — Method-2 u* test.
+# Same tlab avg_all.nc variable names as the smooth case, but a different grid and
+# NO stored FrictionVelocity (u* is computed from the momentum-integral balance).
+rough_nc_path = (
+    '/home/shreyad95/postprocessing/Code/RoughRe1000/'
+    'ri00.00_re1000_3072x0656x3072_20230119_r1_avg_all.nc'
+)
+Re_rough        = 1000                   # bulk Reynolds number of the rough case
+Re_lambda_rough = 0.5 * Re_rough**2      # = 5e5  (tlab 1/nu)
+nu_rough        = 1 / Re_lambda_rough    # = 2e-6  kinematic viscosity
+
+# ── 10. Reference-overlay master switches (testing vs publication) ────────────
+#   Each: True → overlay that reference case on the smooth-vs-orographic plots.
+#   Default = smooth only (publication mode); flip plot_ref_rough on for testing.
+plot_ref_smooth = True    # overlay smooth (Re=500) reference
+plot_ref_rough  = False   # overlay rough r1 (Re=1000) reference  (test only)
+
+# ── 11. Stratification / research diagnostics (8-goal post-processing) ────────
+# Research.md:536-550.  Buoyancy = the scalar directly: AvgScal IS the non-dim
+# buoyancy b, so the surface buoyancy B_0 is its near-wall (Dirichlet) value.
+# Every term degrades gracefully to neutral / N/A when the run is unstratified.
+#
+# delta_neutral : matched NEUTRAL boundary-layer depth used in the bulk
+#   Richardson number  Ri_B = B_0 * delta_neutral / G**2.  Set it to the neutral
+#   run's depth  δ = u*_neutral / f  for each Reynolds number.  None → fall back
+#   to the current run's own δ (a warning is printed); correct for the neutral
+#   case itself, a placeholder for the stratified runs until measured.
+delta_neutral     = None      # Re_D = 500 neutral depth (set once measured)
+delta_neutral_750 = None      # Re_D = 750 neutral depth (set once measured)
+
+Pr_t   = 0.85                 # turbulent Prandtl number (φ_h / eddy-diffusivity closure)
+beta_m = 5.0                  # MOST stable slope:  φ_m = 1    + beta_m*ζ
+beta_h = 5.0                  # MOST stable slope:  φ_h = Pr_t + beta_h*ζ
+Ri_B_bins      = (0.05, 0.15) # weak | intermediate | strong  (Ansorge 2017)
+Lplus_collapse = 100.0        # Obukhov length (wall units) collapse threshold ~O(100)
+
+sponge_frac = 0.8             # Rayleigh-sponge bottom ≈ sponge_frac*Ly; wave window below it
+
+# Local-similarity stations over the valley (x-column fraction of nx):
+#   windward = left flank, floor = valley bottom, lee = right flank.
+station_fracs = {'windward': 0.25, 'floor': 0.50, 'lee': 0.75}
+
+# Goal 6 intermittency γ(z): instantaneous-planesK enstrophy threshold.
+#   Off by default (reads many planesK files); set to 1 to compute.
+compute_intermittency = 0
+enstrophy_thresh = 0.01       # γ = 1 where ½ω'² > enstrophy_thresh * max(½ω'²)
+
+# Goal 2 flat-wall stratified reference: {(Re, Fr): nc_path}.  Empty until that
+# data exists (all current .nc are ri00.00 = neutral); loaded via load_smooth_case.
+stratified_ref_paths = {}

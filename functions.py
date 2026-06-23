@@ -64,98 +64,178 @@ def load_or_compute(names, recompute, compute_fn, save=True, verbose=True,
     return vals
 
 
-def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
+def plateau_value(prof, y=None, skip_frac=0.05, win_frac=0.10):
+    """Representative 'stable' value of a 1-D profile = mean over its flattest window.
+
+    Used to read the constant-flux-layer plateau of a Method-2 friction-velocity
+    profile u*(z): skip the near-wall / roughness region (first `skip_frac` of the
+    points), then slide a window of width `win_frac·N` and return the mean of the
+    window with the smallest coefficient of variation (std/|mean|).
+
+    `y` is accepted for API symmetry / future spacing-aware weighting; the current
+    implementation works on index windows (robust enough for a scalar estimate).
     """
-    Load and post-process the smooth-wall reference case (flat wall, neutral,
-    Re=500) from its NetCDF file, returning every derived quantity in a dict.
+    prof = np.asarray(prof, dtype=np.float64)
+    n = prof.size
+    if n == 0:
+        return float('nan')
+    lo = max(2, int(skip_frac * n))
+    w  = max(3, int(win_frac * n))
+    seg = prof[lo:]
+    if seg.size < w:
+        return float(np.nanmean(seg)) if seg.size else float('nan')
+    best_cv, best_val = np.inf, float(np.nanmean(seg))
+    for s in range(0, seg.size - w + 1):
+        wv = seg[s:s + w]
+        m = np.nanmean(wv)
+        if not np.isfinite(m) or abs(m) < 1e-12:
+            continue
+        cv = np.nanstd(wv) / abs(m)
+        if cv < best_cv:
+            best_cv, best_val = cv, m
+    return float(best_val)
 
-    This is the SINGLE source of truth for the smooth reference, shared by
-    PhAvg.py and results.py so the two can never diverge.  The formulas are
-    PhAvg.py's (the validated pipeline), including the Coriolis convention
-    cor_yx_s = -(W_s - G_z) with the scalar geostrophic value G_z = max(W_s).
 
-    Uses this module's own `diffu_dy` (7-point Fornberg, order 1) and
-    `vIntegral`, so the result is independent of any local helpers a caller may
-    define.
+def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
+    """
+    Load and post-process ONE horizontally-averaged Ekman case (tlab avg_all.nc)
+    and return every derived quantity under GENERIC keys.  Single source of truth
+    for any external reference case (smooth flat wall, rough r1, …); the file's
+    variable names must follow the tlab convention (y, fU/fV/fW, rU/rV/rW,
+    Rxx/Rxy/Ryy/Ryz/Rzz).
 
-    Parameters
-    ----------
-    nc_path   : str    — full path to the smooth-case NetCDF.
-    x_grid    : array  — streamwise grid onto which AVG_TKE_V_s is interpolated
-                         (AVG_TKE_V_s_i = interp(x_grid, x_s, AVG_TKE_V_s)).
-    nu        : float  — kinematic viscosity (inner scaling of y).
-    Re_lambda : float  — Re_λ (viscous-stress scaling 1/Re_lambda).
+    Friction velocity:
+      * if the file stores `FrictionVelocity` (smooth case) it is read into
+        `ustr_stored` and used for the inner scaling (legacy behaviour);
+      * the Ekman momentum-integral ("Method 2") friction-velocity profile
+        `ustr_M2 = (tau_yx**2 + tau_yz**2)**0.25` is ALWAYS computed, with its
+        constant-flux plateau scalar `ustr_M2_plateau`;
+      * when no stored value exists (rough case) the inner scaling falls back to
+        `ustr_M2_plateau` (`ustr_scale`).
 
-    Returns
-    -------
-    dict with keys: sy, nys, U_s, V_s, W_s, su, sw, alpha_s, ustr_s1,
-        alpha_str_s, y_s, y_s_p, rU_s, rV_s, rW_s, G_x_s, G_z_s, G_s, U_s_p,
-        W_s_p, GblU_s, GblW_s, Rxx_s, Rxy_s, Ryy_s, Ryz_s, Rzz_s, TKE_s,
-        case_v_s, cor_yx_s, I_corr_yx_s, du_dy_s, visc_yx_s, tau_yx_s,
-        cor_yz_s, I_corr_yz_s, dw_dy_s, visc_yz_s, tau_yz_s, AVG_TKE_V_s,
-        x_s, AVG_TKE_V_s_i.
+    Uses this module's own `diffu_dy` (7-point Fornberg, order 1), `vIntegral`
+    and `plateau_value`.  The geostrophic unit vector (G_x, G_z) is built from the
+    SCALAR surface friction angle (stored FrictionAngle [deg] for smooth; near-wall
+    stress direction for rough), so cor_yx = -(GblW + G_z), cor_yz = (GblU - G_x).
+
+    Parameters mirror load_smooth_case (nc_path, x_grid, nu, Re_lambda).
+
+    Returns dict with generic keys: sy, nys, U, V, W, su, sw, alpha, ustr_stored,
+        alpha_str, y, y_p, rU, rV, rW, G_x, G_z, G, U_p, W_p, GblU, GblW, Rxx,
+        Rxy, Ryy, Ryz, Rzz, TKE, case_v, cor_yx, I_corr_yx, du_dy, visc_yx,
+        tau_yx, cor_yz, I_corr_yz, dw_dy, visc_yz, tau_yz, AVG_TKE_V, x,
+        AVG_TKE_V_i, ustr_M2, ustr_M2_plateau, ustr_scale.
     """
     s1 = nc.Dataset(nc_path, 'r')
     sy = (s1.variables['y'][:])
     nys = np.size(sy)
-    U_s = (s1.variables['fU'][:]).T
-    V_s = (s1.variables['fV'][:]).T
-    W_s = (s1.variables['fW'][:]).T
-    su = np.mean(U_s, axis=1)
-    sw = np.mean(W_s, axis=1)
-    alpha_s = (sw/su)   # turning angle profile for smooth case
-    ustr_s1 = np.mean(s1.variables['FrictionVelocity'][:])
-    alpha_str_s = np.mean(s1.variables['FrictionAngle'][:])
-    y_s = s1.variables['y'][:]
-    y_s_p = (y_s*ustr_s1)/nu
-    rU_s = (s1.variables['rU'][:]).T
-    rV_s = (s1.variables['rV'][:]).T
-    rW_s = (s1.variables['rW'][:]).T
-    G_x_s = np.max(U_s)
-    G_z_s = np.max(W_s)
-    G_s = np.sqrt(G_x_s**2 + G_z_s**2)
-    U_s_p = (U_s/ustr_s1)/G_s
-    W_s_p = (W_s/ustr_s1)/G_s
-    GblU_s = np.mean(rU_s, axis=1)
-    GblW_s = np.mean(rW_s, axis=1)
-    Rxx_s = (s1.variables['Rxx'][:]).T
-    Rxy_s = (s1.variables['Rxy'][:]).T
-    Ryy_s = (s1.variables['Ryy'][:]).T
-    Ryz_s = (s1.variables['Ryz'][:]).T
-    Rzz_s = (s1.variables['Rzz'][:]).T
-    TKE_s = 0.5 * (Rxx_s + Ryy_s + Rzz_s)   # TKE = 0.5*(⟨u'u'⟩+⟨v'v'⟩+⟨w'w'⟩)
-    case_v_s = np.zeros((nys,1)).astype(int)
-    case_v_s[:,:] = 4; case_v_s[0,0] = 1; case_v_s[1,0] = 2; case_v_s[2,0] = 3
-    case_v_s[-3,0] = 5; case_v_s[-2,0] = 6; case_v_s[-1,0] = 7
-    cor_yx_s = -(W_s - G_z_s)
-    I_corr_yx_s = vIntegral(np.mean(cor_yx_s, axis=1), y_s.size, y_s)
-    du_dy_s = diffu_dy((np.reshape(GblU_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
-    visc_yx_s = (1/Re_lambda) * du_dy_s
-    tau_yx_s = I_corr_yx_s + np.mean(visc_yx_s, axis=1) - np.mean(Rxy_s, axis=1)
-    cor_yz_s = (U_s - G_x_s)
-    I_corr_yz_s = vIntegral(np.mean(cor_yz_s, axis=1), y_s.size, y_s)
-    dw_dy_s = diffu_dy((np.reshape(GblW_s,(y_s.size,1))), y_s.size, 1, case_v_s, y_s, 1)
-    visc_yz_s = (1/Re_lambda) * dw_dy_s
-    tau_yz_s = -I_corr_yz_s + np.mean(visc_yz_s, axis=1) - np.mean(Ryz_s, axis=1)
-    AVG_TKE_V_s = np.mean(TKE_s, axis=0)
-    x_s = np.linspace(0, 1, 250)
-    AVG_TKE_V_s_i = np.interp(x_grid, x_s, AVG_TKE_V_s)
+    U = (s1.variables['fU'][:]).T
+    V = (s1.variables['fV'][:]).T
+    W = (s1.variables['fW'][:]).T
+    su = np.mean(U, axis=1)
+    sw = np.mean(W, axis=1)
+    alpha = (sw / su)                          # turning-angle profile
+    # Stored friction velocity / angle exist only for the smooth file
+    ustr_stored = (float(np.mean(s1.variables['FrictionVelocity'][:]))
+                   if 'FrictionVelocity' in s1.variables else None)
+    alpha_str = (float(np.mean(s1.variables['FrictionAngle'][:]))
+                 if 'FrictionAngle' in s1.variables else None)
+    y = s1.variables['y'][:]
+    rU = (s1.variables['rU'][:]).T
+    rV = (s1.variables['rV'][:]).T
+    rW = (s1.variables['rW'][:]).T
+    # ── Geostrophic unit vector (g_x, g_z) from the SCALAR surface friction angle ──
+    # FrictionAngle is stored in DEGREES (smooth file).  The rough file stores none,
+    # so the surface shear-stress turning angle is taken from the near-wall velocity
+    # direction (same physical quantity).  G_x/G_z/G are SCALARS (|G|=1), so they
+    # broadcast cleanly against the 2-D (ny, nt) velocity fields.
+    if alpha_str is not None:
+        _fric_deg = alpha_str                                          # stored FrictionAngle [deg]
+    else:
+        _fric_deg = np.degrees(np.arctan2(sw[4] - sw[0], su[4] - su[0]))  # rough: from near-wall stress dir
+    # G_x = np.cos(_fric_deg * np.pi / 180.0)
+    # G_z = -np.sin(_fric_deg * np.pi / 180.0)
+    G_x = 1
+    G_z = 0
+    G = np.sqrt(G_x**2 + G_z**2)
+    GblU = np.mean(rU, axis=1)
+    GblW = np.mean(rW, axis=1)
+    Rxx = (s1.variables['Rxx'][:]).T
+    Rxy = (s1.variables['Rxy'][:]).T
+    Ryy = (s1.variables['Ryy'][:]).T
+    Ryz = (s1.variables['Ryz'][:]).T
+    Rzz = (s1.variables['Rzz'][:]).T
+    TKE = 0.5 * (Rxx + Ryy + Rzz)              # TKE = 0.5*(⟨u'u'⟩+⟨v'v'⟩+⟨w'w'⟩)
+    case_v = np.zeros((nys, 1)).astype(int)
+    case_v[:, :] = 4; case_v[0, 0] = 1; case_v[1, 0] = 2; case_v[2, 0] = 3
+    case_v[-3, 0] = 5; case_v[-2, 0] = 6; case_v[-1, 0] = 7
+    # ── Method 2: vertically integrated Ekman momentum balance ───────────────
+    cor_yx = -(-GblW + G_z)
+    I_corr_yx = vIntegral(cor_yx, y.size, y)
+    du_dy = diffu_dy((np.reshape(GblU, (y.size, 1))), y.size, 1, case_v, y, 1)
+    visc_yx = (1 / Re_lambda) * du_dy
+    tau_yx = I_corr_yx + np.mean(visc_yx, axis=1) - np.mean(Rxy, axis=1)
+    cor_yz = (GblU - G_x)
+    I_corr_yz = vIntegral(cor_yz, y.size, y)
+    dw_dy = diffu_dy((np.reshape(GblW, (y.size, 1))), y.size, 1, case_v, y, 1)
+    visc_yz = (1 / Re_lambda) * dw_dy
+    tau_yz = -I_corr_yz + np.mean(visc_yz, axis=1) - np.mean(Ryz, axis=1)
+    # Method-2 friction-velocity profile and its constant-flux plateau scalar
+    ustr_M2 = (tau_yx**2 + tau_yz**2) ** 0.25
+    ustr_M2_plateau = plateau_value(ustr_M2, y)
+    # Inner-scaling u*: stored value if available, else the Method-2 plateau
+    ustr_scale = ustr_stored if ustr_stored is not None else ustr_M2_plateau
+    y_p = (y * ustr_scale) / nu
+    U_p = (U / ustr_scale) / G        # G is now a scalar (|g|=1) → broadcasts directly
+    W_p = (W / ustr_scale) / G
+    AVG_TKE_V = np.mean(TKE, axis=0)
+    x = np.linspace(0, 1, AVG_TKE_V.size)   # normalized index (= 250 for smooth, 382 for rough)
+    AVG_TKE_V_i = np.interp(x_grid, x, AVG_TKE_V)
     s1.close()
 
     return {
-        'sy': sy, 'nys': nys, 'U_s': U_s, 'V_s': V_s, 'W_s': W_s,
-        'su': su, 'sw': sw, 'alpha_s': alpha_s, 'ustr_s1': ustr_s1,
-        'alpha_str_s': alpha_str_s, 'y_s': y_s, 'y_s_p': y_s_p,
-        'rU_s': rU_s, 'rV_s': rV_s, 'rW_s': rW_s,
-        'G_x_s': G_x_s, 'G_z_s': G_z_s, 'G_s': G_s,
-        'U_s_p': U_s_p, 'W_s_p': W_s_p, 'GblU_s': GblU_s, 'GblW_s': GblW_s,
-        'Rxx_s': Rxx_s, 'Rxy_s': Rxy_s, 'Ryy_s': Ryy_s, 'Ryz_s': Ryz_s,
-        'Rzz_s': Rzz_s, 'TKE_s': TKE_s, 'case_v_s': case_v_s,
-        'cor_yx_s': cor_yx_s, 'I_corr_yx_s': I_corr_yx_s, 'du_dy_s': du_dy_s,
-        'visc_yx_s': visc_yx_s, 'tau_yx_s': tau_yx_s,
-        'cor_yz_s': cor_yz_s, 'I_corr_yz_s': I_corr_yz_s, 'dw_dy_s': dw_dy_s,
-        'visc_yz_s': visc_yz_s, 'tau_yz_s': tau_yz_s,
-        'AVG_TKE_V_s': AVG_TKE_V_s, 'x_s': x_s, 'AVG_TKE_V_s_i': AVG_TKE_V_s_i,
+        'sy': sy, 'nys': nys, 'U': U, 'V': V, 'W': W,
+        'su': su, 'sw': sw, 'alpha': alpha, 'ustr_stored': ustr_stored,
+        'alpha_str': alpha_str, 'y': y, 'y_p': y_p,
+        'rU': rU, 'rV': rV, 'rW': rW, 'G_x': G_x, 'G_z': G_z, 'G': G,
+        'U_p': U_p, 'W_p': W_p, 'GblU': GblU, 'GblW': GblW,
+        'Rxx': Rxx, 'Rxy': Rxy, 'Ryy': Ryy, 'Ryz': Ryz, 'Rzz': Rzz,
+        'TKE': TKE, 'case_v': case_v,
+        'cor_yx': cor_yx, 'I_corr_yx': I_corr_yx, 'du_dy': du_dy,
+        'visc_yx': visc_yx, 'tau_yx': tau_yx,
+        'cor_yz': cor_yz, 'I_corr_yz': I_corr_yz, 'dw_dy': dw_dy,
+        'visc_yz': visc_yz, 'tau_yz': tau_yz,
+        'AVG_TKE_V': AVG_TKE_V, 'x': x, 'AVG_TKE_V_i': AVG_TKE_V_i,
+        'ustr_M2': ustr_M2, 'ustr_M2_plateau': ustr_M2_plateau,
+        'ustr_scale': ustr_scale,
+    }
+
+
+def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
+    """
+    Smooth-wall reference (flat, neutral, Re=500) — thin wrapper around
+    load_ekman_nc_case that remaps the generic keys to the historical `_s` names
+    used by PhAvg.py and results.py (single source of truth — unchanged public
+    contract).  `ustr_s1` stays the STORED FrictionVelocity; new keys
+    `ustr_M2_s` / `ustr_M2_plateau_s` expose the Method-2 estimate for comparison.
+    """
+    d = load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda)
+    return {
+        'sy': d['sy'], 'nys': d['nys'], 'U_s': d['U'], 'V_s': d['V'], 'W_s': d['W'],
+        'su': d['su'], 'sw': d['sw'], 'alpha_s': d['alpha'], 'ustr_s1': d['ustr_stored'],
+        'alpha_str_s': d['alpha_str'], 'y_s': d['y'], 'y_s_p': d['y_p'],
+        'rU_s': d['rU'], 'rV_s': d['rV'], 'rW_s': d['rW'],
+        'G_x_s': d['G_x'], 'G_z_s': d['G_z'], 'G_s': d['G'],
+        'U_s_p': d['U_p'], 'W_s_p': d['W_p'], 'GblU_s': d['GblU'], 'GblW_s': d['GblW'],
+        'Rxx_s': d['Rxx'], 'Rxy_s': d['Rxy'], 'Ryy_s': d['Ryy'], 'Ryz_s': d['Ryz'],
+        'Rzz_s': d['Rzz'], 'TKE_s': d['TKE'], 'case_v_s': d['case_v'],
+        'cor_yx_s': d['cor_yx'], 'I_corr_yx_s': d['I_corr_yx'], 'du_dy_s': d['du_dy'],
+        'visc_yx_s': d['visc_yx'], 'tau_yx_s': d['tau_yx'],
+        'cor_yz_s': d['cor_yz'], 'I_corr_yz_s': d['I_corr_yz'], 'dw_dy_s': d['dw_dy'],
+        'visc_yz_s': d['visc_yz'], 'tau_yz_s': d['tau_yz'],
+        'AVG_TKE_V_s': d['AVG_TKE_V'], 'x_s': d['x'], 'AVG_TKE_V_s_i': d['AVG_TKE_V_i'],
+        # new: Method-2 friction velocity for the smooth case (vs stored ustr_s1)
+        'ustr_M2_s': d['ustr_M2'], 'ustr_M2_plateau_s': d['ustr_M2_plateau'],
     }
 
 
@@ -950,6 +1030,34 @@ def vIntegral2(varaible, ny, y):
         I[j] = I[j-1] + 0.5*(varaible[j] + varaible[j-1])*(y[j]-y[j-1])
     return I
 
+def vIntegral_2d(field, ny, y):
+    """Column-wise cumulative vertical integral of a 2-D field (ny, nx).
+
+    For every x-column i, returns the running integral from the wall
+        I[j, i] = ∫_0^{y[j]} field[:, i] dy,
+    using the trapezoidal rule (identical scheme to vIntegral2, applied per
+    column and vectorised over columns).
+
+    Intended for use over orography: pass a field that is ALREADY zeroed inside
+    the solid (e.g. corr*mask0), so solid cells add no contribution and the
+    integration naturally skips the immersed body.  This differs from
+    vIntegral(np.mean(field, axis=1)) — which x-averages (extrinsically, over all
+    nx columns) BEFORE integrating.  Here each column is integrated first, so the
+    result can be combined with the intrinsic (fluid-only) average avg_c AFTER
+    integration:  avg_c(eps, vIntegral_2d(field, ny, y), axis=1).
+
+    Returns
+    -------
+    I : ndarray, shape (ny, nx) — cumulative integral per column (I[0, :] = 0).
+    """
+    field = np.asarray(field, dtype=np.float64)
+    y     = np.asarray(y, dtype=np.float64)
+    I     = np.zeros_like(field)
+    dy    = np.diff(y)                                   # (ny-1,)
+    incr  = 0.5 * (field[1:, :] + field[:-1, :]) * dy[:, None]
+    I[1:, :] = np.cumsum(incr, axis=0)
+    return I
+
 def createIntegrate(surf_hor, n, i_id, variable, x, side):
     if side == 'LHS':
         indj = np.where(surf_hor[0,:int(n)] == i_id)[0]
@@ -1202,7 +1310,7 @@ def mark_h(pos, orient='v', label=True, lblpos=0.04, ha='right', ax=None,
 
 
 def mark_layers(xdata, ydata, idx_dict, ax=None, filled=True, color='black',
-                size=6, zorder=6, edgewidth=0.8):
+                size=5, zorder=6, edgewidth=0.8):
     """Place discrete boundary-layer markers on a curve.
 
     xdata, ydata : the x- and y-data arrays of the curve to mark on (e.g. z+ and

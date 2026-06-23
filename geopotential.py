@@ -439,7 +439,7 @@ def build_capacitance_matrices(D1, D2, kx, j_idx, i_idx,
 #     label_levels = levels[::max(1, n_levels // 6)]
 #     ax.clabel(cs, levels=label_levels,
 #               fmt=lambda v: f'{v:.2f}',
-#               fontsize=6, inline=True, inline_spacing=3, zorder=4)
+#               fontsize=4, inline=True, inline_spacing=3, zorder=4)
 
 #     # IBM / solid region on top — identical to the original function
 #     ax.fill(xfill, yfill, facecolor='black', zorder=5)
