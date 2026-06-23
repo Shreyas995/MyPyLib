@@ -763,6 +763,39 @@ if (1 == postprocess):
     _z_fit      = y_in[_fit_mask]
     _u_fit      = u_h_plus[_fit_mask]
 
+    # ── Stratification correction (Obukhov 1971), gated by config.Fr ──────────
+    # Neutral runs (Fr = np.inf): φ ≡ 1 and the loop below is the classical OLS
+    # of u⁺ vs ln(z⁺ − d⁺) — bit-for-bit unchanged.
+    # Stratified runs (finite Fr): the mean-wind gradient obeys
+    #     √φ(Ri)·κ·z·dū/dz = u★                          (Obukhov eqs 17 & 22)
+    # with the energy-balance universal function
+    #     φ(Ri) = (1 − Ri/Ri_cr)^(1/2)                   (Obukhov eq 38),
+    # which integrates to u⁺ = (1/κ)·Ξ(z⁺) + B with the stability-modified abscissa
+    #     Ξ(z⁺) = ∫ (1 − Ri/Ri_cr)^(−1/4) / (z⁺ − d⁺) dz⁺   ( → ln(z⁺−d⁺) as Ri→0 ).
+    # Ri is the gradient Richardson number from the measured profiles,
+    #     Ri = (∂⟨b⟩/∂z)/(∂⟨ū⟩/∂z)²   (AvgScal is the buoyancy b; ū = rotated mean).
+    # Ri is capped just below Ri_cr (where φ→0, turbulence ceases); unstable Ri<0
+    # is kept (φ>1 ⇒ enhanced mixing) so eq 38 covers both stable and unstable.
+    _stratified = bool(np.isfinite(Fr))
+    if _stratified:
+        _b1d  = avg_c(eps, AvgScal, axis=1)              # ⟨b⟩(z), fluid-only
+        _dbdz = np.gradient(_b1d, y)[_fit_mask]          # ∂⟨b⟩/∂z on the fit window
+        _dudz = np.gradient(u_plus_rot, y)[_fit_mask]    # ∂⟨ū_rot⟩/∂z
+        with np.errstate(divide='ignore', invalid='ignore'):
+            _Ri_fit = _dbdz / _dudz**2
+        _Ri_fit   = np.nan_to_num(_Ri_fit, nan=0.0, posinf=Ri_cr, neginf=0.0)
+        _Ri_fit   = np.minimum(_Ri_fit, 0.999 * Ri_cr)   # cap at Ri_cr (φ → 0)
+        _phi_corr = (1.0 - _Ri_fit / Ri_cr) ** (-0.25)   # φ^(−1/2)  (eqs 22 & 38)
+    else:
+        _Ri_fit   = np.zeros_like(_z_fit)
+        _phi_corr = np.ones_like(_z_fit)
+
+    def _cumtrapz0(fvals, xvals):
+        """Cumulative trapezoidal integral of fvals over xvals, starting at 0."""
+        return np.concatenate(([0.0],
+                               np.cumsum(0.5 * (fvals[1:] + fvals[:-1])
+                                         * np.diff(xvals))))
+
     # Defaults (fallback if no valid κ found in constrained range)
     kappa_loglaw = 0.41
     d_m_loglaw   = 0.0
@@ -774,7 +807,12 @@ if (1 == postprocess):
             _zs = _z_fit - _d
             if np.any(_zs <= 0):
                 break
-            _slope, _intercept, _r, *_ = linregress(np.log(_zs), _u_fit)
+            # Stability-modified log abscissa Ξ; ≡ ln(z⁺−d⁺) in the neutral limit.
+            if _stratified:
+                _x = np.log(_zs[0]) + _cumtrapz0(_phi_corr / _zs, _z_fit)
+            else:
+                _x = np.log(_zs)
+            _slope, _intercept, _r, *_ = linregress(_x, _u_fit)
             if _slope <= 0:
                 continue
             _k = 1.0 / _slope
@@ -786,9 +824,13 @@ if (1 == postprocess):
                 d_m_loglaw   = _d
                 z0m_loglaw   = np.exp(-_intercept / _slope)   # z_{0m}⁺ = exp(−B·κ)
 
-    print(f"Log-law fit (z+ ∈ [{_fit_lo:.0f},{_fit_hi:.0f}]):  "
+    _law = "Obukhov stratified" if _stratified else "neutral"
+    print(f"Wall-law fit [{_law}] (z+ ∈ [{_fit_lo:.0f},{_fit_hi:.0f}]):  "
           f"κ_m={kappa_loglaw:.4f}  d_m+={d_m_loglaw:.2f}  "
           f"z_0m+={z0m_loglaw:.5f}  R²={_best_r2:.4f}")
+    if _stratified:
+        print(f"   stratified (Fr={Fr:.2e}, Ri_cr={Ri_cr:.3f}):  "
+              f"⟨Ri⟩_fit={np.mean(_Ri_fit):+.4f}  Ri_max={np.max(_Ri_fit):+.4f}")
 
 ###############################################################################
 ################ Canopy exponential law (z+ ∈ [0, h⁺+20pts]) ################

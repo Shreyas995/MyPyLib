@@ -137,3 +137,28 @@ enstrophy_thresh = 0.01       # γ = 1 where ½ω'² > enstrophy_thresh * max(½
 # Goal 2 flat-wall stratified reference: {(Re, Fr): nc_path}.  Empty until that
 # data exists (all current .nc are ri00.00 = neutral); loaded via load_smooth_case.
 stratified_ref_paths = {}
+
+# ── 12. Stratification switch (Fr) + Obukhov stability-corrected wall law ──────
+# Fr distinguishes the NEUTRAL run from the STRATIFIED runs and carries the
+# stratification strength.  It is the single switch the wall-law fit keys on
+# (PhAvg.py / PhAvg_rotated.py):
+#     np.isfinite(Fr) is False  (Fr = np.inf)  → classical neutral log law
+#     np.isfinite(Fr) is True   (finite Fr)    → Obukhov (1971) stratified law
+# Per-case values (smaller Fr ⇒ stronger stratification).  Re=500 Froude ladder:
+#     Ekman18                  neutral :  np.inf
+#     1056x672x1056/EkRe500Fr1         :  1.0
+#     1056x672x1056/EkRe500Fr0.1       :  0.1
+#     1056x672x1056/EkRe500Fr0.01      :  0.01
+Fr = np.inf                   # this run's Froude number (np.inf ⇒ neutral)
+
+# Obukhov (1971) stability-corrected log law.  The mean-wind gradient follows
+#   √φ(Ri)·κ·z·dū/dz = u★              (Obukhov eqs 17 & 22)
+# with the energy-balance universal function
+#   φ(Ri) = (1 − Ri/Ri_cr)^(1/2)       (Obukhov eq 38),
+# so the wall-law fit integrand carries the factor (1 − Ri/Ri_cr)^(−1/4) and
+# reduces to the neutral ln(z⁺ − d⁺) when Ri → 0.  Ri is the gradient Richardson
+# number measured from the profiles:  Ri = (∂⟨b⟩/∂z)/(∂⟨ū⟩/∂z)²  (AvgScal is b).
+# Ri_cr is the critical Richardson number at which turbulence ceases (φ → 0).
+# Obukhov cites 1/11 … 1 (Sverdrup ⇒ Ri_cr = 1/α = K/K_T ≈ Pr_t); 0.25 is the
+# standard Miles–Howard value used here — set it to Pr_t if that closure is wanted.
+Ri_cr = 0.25                  # critical gradient Richardson number  [Obukhov eqs 36/38]

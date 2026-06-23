@@ -170,6 +170,13 @@ var_names = [
     # Goal 3 — scales per run (3 methods) + headline (Method 2)
     'scales', 'delta_run', 'H_phys', 'Psi', 'H_delta', 'H_plus_r', 'Lx_plus',
 
+    # Coriolis–topography coupling — global surface veer (orographic).
+    # γ_veer = veer_oro/veer_smooth is formed in results.py from the smooth
+    # reference (Research.md candidate finding #3 / §6.14.5; Ψ aggregation).
+    # veer_smooth / gamma_veer are NOT pickled: the smooth .nc is loaded in
+    # PhAvg_rotated.py only after the pickle dump, so they are unavailable here.
+    'veer_oro',
+
     # Goal 4 — flux decomposition (x-averaged profiles + dispersive shares)
     'rey_uv_x', 'UV_disp_x', 'disp_share_mom', 'disp_share_buoy',
 

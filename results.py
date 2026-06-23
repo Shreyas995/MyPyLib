@@ -517,12 +517,14 @@ cwd = str(os.path.dirname(__file__) + '/' )
 # Five simulations ordered by decreasing Froude number (increasing stratification):
 # Six cases ordered by decreasing Froude number (increasing stratification), Re = 500 for all.
 # Smooth (NetCDF): flat wall, Fr = ∞  — loaded separately below from Re500 NetCDF.
-cwd1 = str(os.path.dirname(__file__) + '/Ekman18/' )    # Neutral       Fr = ∞    (valley present)
-cwd2 = str(os.path.dirname(__file__) + '/Ekman18B/' )   # Weak strat    Fr = 1e-2 (valley present)
-cwd3 = str(os.path.dirname(__file__) + '/Ekman18B1/' )  # Mod strat     Fr = 1e-4 (valley present)
-cwd4 = str(os.path.dirname(__file__) + '/Ekman18B2/' )  # Strong strat  Fr = 1e-5 (valley present)
-cwd5 = str(os.path.dirname(__file__) + '/Ekman18B3/' )  # Very strong   Fr = 1e-6 (valley present)
-# NOTE: cwd4 was previously cwd2 (Ekman18B2); data loading blocks below use _b/_b1/_b2/_b3 suffixes.
+# Re=500 Froude ladder (neutral + Fr = 1, 0.1, 0.01).  The stratified runs live
+# on a finer grid (1056x672x1056) in a separate subtree, so use the absolute
+# data paths rather than the __file__-relative pattern.  Re=750 not yet available.
+_base = os.path.expanduser('~/Documents/PhD/Code/examples')
+cwd1 = _base + '/Ekman18/'                       # Neutral      Fr = ∞    (valley present)
+cwd2 = _base + '/1056x672x1056/EkRe500Fr1/'      # Strat        Fr = 1    (valley present)
+cwd3 = _base + '/1056x672x1056/EkRe500Fr0.1/'    # Strat        Fr = 0.1  (valley present)
+cwd4 = _base + '/1056x672x1056/EkRe500Fr0.01/'   # Strat        Fr = 0.01 (valley present)
 # Read grid
 x, y, z = read_grid(cwd)
 
@@ -578,11 +580,10 @@ mask0 = 1 - eps
 ###############################################################################
 PLOT_SMOOTH = True   # smooth-wall NetCDF reference (flat wall, Fr = inf)
 ACTIVE_CASES = {
-    'nu_oro',       # Neutral,       Fr = inf
-    'fr_1e2_oro',   # Weak strat,    Fr = 1e-2
-    # 'fr_1e4_oro',   # Mod strat,     Fr = 1e-4
-    # 'fr_1e5_oro',   # Strong strat,  Fr = 1e-5
-    # 'fr_1e6_oro',   # Very strong,   Fr = 1e-6
+    'nu_oro',       # Neutral,     Fr = inf
+    'fr_1_oro',     # Strat,       Fr = 1
+    'fr_0p1_oro',   # Strat,       Fr = 0.1
+    'fr_0p01_oro',  # Strat,       Fr = 0.01
 }
 ###############################################################################
 
@@ -594,20 +595,18 @@ ACTIVE_CASES = {
 #   Plots label the wall-normal axis as z+ (meteorological convention).
 ###############################################################################
 CASES = [
-    {'name': 'Sm_Neu',     'label': r'Smooth ($Fr=\infty$, flat)', 'color': '#636363', 'ls': '-',            'marker': 'o'},
-    {'name': 'nu_oro',     'label': r'Neutral ($Fr=\infty$)',      'color': '#1565C0', 'ls': '--',           'marker': 's'},
-    {'name': 'fr_1e2_oro', 'label': r'$Fr=10^{-2}$',              'color': '#00838F', 'ls': '-.',           'marker': '^'},
-    {'name': 'fr_1e4_oro', 'label': r'$Fr=10^{-4}$',              'color': '#2E7D32', 'ls': ':',            'marker': 'D'},
-    {'name': 'fr_1e5_oro', 'label': r'$Fr=10^{-5}$',              'color': '#E65100', 'ls': (0,(5,2)),      'marker': 'v'},
-    {'name': 'fr_1e6_oro', 'label': r'$Fr=10^{-6}$',              'color': '#880E4F', 'ls': (0,(3,1,1,1)), 'marker': 'P'},
+    {'name': 'Sm_Neu',      'label': r'Smooth ($Fr=\infty$, flat)', 'color': '#636363', 'ls': '-',       'marker': 'o'},
+    {'name': 'nu_oro',      'label': r'Neutral ($Fr=\infty$)',      'color': '#1565C0', 'ls': '--',      'marker': 's'},
+    {'name': 'fr_1_oro',    'label': r'$Fr=1$',                     'color': '#00838F', 'ls': '-.',      'marker': '^'},
+    {'name': 'fr_0p1_oro',  'label': r'$Fr=0.1$',                   'color': '#2E7D32', 'ls': ':',       'marker': 'D'},
+    {'name': 'fr_0p01_oro', 'label': r'$Fr=0.01$',                  'color': '#E65100', 'ls': (0,(5,2)), 'marker': 'v'},
 ]
 
 SIM_DIRS = {
-    'nu_oro':     cwd1,
-    'fr_1e2_oro': cwd2,
-    'fr_1e4_oro': cwd3,
-    'fr_1e5_oro': cwd4,
-    'fr_1e6_oro': cwd5,
+    'nu_oro':      cwd1,
+    'fr_1_oro':    cwd2,
+    'fr_0p1_oro':  cwd3,
+    'fr_0p01_oro': cwd4,
 }
 
 ###############################################################################
@@ -1781,8 +1780,8 @@ if (1 == plotRes):
     # Reads the per-run research keys pickled by PhAvg_rotated.py; skips silently
     # for any case whose pickle lacks them.
     # ═══════════════════════════════════════════════════════════════════════
-    _FR = {'nu_oro': np.inf, 'fr_1e2_oro': 1e-2, 'fr_1e4_oro': 1e-4,
-           'fr_1e5_oro': 1e-5, 'fr_1e6_oro': 1e-6}
+    _FR = {'nu_oro': np.inf, 'fr_1_oro': 1.0, 'fr_0p1_oro': 0.1,
+           'fr_0p01_oro': 0.01}
     _xc = [c for c in CASES
            if c['name'] in sims and gv('Ri_B', c['name']) is not None]
     if len(_xc) == 0:
@@ -1878,6 +1877,43 @@ if (1 == plotRes):
             ax.grid(True, ls='--', lw=0.5)
             fig.savefig(_figdir_x + 'Xcase_gamma_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
 
+        # ── [X6] Coriolis–topography COUPLING observables vs Ψ ────────────────
+        # First look at how the coupling observables organise on Ψ = Lx/(2δ)
+        # (Research.md candidate finding #3, line 558).  HONEST BOUND: across this
+        # Froude ladder Ψ is varied only through δ, so it covaries with Ri_B, H/δ
+        # and the stability state — read as organisation along a covaried path,
+        # NOT a γ_veer(Ψ) scaling law (which needs fixed-Re_τ / varying-Lx runs).
+        _Psi  = np.array([_scl(n, 'Psi')                 for n in _nm])
+        # γ_veer = α_oro / α_smooth, formed here: per-case orographic global veer
+        # (pickled as veer_oro) over the smooth-wall surface veer (smooth ref).
+        _vo    = np.array([(gv('veer_oro', n) if gv('veer_oro', n) is not None
+                            else np.nan) for n in _nm], float)
+        _smv   = (abs(np.degrees(float(alpha_str_s))) if _smooth_loaded else np.nan)
+        _gveer = (_vo / _smv if (np.isfinite(_smv) and _smv != 0.0)
+                  else np.full(len(_nm), np.nan))
+        _dmom = np.array([_share_BL(n, 'disp_share_mom') for n in _nm])
+        _Hdel = np.array([_scl(n, 'H_delta')             for n in _nm])
+        _o    = np.argsort(_Psi)                          # order by increasing Ψ
+        _cpl_panels = [(_gveer, r'$\gamma_{veer}=\alpha_{oro}/\alpha_{smooth}$'),
+                       (_dmom,  'BL-mean dispersive momentum share'),
+                       (_Hdel,  r'$H/\delta$'),
+                       (_Lp,    r'$L_{col}^+$')]
+        fig, axs = plt.subplots(2, 2, figsize=(11, 8), dpi=300)
+        for axi, (yv, ttl) in zip(axs.flat, _cpl_panels):
+            if np.any(np.isfinite(yv)):
+                axi.plot(_Psi[_o], yv[_o], '-', color='0.6', lw=1.0, zorder=1)
+            for i, n in enumerate(_nm):
+                axi.scatter(_Psi[i], yv[i], color=_col[i], marker=_mk[i],
+                            s=80, zorder=3, label=_lab[i])
+            axi.set_xlabel(r'$\Psi = L_x/(2\delta)$'); axi.set_title(ttl)
+            axi.grid(True, ls='--', lw=0.5)
+        axs.flat[3].axhline(100, color='r', ls=':', lw=1, label='collapse ~100')
+        axs.flat[0].legend(fontsize=7, loc='best')
+        fig.suptitle('Coriolis–topography coupling vs $\\Psi$ (first look; '
+                     'covaried path, not a scaling law)')
+        fig.tight_layout()
+        fig.savefig(_figdir_x + 'Xcase_coupling_vs_Psi.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+
         # ── Console matrix summary + Goal 8 (Re 500 vs 750) status ────────────
         print('\n=== CROSS-CASE RESEARCH MATRIX (Re_D=500) ===')
         print(f"  {'case':<12}{'Ri_B':>11}{'L_col+':>10}{'class':>22}{'Psi':>8}{'H/delta':>9}")
@@ -1891,3 +1927,17 @@ if (1 == plotRes):
         print('  Reynolds numbers present: %s' % sorted(_re_set))
         if 750 not in _re_set:
             print('  Goal 8 (Re_D=750): data absent — inner-vs-outer collapse test pending 750 pickles.')
+
+        # ── COUPLING vs Ψ table (Coriolis–topography; ordered by increasing Ψ) ─
+        print('\n=== CORIOLIS–TOPOGRAPHY COUPLING vs Psi (Re_D=500; covaried path) ===')
+        print(f"  {'case':<13}{'Psi':>8}{'H/delta':>9}{'Ri_B':>11}"
+              f"{'gamma_veer':>12}{'disp_mom':>10}{'class':>22}")
+        for i in _o:
+            n   = _nm[i]
+            _s  = gv('scales', n)
+            _ps = _s['M2']['Psi']     if _s else float('nan')
+            _hd = _s['M2']['H_delta'] if _s else float('nan')
+            print(f"  {n:<13}{_ps:>8.3f}{_hd:>9.4f}{float(gv('Ri_B', n)):>11.3e}"
+                  f"{_gveer[i]:>12.4f}{_dmom[i]:>10.4f}{str(gv('stab_class', n)):>22}")
+        print('  NOTE: Psi covaries with Ri_B / H/delta / stability along this '
+              'ladder — a first look, not a gamma_veer(Psi) scaling law.')
