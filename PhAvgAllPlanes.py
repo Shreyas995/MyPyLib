@@ -584,6 +584,22 @@ if (1 == cal_Avg):
         quit()
     print("Found %d iteration set(s): %s" % (len(tokens), ', '.join(tokens)))
 
+    # Overlap check: two files covering the same iteration number is a logical
+    # error in the file naming or the simulation itself.
+    parsed_ranges = [(int(t.split('_')[0]), int(t.split('_')[1]), t) for t in tokens]
+    overlap_found = False
+    for i in range(1, len(parsed_ranges)):
+        prev_start, prev_end, prev_tok = parsed_ranges[i - 1]
+        curr_start, curr_end, curr_tok = parsed_ranges[i]
+        if curr_start <= prev_end:
+            print("ERROR: iteration overlap between sets '%s' (ends at %d) and "
+                  "'%s' (starts at %d) — two files cover the same iteration. "
+                  "This is a file-naming or simulation error; cannot continue."
+                  % (prev_tok, prev_end, curr_tok, curr_start))
+            overlap_found = True
+    if overlap_found:
+        quit()
+
     nplanes_ref = None        # plane count of the first valid set (for warnings)
 
     for tok in tokens:
@@ -661,12 +677,15 @@ if (1 == cal_Avg):
                   % (tok, nplanes_set))
             continue
 
-        # Restart consistency across sets (warn only; accumulation is per-plane).
+        # Restart size can legitimately differ between sets when the simulation
+        # was restarted with a different averaging interval; log it as information.
         if (nplanes_ref is None):
             nplanes_ref = nplanes_set
         elif (nplanes_set != nplanes_ref):
-            print("WARNING: set %s has %d planes vs %d in the first set "
-                  "(different Restart?); proceeding." % (tok, nplanes_set, nplanes_ref))
+            print("Note: set %s uses Restart=%d (%d planes) vs Restart=%d (%d planes) "
+                  "in the first set — expected when the simulation was restarted with "
+                  "a different averaging interval; proceeding."
+                  % (tok, nplanes_set - 1, nplanes_set, nplanes_ref - 1, nplanes_ref))
 
         ndata = nplanes_set - 1   # exclude the final (corrupt) precomputed-average plane
         print("Set %s: %d planes total; averaging the first %d (final avg plane excluded)."
