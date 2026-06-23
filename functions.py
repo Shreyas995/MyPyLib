@@ -439,14 +439,36 @@ def int2bit_2(out,data): # option 2 (bit faster then option 1)
             j += 1
     return out
 
+def _eps_log(msg, _logpath='eps.log'):
+    """Print msg to the console AND append it to eps.log.
+
+    Used by epsVolume to record the surface-cell classification (the
+    'Case undefined' diagnostics) so they can be inspected later if there
+    are any issues. Writing failures are non-fatal — the message is still
+    printed. eps.log is created in the current working directory (the case
+    dir from which PhAvg.py / PhAvg_rotated.py are run).
+    """
+    print(msg)
+    try:
+        with open(_logpath, 'a') as _f:
+            _f.write(str(msg) + '\n')
+    except Exception:
+        pass
+
 def epsVolume(eps,ny,nx, hill_hgt):
     eps_vol = np.zeros((ny,nx))
-    
+
+    # start a fresh eps.log for this run (truncate any previous one)
+    try:
+        open('eps.log', 'w').close()
+    except Exception:
+        pass
+
     for j in range (hill_hgt+1):
         for i in range (nx):
             if i == 1023:
-                print (i)
-                
+                _eps_log('i: %d' % i)
+
             # Top
             if j == 0:
                 # Top left cornor
@@ -454,14 +476,14 @@ def epsVolume(eps,ny,nx, hill_hgt):
                     if (eps[j,i] + eps[j+1,i+1] + eps[j+1,i] + eps[j,i+1] == 4):
                         eps_vol[j,i] = 1
                     else:
-                        print ('i:', i , 'j:', j, 'Case undefined')
+                        _eps_log('i: %d j: %d Case undefined' % (i, j))
                         
                 # Top right cornor
                 elif i == nx-1:
                     if (eps[j,i] + eps[j,i-1] + eps[j+1,i-1] + eps[j+1,i] == 4):
                         eps_vol[j,i] = 1
                     else:
-                        print ('i:', i , 'j:', j, 'Case undefined')
+                        _eps_log('i: %d j: %d Case undefined' % (i, j))
                         
                 # Top edge
                 if i != 0 and i != nx-1:
@@ -483,7 +505,7 @@ def epsVolume(eps,ny,nx, hill_hgt):
                         else:
                             eps_vol[j,i] = 0.5
                     else:
-                        print ('i:', i , 'j:', j, 'Case undefined')
+                        _eps_log('i: %d j: %d Case undefined' % (i, j))
                 
             # Generalized area
             elif i != 0 and j != 0 and i != nx-1:
@@ -500,7 +522,7 @@ def epsVolume(eps,ny,nx, hill_hgt):
                 elif (eps[j,i] + eps[j-1,i] + eps[j-1,i+1] + eps[j,i+1] + eps[j+1,i+1] + eps[j+1,i] + eps[j+1,i-1] + eps[j,i-1] + eps[j-1,i-1] == 4):
                     eps_vol[j,i] = 0.25
                 else:
-                    print ('i:', i , 'j:', j, 'Case undefined')
+                    _eps_log('i: %d j: %d Case undefined' % (i, j))
                     
             # Left edge
             elif i == 0 and j != 0:
@@ -514,7 +536,7 @@ def epsVolume(eps,ny,nx, hill_hgt):
                     eps_vol[j,i] = 0.5
                     
                 else:
-                    print ('i:', i , 'j:', j, 'Case undefined')
+                    _eps_log('i: %d j: %d Case undefined' % (i, j))
                     
             # Right edge
             elif i == nx-1 and j != 0:
@@ -527,10 +549,10 @@ def epsVolume(eps,ny,nx, hill_hgt):
                 elif (eps[j,i] + eps[j-1,i] + eps[j-1,i-1] + eps[j,i-1] + eps[j+1,i-1] + eps[j+1,i] == 4):
                     eps_vol[j,i] = 0.5
                 else:
-                    print ('i:', i , 'j:', j, 'Case undefined')
+                    _eps_log('i: %d j: %d Case undefined' % (i, j))
                     
             else:
-                print ('i:', i , 'j:', j, 'Case undefined')
+                _eps_log('i: %d j: %d Case undefined' % (i, j))
     return eps_vol
 
 def writefield(path, Nx, Ny, Nz, field):
