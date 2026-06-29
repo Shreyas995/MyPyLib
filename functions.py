@@ -23,6 +23,50 @@ from scipy.ndimage import uniform_filter1d
 ###############################################################################
 ############################## Function defintion #############################
 
+class _Tee(object):
+    """Duplicate stdout writes to the terminal AND a log file (sim_stats.log).
+
+    Used so the post-processing statistics are both printed and saved.
+    File-write failures are swallowed so a read-only dir can't break the run.
+    """
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+    def write(self, data):
+        self._stream.write(data)
+        try:
+            self._fh.write(data)
+        except Exception:
+            pass
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+        try:
+            self._fh.flush()
+        except Exception:
+            pass
+
+
+def start_stats_log(path='sim_stats.log'):
+    """Tee everything printed from now on to `path` as well as the terminal.
+
+    `path` is (re)created fresh on each run (mode 'w'). Call this once, at the
+    point in PhAvg(_rotated).py from which the run statistics should start being
+    recorded (the 'Computing ghost-cell interpolated fields (PCHIP) ...' line).
+    Returns the open file handle. Safe to call when stdout is already a _Tee
+    (re-wraps the current stream); no-op on failure to open the file.
+    """
+    import sys
+    try:
+        fh = open(path, 'w')
+    except Exception:
+        return None
+    sys.stdout = _Tee(sys.stdout, fh)
+    return fh
+
+
 def load_or_compute(names, recompute, compute_fn, save=True, verbose=True,
                     label=None):
     """
@@ -440,15 +484,14 @@ def int2bit_2(out,data): # option 2 (bit faster then option 1)
     return out
 
 def _eps_log(msg, _logpath='eps.log'):
-    """Print msg to the console AND append it to eps.log.
+    """Append msg to eps.log (NOT printed to the console).
 
     Used by epsVolume to record the surface-cell classification (the
     'Case undefined' diagnostics) so they can be inspected later if there
-    are any issues. Writing failures are non-fatal — the message is still
-    printed. eps.log is created in the current working directory (the case
-    dir from which PhAvg.py / PhAvg_rotated.py are run).
+    are any issues. Writing failures are non-fatal. eps.log is created in
+    the current working directory (the case dir from which PhAvg.py /
+    PhAvg_rotated.py are run) and is rewritten on each run.
     """
-    print(msg)
     try:
         with open(_logpath, 'a') as _f:
             _f.write(str(msg) + '\n')
@@ -1415,3 +1458,77 @@ def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5):
     if main is not None:
         a.add_artist(main)                # restore the main legend a.legend() displaced
     return leg
+
+
+def streamfunction_2d(U, V, x, y, mask=None):
+    """2-D streamfunction psi(x, z) of a spanwise-mean (x, wall-normal) flow.
+
+    For an incompressible 2-D projection with u = +d(psi)/dz and v = -d(psi)/dx,
+    psi at fixed x is the wall-normal integral of the streamwise velocity:
+
+        psi[j, i] = integral_0^{y[j]} U[:, i] dz' .
+
+    This is the wall-anchored cumulative integral (psi = 0 at the wall), computed
+    column-wise with vIntegral_2d.  V is accepted for API symmetry / future use
+    (the continuity-consistent reconstruction) and to document the convention; the
+    leading-order streamfunction needs only U.  If `mask` (1 in fluid, 0 in solid)
+    is given, U is zeroed in the solid before integrating so the immersed body
+    adds no circulation.
+
+    Parameters
+    ----------
+    U, V : ndarray (ny, nx) — streamwise and wall-normal mean velocity.
+    x, y : 1-D coordinates (physical or inner units — psi inherits those units).
+    mask : optional (ny, nx) fluid mask (e.g. 1 - eps); applied to U if shapes match.
+
+    Returns
+    -------
+    psi : ndarray (ny, nx) — streamfunction, psi[0, :] = 0.
+    """
+    U = np.asarray(U, dtype=np.float64)
+    if mask is not None and np.shape(mask) == np.shape(U):
+        U = U * mask
+    ny = U.shape[0]
+    return vIntegral_2d(U, ny, np.asarray(y, dtype=np.float64))
+
+
+def terrain_follow_remap(field, y, y_surf_x, zeta=None, nzeta=None):
+    """Remap a 2-D field (ny, nx) from floor-referenced height y to a
+    terrain-following height zeta = (y - local surface elevation) per column.
+
+    Each x-column i is shifted down by its local surface height y_surf_x[i] and
+    re-sampled (np.interp) onto a COMMON zeta axis, so a constant-zeta row sits at
+    a constant distance ABOVE the local surface rather than a constant distance
+    from the domain floor.  This removes the leading-order kinematic crest/valley
+    artefact from horizontally-averaged or phase-averaged maps (Research.md Ch. 6,
+    Figs. 6.4-6.6 / 6.17 terrain-following re-evaluation).
+
+    Points below the local surface (zeta < 0) and above the original top map to
+    NaN (left/right fill), so they are excluded from any subsequent average/plot.
+
+    Parameters
+    ----------
+    field    : ndarray (ny, nx).
+    y        : 1-D wall-normal coordinate (ny,), monotonically increasing.
+    y_surf_x : 1-D local surface elevation per column (nx,), same units as y.
+    zeta     : optional common terrain-following axis; if None it is built from
+               0 to (y[-1] - min(y_surf_x)) with nzeta points.
+    nzeta    : number of points for the auto zeta axis (default ny).
+
+    Returns
+    -------
+    out  : ndarray (len(zeta), nx) — field on the terrain-following axis (NaN fill).
+    zeta : 1-D terrain-following axis used.
+    """
+    field    = np.asarray(field, dtype=np.float64)
+    y        = np.asarray(y, dtype=np.float64)
+    y_surf_x = np.asarray(y_surf_x, dtype=np.float64)
+    ny, nx   = field.shape
+    if zeta is None:
+        _zmax = float(y[-1] - np.nanmin(y_surf_x))
+        zeta  = np.linspace(0.0, max(_zmax, 0.0), int(nzeta or ny))
+    out = np.full((zeta.size, nx), np.nan, dtype=np.float64)
+    for i in range(nx):
+        _zcol = y - y_surf_x[i]                       # height above local surface
+        out[:, i] = np.interp(zeta, _zcol, field[:, i], left=np.nan, right=np.nan)
+    return out, zeta

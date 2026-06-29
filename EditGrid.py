@@ -133,7 +133,8 @@ def print_zones(y, l_in, dx_ref):
 # ============================================================================
 def build_y_grid(old_y, u_star, l_in, hill_hgt, dx_ref, ny_target,
                  r_in=1.02, r_out=1.03, n_in_decel=5, n_sponge=20,
-                 iso_thresh=0.90, dy_wall=None, n_bl=None, n_ramp=10):
+                 iso_thresh=0.90, dy_wall=None, n_bl=None, n_ramp=10,
+                 zone1_top=None):
     """
     Build a wall-normal node distribution satisfying Constraints 1-5.
 
@@ -157,6 +158,14 @@ def build_y_grid(old_y, u_star, l_in, hill_hgt, dx_ref, ny_target,
                  lifts it to ~0.94-0.95 dx (close to isotropy) staying < dx.
     dy_wall    : near-wall uniform spacing.  Default: old_y[1] if old_y[1] < l_in
                  (no refinement needed), else l_in (refine to 1 wall unit).
+    zone1_top  : ALIGNED Zone-1 mode (grid-gen rule 1).  When given, the uniform
+                 near-wall zone has a FIXED height whose top lands EXACTLY on an
+                 OLD-grid node `zone1_top` (caller passes (valley+20)*dy_old, which
+                 coincides with an old node).  Zone 1 is then refined into
+                 n1 = ceil(zone1_top/dy_wall) uniform cells with dy1 = zone1_top/n1
+                 (<= 1 wall unit), so the last uniform node aligns with the old grid
+                 (transfields-clean) and the scale matches exactly.  None (default)
+                 keeps the legacy "ceil(hill/dy_wall)+20 new cells" Zone 1.
     n_bl       : extra uniform padding cells appended at dy_bl beyond the natural
                  BL zone (same spacing = no contraction) to tune ny to ny_target.
 
@@ -169,10 +178,18 @@ def build_y_grid(old_y, u_star, l_in, hill_hgt, dx_ref, ny_target,
     ody = np.diff(old_y); oyc = 0.5 * (old_y[1:] + old_y[:-1])
     ceil_dy = lambda yc: np.interp(np.minimum(yc, oyc[-1]), oyc, ody)  # old dy ceiling
 
-    # --- Zone 1: uniform zone spanning ceil(hill_hgt/dy_wall) + 20 cells --------
-    # The "20" is 20 reference-grid CELL widths (grid points), not 20 wall units.
-    n1 = int(np.ceil(hill_hgt / dy_wall)) + 20
-    dy1 = dy_wall                                   # exact reference spacing (C1 satisfied)
+    # --- Zone 1: uniform near-wall zone -----------------------------------------
+    if zone1_top is not None:
+        # ALIGNED mode (rule 1): FIXED height to an old-grid node `zone1_top`
+        # (= (valley+20)*dy_old).  Refine into n1 uniform cells at <= 1 wall unit;
+        # dy1 = zone1_top/n1 so the last uniform node lands exactly on the old node.
+        n1 = int(np.ceil(zone1_top / dy_wall))
+        dy1 = zone1_top / n1
+    else:
+        # Legacy mode: ceil(hill/dy_wall) + 20 cells; the "20" is 20 reference-grid
+        # CELL widths (grid points), not 20 wall units.
+        n1 = int(np.ceil(hill_hgt / dy_wall)) + 20
+        dy1 = dy_wall                               # exact reference spacing (C1 satisfied)
     w = [dy1] * n1
     dy = dy1
 
@@ -327,7 +344,8 @@ def make_grid_pair(old_y, u_star, l_in, hill_hgt, dx_ref, ny_target, **kw):
 # ============================================================================
 # Rule + MPI verification
 # ============================================================================
-def check_grid_rules(y, old_y, u_star, l_in, hill_hgt, dx_ref, n_sponge=20):
+def check_grid_rules(y, old_y, u_star, l_in, hill_hgt, dx_ref, n_sponge=20,
+                     zone1_top=None):
     dy = np.diff(y); r = dy[1:] / dy[:-1]
     ody = np.diff(old_y); oyc = 0.5 * (old_y[1:] + old_y[:-1])
     nyc = 0.5 * (y[1:] + y[:-1])
@@ -336,17 +354,25 @@ def check_grid_rules(y, old_y, u_star, l_in, hill_hgt, dx_ref, n_sponge=20):
     coarser_below = ratio_old[~sp_mask].max() if (~sp_mask).any() else 0.0
     coarser_top = ratio_old.max()
     j_us = np.searchsorted(y, u_star)
-    # Zone 1: expected cell count = ceil(hill_hgt/dy_wall) + 20  (20 = grid cells)
     dy_wall = float(ody[0]) if float(ody[0]) < l_in else l_in
-    n1_exp = int(np.ceil(hill_hgt / dy_wall)) + 20
-    # Direct index check: cells 0..n1_exp-1 must all equal dy_wall (± rounding)
+    if zone1_top is not None:
+        # ALIGNED Zone 1 (rule 1): n1 = ceil(zone1_top/dy_wall); top lands on old node.
+        n1_exp = int(np.ceil(zone1_top / dy_wall))
+        z1_top_ref = zone1_top
+        z1_label = "C2 Zone 1 aligned: top on old node (valley+20 dy_old)"
+    else:
+        # Legacy: expected cell count = ceil(hill_hgt/dy_wall) + 20  (20 = grid cells)
+        n1_exp = int(np.ceil(hill_hgt / dy_wall)) + 20
+        z1_top_ref = n1_exp * dy_wall
+        z1_label = "C2 Zone 1 = ceil(hill/dy_wall)+20 cells (hill+20 grid pts)"
+    # Direct index check: cells 0..n1_exp-1 must all equal dy1 (± rounding)
     z1_uniform = (n1_exp <= len(dy) and
                   np.std(dy[:n1_exp]) / dy[0] < 1e-6 and
-                  abs(y[n1_exp] - n1_exp * dy_wall) < dy[0] * 0.01)
+                  abs(y[n1_exp] - z1_top_ref) < dy[0] * 0.01)
     checks = [
         ("C1 not coarser than old below sponge (sponge relaxed)", coarser_below <= 1.01,
          f"below={coarser_below:.5f}, sponge_top={coarser_top:.5f}"),
-        ("C2 Zone 1 = ceil(hill/dy_wall)+20 cells (hill+20 grid pts)",
+        (z1_label,
          z1_uniform,
          f"n1={n1_exp}, top={y[n1_exp]/l_in:.2f}wu" if n1_exp < len(y) else f"n1_exp={n1_exp} out of range"),
         ("C3 dy/dx<1 inside BL (isotropy)", (dy[:j_us] / dx_ref).max() < 1.0,
@@ -369,7 +395,7 @@ def check_grid_rules(y, old_y, u_star, l_in, hill_hgt, dx_ref, n_sponge=20):
 
 
 def grid_quality_table(y, old_y, u_star, l_in, hill_hgt, dx_ref,
-                       label='', n_sponge=20):
+                       label='', n_sponge=20, zone1_top=None):
     """
     Print a formatted grid-quality table and return True if all checks pass.
 
@@ -388,10 +414,15 @@ def grid_quality_table(y, old_y, u_star, l_in, hill_hgt, dx_ref,
 
     # Zone 1
     dy_wall = float(ody[0]) if float(ody[0]) < l_in else l_in
-    n1_exp  = int(np.ceil(hill_hgt / dy_wall)) + 20
+    if zone1_top is not None:
+        n1_exp     = int(np.ceil(zone1_top / dy_wall))   # aligned (rule 1)
+        z1_top_ref = zone1_top
+    else:
+        n1_exp     = int(np.ceil(hill_hgt / dy_wall)) + 20
+        z1_top_ref = n1_exp * dy_wall
     z1_ok   = (n1_exp <= len(dy) and
                np.std(dy[:n1_exp]) / dy[0] < 1e-6 and
-               abs(y[n1_exp] - n1_exp * dy_wall) < dy[0] * 0.01)
+               abs(y[n1_exp] - z1_top_ref) < dy[0] * 0.01)
 
     # Stretch inside BL (all ratio transitions below j_us)
     r_bl  = r[:max(0, j_us - 1)].max() if j_us > 1 else 1.0
@@ -434,7 +465,9 @@ def grid_quality_table(y, old_y, u_star, l_in, hill_hgt, dx_ref,
     print('─'*W)
 
     print(f"  Zone 1  {'─'*40}")
-    _row('  cells  [= hill_cells + 20]',
+    z1_cells_lbl = '  cells  [aligned to old node]' if zone1_top is not None \
+        else '  cells  [= hill_cells + 20]'
+    _row(z1_cells_lbl,
          f"{n1_exp}" if z1_ok else f"{'?'} (exp {n1_exp})",
          f"= {n1_exp}", z1_ok)
     n1_top_wu = y[n1_exp] / l_in if n1_exp < len(y) else float('nan')

@@ -192,4 +192,9 @@ var_names = [
     # Goal 2 / Goal 8 — reference + Reynolds-robustness status
     'strat_ref_available', 're750_note',
 
+    # Log-law fit outputs (κ, zero-plane displacement d⁺, roughness z₀ₘ⁺) from the
+    # OLS wall-law fit in PhAvg_rotated.py — consumed cross-case by results.py
+    # (Ch. 6 velocity-profile items: matched-range κ, z₀/d extraction).
+    'kappa_loglaw', 'd_m_loglaw', 'z0m_loglaw',
+
 ]

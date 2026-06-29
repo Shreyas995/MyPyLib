@@ -555,6 +555,11 @@ if (1 == load_arrays):
 # Postprocess
 # %%
 if (1 == postprocess):
+    # Tee all subsequent run statistics to sim_stats.log (rewritten each run)
+    # while still printing them to the terminal. Recording starts here, at the
+    # 'Computing ghost-cell interpolated fields (PCHIP) ...' message below.
+    start_stats_log('sim_stats.log')
+
     # Velocity is zero inside the IBM solid, making raw gradients at the interface unreliable.
     # interpolate_component fills the solid ghost cells with a smooth extrapolation so that
     # compact-scheme derivatives computed with cd.ddy / cd.ddx are meaningful at the wall.
