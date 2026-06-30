@@ -49,91 +49,9 @@ from compact_derivatives import (
 # from geopotential import *
 
 
-# ── Reference-overlay helpers (gated by the config master switches) ──────────
-# Plot / mark a reference-case curve only when its switch (plot_ref_smooth /
-# plot_ref_rough) is True, so the same plot code serves publication (smooth-only)
-# and testing (smooth + rough) without duplicating every figure.
-def ref_plot(flag, *args, **kwargs):
-    if flag:
-        plt.plot(*args, **kwargs)
-
-def ref_mark(flag, fn, *args, **kwargs):
-    if flag:
-        fn(*args, **kwargs)
-
-
-def plot_fig4_budget(nc_path, nu_case, label, fig_dir, top_frac=0.8):
-    """Replicate Kostelecky & Ansorge (2024) figure 4 for a reference .nc case.
-
-    Builds the vertically-integrated momentum budget (their eq. 4.2) DIRECTLY and
-    transparently from the horizontally-averaged profiles — this is the paper-correct
-    "Method 2", kept independent of the loader's tau_* sign conventions so it serves
-    as a validation reference:
-
-        ⟨τ⟩_zi(z) = C + V + R           (temporal tendency T≈0 for these avg files)
-          C_zx = f ∫₀ᶻ (g₂ − ⟨v⟩) dz' ,   C_zy = f ∫₀ᶻ (g₁ − ⟨u⟩) dz'   (f = 1)
-          V    = (1/Re_Λ) d⟨u_i⟩/dz ,      R = −⟨u_i' w'⟩
-
-    g = (g₁, g₂) is the geostrophic UNIT vector read from the velocity at the BL top
-    (⟨u⟩, ⟨v⟩ at `top_frac`·domain height, below the Rayleigh sponge).  The Total of
-    each component is the (height-independent) surface stress; u* = (τ_zx² + τ_zy²)^¼.
-
-    Panels mirror fig. 4: (a) τ_zx and (b) τ_zy near-wall in inner units (z⁺, /u*²);
-    (c,d) the same in outer units (z⁻ = y/u*, ·10⁻³/G²).  Returns the Method-2 u*.
-    """
-    ds = nc.Dataset(nc_path, 'r')
-    y  = np.asarray(ds.variables['y'][:], float)
-    su = np.asarray(ds.variables['fU'][:], float).T.mean(1)   # ⟨u⟩ streamwise
-    sv = np.asarray(ds.variables['fW'][:], float).T.mean(1)   # ⟨v⟩ spanwise (veer comp.)
-    Ruw = np.asarray(ds.variables['Rxy'][:], float).T.mean(1)  # ⟨u'w'⟩
-    Rvw = np.asarray(ds.variables['Ryz'][:], float).T.mean(1)  # ⟨v'w'⟩
-    ds.close()
-
-    def _cumtrap(fp):                                # cumulative ∫ from the wall
-        out = np.zeros_like(fp)
-        out[1:] = np.cumsum(0.5 * (fp[1:] + fp[:-1]) * np.diff(y))
-        return out
-
-    top = int(top_frac * y.size)
-    g1, g2 = su[top], sv[top]
-    G = float(np.hypot(g1, g2))
-    C_zx = _cumtrap(g2 - sv); V_zx = nu_case * np.gradient(su, y); R_zx = -Ruw
-    C_zy = _cumtrap(g1 - su); V_zy = nu_case * np.gradient(sv, y); R_zy = -Rvw
-    Tx = C_zx + V_zx + R_zx
-    Ty = C_zy + V_zy + R_zy
-    _pl = (y > 0.05 * y[top]) & (y < y[top])         # plateau window (below sponge)
-    ustar = float(((Tx[_pl].mean())**2 + (Ty[_pl].mean())**2) ** 0.25)
-    u2 = ustar**2; G2 = G**2
-    zin = y * ustar / nu_case                        # inner z+
-    zout = y / ustar                                 # outer z-
-
-    def _panel(ax, x, C, V, R, T, sc, xlim, title, ylab, xlab):
-        ax.plot(x, C/sc, color='blue',   label='Coriolis C')
-        ax.plot(x, V/sc, color='red',    label='Viscous V')
-        ax.plot(x, R/sc, color='orange', label='Reynolds R')
-        ax.plot(x, T/sc, color='black',  lw=2, label='Total ⟨τ⟩')
-        ax.axhline(0, color='grey', lw=0.5); ax.set_xlim(*xlim)
-        ax.set_title(title, fontsize=9); ax.set_ylabel(ylab); ax.set_xlabel(xlab)
-        ax.grid(alpha=0.3)
-
-    fig, axs = plt.subplots(2, 2, figsize=(12, 9), dpi=200)
-    _panel(axs[0, 0], zin, C_zx, V_zx, R_zx, Tx, u2, (0, 100),
-           f'(a) $\\tau_{{zx}}$ inner — {label}', r'$\langle\tau\rangle^{+}_{zx}$', r'$z^{+}$')
-    _panel(axs[0, 1], zin, C_zy, V_zy, R_zy, Ty, u2, (0, 100),
-           '(b) $\\tau_{zy}$ inner', r'$\langle\tau\rangle^{+}_{zy}$', r'$z^{+}$')
-    _panel(axs[1, 0], zout, C_zx, V_zx, R_zx, Tx, G2*1e-3, (0, 1.2),
-           '(c) $\\tau_{zx}$ outer', r'$\langle\tau\rangle^{-}_{zx}\cdot10^{-3}$', r'$z^{-}$')
-    _panel(axs[1, 1], zout, C_zy, V_zy, R_zy, Ty, G2*1e-3, (0, 1.2),
-           '(d) $\\tau_{zy}$ outer', r'$\langle\tau\rangle^{-}_{zy}\cdot10^{-3}$', r'$z^{-}$')
-    axs[0, 0].legend(fontsize=7, loc='upper right')
-    fig.suptitle(f'Integrated momentum budget (eq. 4.2) — {label}   '
-                 f'[Method-2 $u_*$ = {ustar:.4f}, geostrophic veer = {np.degrees(np.arctan2(g2, g1)):.1f}°]')
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
-    plt.show()
-    print(f"  [Fig4 budget] {label}: Method-2 u* = {ustar:.4f}  (G={G:.3f}, "
-          f"τ_zx plateau={Tx[_pl].mean():.3e}, τ_zy plateau={Ty[_pl].mean():.3e})")
-    return ustar
+# Reference-overlay helpers (ref_plot / ref_mark) and the Kostelecky & Ansorge
+# fig-4 momentum-budget reproducer (plot_fig4_budget) are shared, self-contained
+# routines that live in functions.py and arrive via `from functions import *`.
 
 
 # %%
@@ -2302,6 +2220,14 @@ if (1 == plotRes):
     plt.plot(_z_can_v, u_canopy_v, color='green', linestyle='--')
     plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
     plt.text((Re_tau), 0.5, r'$\delta_{o}$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    # Smooth-case BL depth in ITS OWN wall units: δ_s⁺ = u★_s²/ν (u★_s = ustr_s1,
+    # the SAME u★ that scales y_s_p), so it lands at the true edge of the smooth
+    # curve.  Gated/coloured with the smooth reference (grey dotted) to distinguish
+    # it from the solid orographic δ_o and the dashed crest line 'h'.
+    if plot_ref_smooth:
+        plt.axvline(x=ustr_s1**2/nu, color=SMOOTH_COLOR, linestyle=':', linewidth=1)
+        plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90,
+                 verticalalignment='center', horizontalalignment='right', color=SMOOTH_COLOR)
     mark_layers_multi(y_in, [_valley_u, w_plus_rot/0.0617], _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [_smooth_u, -np.mean(W_s_p, axis=1)], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')

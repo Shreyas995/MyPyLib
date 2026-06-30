@@ -60,91 +60,9 @@ from compact_derivatives import (
 # from geopotential import *
 
 
-# ── Reference-overlay helpers (gated by the config master switches) ──────────
-# Plot / mark a reference-case curve only when its switch (plot_ref_smooth /
-# plot_ref_rough) is True, so the same plot code serves publication (smooth-only)
-# and testing (smooth + rough) without duplicating every figure.
-def ref_plot(flag, *args, **kwargs):
-    if flag:
-        plt.plot(*args, **kwargs)
-
-def ref_mark(flag, fn, *args, **kwargs):
-    if flag:
-        fn(*args, **kwargs)
-
-
-def plot_fig4_budget(nc_path, nu_case, label, fig_dir, top_frac=0.8):
-    """Replicate Kostelecky & Ansorge (2024) figure 4 for a reference .nc case.
-
-    Builds the vertically-integrated momentum budget (their eq. 4.2) DIRECTLY and
-    transparently from the horizontally-averaged profiles — this is the paper-correct
-    "Method 2", kept independent of the loader's tau_* sign conventions so it serves
-    as a validation reference:
-
-        ⟨τ⟩_zi(z) = C + V + R           (temporal tendency T≈0 for these avg files)
-          C_zx = f ∫₀ᶻ (g₂ − ⟨v⟩) dz' ,   C_zy = f ∫₀ᶻ (g₁ − ⟨u⟩) dz'   (f = 1)
-          V    = (1/Re_Λ) d⟨u_i⟩/dz ,      R = −⟨u_i' w'⟩
-
-    g = (g₁, g₂) is the geostrophic UNIT vector read from the velocity at the BL top
-    (⟨u⟩, ⟨v⟩ at `top_frac`·domain height, below the Rayleigh sponge).  The Total of
-    each component is the (height-independent) surface stress; u* = (τ_zx² + τ_zy²)^¼.
-
-    Panels mirror fig. 4: (a) τ_zx and (b) τ_zy near-wall in inner units (z⁺, /u*²);
-    (c,d) the same in outer units (z⁻ = y/u*, ·10⁻³/G²).  Returns the Method-2 u*.
-    """
-    ds = nc.Dataset(nc_path, 'r')
-    y  = np.asarray(ds.variables['y'][:], float)
-    su = np.asarray(ds.variables['fU'][:], float).T.mean(1)   # ⟨u⟩ streamwise
-    sv = np.asarray(ds.variables['fW'][:], float).T.mean(1)   # ⟨v⟩ spanwise (veer comp.)
-    Ruw = np.asarray(ds.variables['Rxy'][:], float).T.mean(1)  # ⟨u'w'⟩
-    Rvw = np.asarray(ds.variables['Ryz'][:], float).T.mean(1)  # ⟨v'w'⟩
-    ds.close()
-
-    def _cumtrap(fp):                                # cumulative ∫ from the wall
-        out = np.zeros_like(fp)
-        out[1:] = np.cumsum(0.5 * (fp[1:] + fp[:-1]) * np.diff(y))
-        return out
-
-    top = int(top_frac * y.size)
-    g1, g2 = su[top], sv[top]
-    G = float(np.hypot(g1, g2))
-    C_zx = _cumtrap(g2 - sv); V_zx = nu_case * np.gradient(su, y); R_zx = -Ruw
-    C_zy = _cumtrap(g1 - su); V_zy = nu_case * np.gradient(sv, y); R_zy = -Rvw
-    Tx = C_zx + V_zx + R_zx
-    Ty = C_zy + V_zy + R_zy
-    _pl = (y > 0.05 * y[top]) & (y < y[top])         # plateau window (below sponge)
-    ustar = float(((Tx[_pl].mean())**2 + (Ty[_pl].mean())**2) ** 0.25)
-    u2 = ustar**2; G2 = G**2
-    zin = y * ustar / nu_case                        # inner z+
-    zout = y / ustar                                 # outer z-
-
-    def _panel(ax, x, C, V, R, T, sc, xlim, title, ylab, xlab):
-        ax.plot(x, C/sc, color='blue',   label='Coriolis C')
-        ax.plot(x, V/sc, color='red',    label='Viscous V')
-        ax.plot(x, R/sc, color='orange', label='Reynolds R')
-        ax.plot(x, T/sc, color='black',  lw=2, label='Total ⟨τ⟩')
-        ax.axhline(0, color='grey', lw=0.5); ax.set_xlim(*xlim)
-        ax.set_title(title, fontsize=9); ax.set_ylabel(ylab); ax.set_xlabel(xlab)
-        ax.grid(alpha=0.3)
-
-    fig, axs = plt.subplots(2, 2, figsize=(12, 9), dpi=200)
-    _panel(axs[0, 0], zin, C_zx, V_zx, R_zx, Tx, u2, (0, 100),
-           f'(a) $\\tau_{{zx}}$ inner — {label}', r'$\langle\tau\rangle^{+}_{zx}$', r'$z^{+}$')
-    _panel(axs[0, 1], zin, C_zy, V_zy, R_zy, Ty, u2, (0, 100),
-           '(b) $\\tau_{zy}$ inner', r'$\langle\tau\rangle^{+}_{zy}$', r'$z^{+}$')
-    _panel(axs[1, 0], zout, C_zx, V_zx, R_zx, Tx, G2*1e-3, (0, 1.2),
-           '(c) $\\tau_{zx}$ outer', r'$\langle\tau\rangle^{-}_{zx}\cdot10^{-3}$', r'$z^{-}$')
-    _panel(axs[1, 1], zout, C_zy, V_zy, R_zy, Ty, G2*1e-3, (0, 1.2),
-           '(d) $\\tau_{zy}$ outer', r'$\langle\tau\rangle^{-}_{zy}\cdot10^{-3}$', r'$z^{-}$')
-    axs[0, 0].legend(fontsize=7, loc='upper right')
-    fig.suptitle(f'Integrated momentum budget (eq. 4.2) — {label}   '
-                 f'[Method-2 $u_*$ = {ustar:.4f}, geostrophic veer = {np.degrees(np.arctan2(g2, g1)):.1f}°]')
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
-    plt.show()
-    print(f"  [Fig4 budget] {label}: Method-2 u* = {ustar:.4f}  (G={G:.3f}, "
-          f"τ_zx plateau={Tx[_pl].mean():.3e}, τ_zy plateau={Ty[_pl].mean():.3e})")
-    return ustar
+# Reference-overlay helpers (ref_plot / ref_mark) and the Kostelecky & Ansorge
+# fig-4 momentum-budget reproducer (plot_fig4_budget) are shared, self-contained
+# routines that live in functions.py and arrive via `from functions import *`.
 
 
 # %%
@@ -340,6 +258,8 @@ if (1 == cal_Avg):
     PGbl      = np.mean(AvgP, axis=1)
     DispP     = (AvgP - PGbl[:,np.newaxis]) * mask0
     AvgScal[:,:] = (AvgScal[:,:]*mask0)/counter
+    ScalGbl   = np.mean(AvgScal, axis=1)
+    DispScal  = (AvgScal - ScalGbl[:,np.newaxis]) * mask0
     
     for i in range (dim):
         VelGbl2D[:,:,i] = (np.tile(VelGbl[:,i].reshape(ny,1), nx).reshape(ny,nx))*mask0
@@ -455,6 +375,7 @@ if (100 == save_avg):
     np.save('AvgP.npy', AvgP[:,:])
     np.save('DispP.npy', DispP)
     np.save('AvgScal.npy', AvgScal[:,:])
+    np.save('DispScal.npy', DispScal)
 
     np.save('VelGblU.npy', VelGbl[:,0])
     np.save('VelGblV.npy', VelGbl[:,1])
@@ -519,6 +440,7 @@ if (1 == load_arrays):
     AvgP  = np.load('AvgP.npy')
     DispP = np.load('DispP.npy')
     AvgScal = np.load('AvgScal.npy')
+    DispScal = np.load('DispScal.npy')
 
     VelGblU = np.load('VelGblU.npy')
     VelGblV = np.load('VelGblV.npy')
@@ -594,10 +516,23 @@ if (1 == postprocess):
     # .nc cases.  Applied AFTER interpolation and BEFORE the derivatives, so the
     # derivative/budget pipeline below operates on the rotated fields unchanged.
     #   proper rotation R(alpha):  u' = u·cosα − w·sinα,  w' = u·sinα + w·cosα
-    # Rotated (vectors): mean U,W and their _i/_j interpolations; dispersive U,W;
-    # and the wall-normal momentum-flux pair (rey_uv=⟨u'w'⟩, rey_vw=⟨v'w'⟩).
-    # Unchanged: wall-normal V (axis of rotation); in-plane stresses rey_uu/uw/ww
-    # (do not enter the τ_z· balance; TKE trace is rotation-invariant).
+    # Rotated as VECTORS (one R contraction): mean U,W and their _i/_j interpolations;
+    # dispersive U,W; and the wall-normal momentum-flux pair (rey_uv=⟨u'v'⟩,
+    # rey_vw=⟨v'w'⟩).  The latter have ONE index on the rotation axis v (R_v·=δ), so
+    # the single _rotate_pair already IS the full tensor transform R_im R_jn τ_mn.
+    # Rotated as a rank-2 TENSOR (two R contractions): the in-plane stresses
+    # rey_uu/uw/ww — both indices live in the rotated u–w plane, so they take the
+    # full 2×2 transform (_rotate_inplane below).  It is a no-op at alpha=0 and
+    # preserves the trace (uu+ww), so TKE = ½(rey_uu+rey_vv+rey_ww) and u* are
+    # bit-for-bit unchanged; it makes the turbulent-advection term (∂rey_uu/∂x) and
+    # the Ruu/Ruv/Rvv maps frame-consistent.
+    # Unchanged: wall-normal V (rotation axis); rey_vv (both indices on the axis).
+    # The scalar AvgScal (potential temperature / buoyancy b) is a rank-0 tensor and
+    # is therefore rotation-INVARIANT — its value at each (x,z) point is identical in
+    # both frames, so it is deliberately NOT passed through _rotate_pair (there is no
+    # second component to mix it with).  Rotation reaches buoyancy only THROUGH the
+    # velocity: the horizontal heat-flux vector (e.g. ũb̃ = DispVelU·DispScal) rotates
+    # because DispVelU does, while DispScal = AvgScal − ⟨b⟩ is unchanged.
     # u* = ‖τ_w‖ is rotation-invariant — only the τ_zx / τ_zy split changes.
     _rc, _rs = np.cos(alpha), np.sin(alpha)
     def _rotate_pair(a, b):
@@ -607,6 +542,14 @@ if (1 == postprocess):
     AvgPhU_j, AvgPhW_j = _rotate_pair(AvgPhU_j, AvgPhW_j)
     DispVelU, DispVelW = _rotate_pair(DispVelU, DispVelW)
     rey_uv,   rey_vw   = _rotate_pair(rey_uv,   rey_vw)
+    # in-plane stress tensor τ'_ij = R_im R_jn τ_mn  (both indices in the u–w plane).
+    # Tuple-assigned so the RHS sees the ORIGINAL uu/uw/ww; trace-preserving.
+    _c2, _s2, _cs = _rc*_rc, _rs*_rs, _rc*_rs
+    rey_uu, rey_uw, rey_ww = (
+        _c2*rey_uu - 2.0*_cs*rey_uw + _s2*rey_ww,
+        _cs*(rey_uu - rey_ww) + (_c2 - _s2)*rey_uw,
+        _s2*rey_uu + 2.0*_cs*rey_uw + _c2*rey_ww,
+    )
     # geostrophic vector in the rotated frame: aligned with x → spanwise comp = 0
     Gx, Gz = float(np.hypot(Gx, Gz)), 0.0
     print(f"[ROTATED] fields rotated by alpha={alpha:.4f} rad "
@@ -1334,7 +1277,10 @@ if (1 == postprocess):
 
     # ── Buoyancy field (scalar IS buoyancy b) and its double-average split ─────
     b_xmean  = avg_c(eps, AvgScal, axis=1)                       # ⟨b⟩(z), fluid-only
-    DispScal = (AvgScal - b_xmean[:, None]) * mask0              # dispersive b̃(x,z)
+    # Intrinsic (fluid-only) dispersive buoyancy for the flux decomposition; mirrors
+    # the avg_c-based `dispP` used in the form-drag budget (vs the np.mean-based
+    # plotting field `DispScal` loaded above, which parallels `DispP`).
+    dispScal = (AvgScal - b_xmean[:, None]) * mask0              # dispersive b̃(x,z)
     _finite_bx = b_xmean[np.isfinite(b_xmean)]
     _strat = bool(_finite_bx.size and np.ptp(_finite_bx) > 1e-9) # buoyancy actually varies?
 
@@ -1354,8 +1300,8 @@ if (1 == postprocess):
     # Wall-normal (v = meteorological vertical) buoyancy flux ⟨w'θ'⟩ components:
     #   dispersive (form-induced)  ṽ·b̃          — exact, from the mean fields
     #   temporal   (Route C)       ⟨v̄·θ̄⟩_t − v̄·θ̄  — resolved / wave-scale covariance
-    vtheta_disp = DispVelV * DispScal
-    utheta_disp = DispVelU * DispScal                       # rotated streamwise (DispVelU already rotated)
+    vtheta_disp = DispVelV * dispScal
+    utheta_disp = DispVelU * dispScal                       # rotated streamwise (DispVelU already rotated)
     if _have_flux:
         vtheta_temp = (MeanVTheta - AvgPhV * AvgScal) * mask0
         thetavar    = (MeanThTh  - AvgScal * AvgScal) * mask0   # scalar variance ⟨θ'θ'⟩ (temporal)
@@ -1534,6 +1480,42 @@ if (1 == postprocess):
     # results.py, where the smooth reference is available — the smooth .nc is
     # loaded in PhAvg_rotated.py only AFTER this pickle, so it cannot be used here.
     veer_oro = float(np.abs(np.degrees(np.arctan2(total_tau_yz[-1], total_tau_yx[-1]))))
+
+    # ── Local vertical-wavenumber field m(x,z) — gravity-wave propagation ──────
+    # Goal: a full-field map of the wave's vertical wavenumber, so the direction
+    # of vertical energy propagation can be read everywhere without hand-picking a
+    # velocity value at the wave.  Method: signed Hilbert phase-gradient of the
+    # DISPERSIVE velocity.  The dispersive field ṽ = ⟨v⟩(x,z) − ⟨v⟩(z) already
+    # removes the horizontal-mean background profile, isolating the topography-
+    # locked wave perturbation; the phase-averaged field still carries the mean
+    # shear ū(z) whose wall-normal gradient is NOT wave phase and would swamp
+    # ∂(phase)/∂z.  Taking the analytic signal along the periodic x fixes the
+    # dominant horizontal mode with k>0, so sign(m) encodes the phase-line tilt:
+    # for the mountain-wave branch k·m<0 ⇒ upward energy propagation, k·m>0 ⇒
+    # downward.  Computed from BOTH DispVelV (vertical; cleanest — mean vertical
+    # velocity ≈ 0) and DispVelU (streamwise; carries more mean-shear residue),
+    # per the user's request to compare the two.  local_wavenumbers (numpy-only
+    # Hilbert phase-gradient) lives in functions.py.
+    k_dispV, m_dispV = local_wavenumbers(DispVelV, x, y)    # vertical (meteo w)
+    k_dispU, m_dispU = local_wavenumbers(DispVelU, x, y)    # streamwise
+    km_dispV = k_dispV * m_dispV                            # <0 ⇒ upward energy prop.
+
+    # Trustworthy window: above the valley crest, below the Rayleigh sponge.
+    _wj0, _wj1 = int(hill_hgt), int(sponge_j)
+    if _wj1 > _wj0:
+        _wm = (mask0[_wj0:_wj1, :] > 0.5)
+        _frac_up = (float(np.mean(km_dispV[_wj0:_wj1, :][_wm] < 0))
+                    if _wm.any() else float('nan'))
+    else:
+        _frac_up = float('nan')
+    print('[research] vertical-wavenumber field m(x,z) from DispVelV & DispVelU '
+          '(signed Hilbert phase-gradient).')
+    print('[research]   crest→sponge window z+ = %.1f → %.1f; fraction with k·m<0 '
+          '(upward energy propagation) = %.2f' % (y_in[_wj0], y_in[_wj1], _frac_up))
+    if not np.isfinite(Fr):
+        print('[research]   NOTE: Fr=inf (neutral) — no stratification, so m(x,z) '
+              'reflects topographic forcing, NOT a propagating internal gravity '
+              'wave. The field is physically a wave wavenumber only for finite Fr.')
 
     # Bundle all post-processed fields listed in var_names (defined in config) into a dict
     # and pickle it so compile_results.py can assemble multi-case comparisons.
@@ -1976,6 +1958,8 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:],'',r'$\widetilde{V}_y(x,z) = \left\langle\overline{(V_y)}\right\rangle(x, z) - (\langle \overline{V}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 10] DispP
     plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
+    # [PLOT 10b] DispScal (dispersive potential temperature / buoyancy)
+    plot2D_div(x_in, y_in[:limity], DispScal[:limity,:],'',r'$\widetilde{\theta}(x,z) = \langle\overline{\theta}\rangle(x,z) - \langle\overline{\theta}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispScal' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 11] (field map)
     plot_phavg_velocity_3D(x_in, y_in[:limity],
                            DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
@@ -2052,7 +2036,58 @@ if (1 == plotRes):
     plt.title('Dispersion velocity vorticity in XZ plane')
     # plt.savefig(savename, dpi=300)
     plt.show()
-    
+
+    # %%###########################################################################
+    # Vertical-wavenumber field m(x,z) — gravity-wave propagation direction
+    # Signed local vertical wavenumber from the dispersive velocity (see compute
+    # block above the pickle dump).  Plotted in inner units (m·l_in) on the crest→
+    # sponge window; sign(m) (with the Hilbert-fixed k>0) gives the phase-line tilt.
+    # [PLOT 26b] Wavenumber_m_DispV / _DispU / _compare
+    def _plot_wavenumber(mfld, savename, title):
+        _lim = int(min(limity, sponge_j))
+        _z   = y_in[:_lim]
+        _w   = (mfld[:_lim, :] * l_in) * mask0[:_lim, :]     # inner-unit, fluid only
+        _vmax = float(np.nanpercentile(np.abs(_w), 98))      # robust to node spikes
+        _vmax = _vmax if _vmax > 0 else 1.0
+        _lv  = np.linspace(-_vmax, _vmax, 200)
+        fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+        _cf = ax.contourf(x_in, _z, np.clip(_w, -_vmax, _vmax),
+                          levels=_lv, cmap='RdBu_r', extend='both')
+        ax.fill(x_oro_in, y_oro_in, facecolor='black')       # IBM solid
+        ax.axhline(y_in[int(hill_hgt)], color='g', ls='--', lw=0.8, label='crest $h$')
+        ax.axhline(y_in[int(sponge_j)], color='m', ls=':',  lw=1.0, label='sponge')
+        plt.colorbar(_cf, ax=ax, label=r'$m\,\ell_{in}$  (sign: phase-line tilt)')
+        ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$'); ax.set_title(title)
+        ax.legend(fontsize=8, loc='upper right')
+        plt.tight_layout()
+        plt.savefig(os.path.join(fig_dir, savename), dpi=300)
+        plt.show()
+
+    _wave_note = ('' if np.isfinite(Fr)
+                  else '  [Fr=inf: topographic forcing, not a propagating GW]')
+    _plot_wavenumber(m_dispV, 'Wavenumber_m_DispV.png',
+                     r'Vertical wavenumber $m(x,z)$ from $\widetilde{W}_y$' + _wave_note)
+    _plot_wavenumber(m_dispU, 'Wavenumber_m_DispU.png',
+                     r'Vertical wavenumber $m(x,z)$ from $\widetilde{U}_y$' + _wave_note)
+
+    # [PLOT 26c] explicit up/down energy-propagation map  sign(k·m) from DispVelV
+    _limc = int(min(limity, sponge_j))
+    _kmsign = np.sign(km_dispV[:_limc, :]) * mask0[:_limc, :]
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+    _cf = ax.contourf(x_in, y_in[:_limc], _kmsign,
+                      levels=[-1.5, -0.5, 0.5, 1.5], cmap='coolwarm')
+    ax.fill(x_oro_in, y_oro_in, facecolor='black')
+    ax.axhline(y_in[int(hill_hgt)], color='g', ls='--', lw=0.8, label='crest $h$')
+    ax.axhline(y_in[int(sponge_j)], color='m', ls=':',  lw=1.0, label='sponge')
+    _cb = plt.colorbar(_cf, ax=ax, ticks=[-1, 0, 1])
+    _cb.ax.set_yticklabels(['up (k·m<0)', '', 'down (k·m>0)'])
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$')
+    ax.set_title(r'Energy-propagation direction  $\mathrm{sign}(k\cdot m)$ from $\widetilde{W}_y$' + _wave_note)
+    ax.legend(fontsize=8, loc='upper right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, 'Wavenumber_m_compare.png'), dpi=300)
+    plt.show()
+
 
     # %%###########################################################################
     # Hodograph
@@ -2370,14 +2405,15 @@ if (1 == plotRes):
     ref_plot(plot_ref_smooth, ustr_M2_s, y_s_p,
              label=f'smooth Re=500 M2 (plateau {ustr_M2_plateau_s:.4f}, stored {ustr_s1:.4f})',
              color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_rough, ustr_M2_r, y_r_p,
-             label=f'rough r1 Re=1000 (plateau {ustr_r1:.4f})',
-             color=ROUGH_COLOR, linestyle=ROUGH_LS)
+    # Roughness reference not needed here — commented out.
+    # ref_plot(plot_ref_rough, ustr_M2_r, y_r_p,
+    #          label=f'rough r1 Re=1000 (plateau {ustr_r1:.4f})',
+    #          color=ROUGH_COLOR, linestyle=ROUGH_LS)
     plt.axvline(ustr_M2_plateau_o, color='blue', linestyle=':', linewidth=1)
     if plot_ref_smooth:
         plt.axvline(ustr_s1, color=SMOOTH_COLOR, linestyle=':', linewidth=1)  # stored smooth u* (~0.0618)
-    if plot_ref_rough:
-        plt.axvline(ustr_r1, color=ROUGH_COLOR, linestyle=':', linewidth=1)
+    # if plot_ref_rough:
+    #     plt.axvline(ustr_r1, color=ROUGH_COLOR, linestyle=':', linewidth=1)
     mark_h(y_in[h_idx], 'h')
     plt.title('Friction Velocity — Method 2 (all cases)')
     plt.ylabel(r'$z^+$')
@@ -2406,10 +2442,10 @@ if (1 == plotRes):
     plt.plot(y_in[eps_hgt[512]:]  -  y_in[eps_hgt[512]]              ,u_pl_rot2D[(eps_hgt[512]):,512]/ustr_s1         , label='Valley bottom', color='red', linestyle='-')
     plt.plot(y_in[(eps_hgt[eps_rf]-1):]-y_in[(eps_hgt[eps_rf]-1)]    ,u_pl_rot2D[(eps_hgt[eps_rf]-1):,eps_rf]/ustr_s1 , label='Right flank', color='magenta', linestyle='-')
     
-    plt.plot(y_in[(eps_hgt[0]-1):]  -  y_in[(eps_hgt[0]-1)]           ,w_pl_rot2D[(eps_hgt[0]-1):,0]/ustr_s1           , label='Valley top', color='blue', linestyle='--')
-    plt.plot(y_in[(eps_hgt[eps_lf]-1):] - y_in[(eps_hgt[eps_lf]-1)]   ,w_pl_rot2D[(eps_hgt[eps_lf]-1):,eps_lf]/ustr_s1 , label='Left flank', color='saddlebrown', linestyle='--')
-    plt.plot(y_in[eps_hgt[512]:]  -  y_in[eps_hgt[512]]               ,w_pl_rot2D[eps_hgt[512]:,512]/ustr_s1           , label='Valley bottom', color='red', linestyle='--')
-    plt.plot(y_in[(eps_hgt[eps_rf]-1):] - y_in[(eps_hgt[eps_rf] - 1)] ,w_pl_rot2D[(eps_hgt[eps_rf]-1):,eps_rf]/ustr_s1 , label='Right flank', color='magenta', linestyle='--')
+    plt.plot(y_in[(eps_hgt[0]-1):]  -  y_in[(eps_hgt[0]-1)]           ,-w_pl_rot2D[(eps_hgt[0]-1):,0]/ustr_s1           , label='Valley top', color='blue', linestyle='--')
+    plt.plot(y_in[(eps_hgt[eps_lf]-1):] - y_in[(eps_hgt[eps_lf]-1)]   ,-w_pl_rot2D[(eps_hgt[eps_lf]-1):,eps_lf]/ustr_s1 , label='Left flank', color='saddlebrown', linestyle='--')
+    plt.plot(y_in[eps_hgt[512]:]  -  y_in[eps_hgt[512]]               ,-w_pl_rot2D[eps_hgt[512]:,512]/ustr_s1           , label='Valley bottom', color='red', linestyle='--')
+    plt.plot(y_in[(eps_hgt[eps_rf]-1):] - y_in[(eps_hgt[eps_rf] - 1)] ,-w_pl_rot2D[(eps_hgt[eps_rf]-1):,eps_rf]/ustr_s1 , label='Right flank', color='magenta', linestyle='--')
     # Smooth case — single global profile (flat wall, no local shift)
     ref_plot(plot_ref_smooth, y_s_p, GblU_s/ustr_s1, color=SMOOTH_COLOR, linestyle='-')
     ref_plot(plot_ref_smooth, y_s_p, -GblW_s/ustr_s1, color=SMOOTH_COLOR, linestyle='--', alpha=0.6)
@@ -2429,8 +2465,36 @@ if (1 == plotRes):
         Line2D([0], [0], color='black',      linestyle='--', lw=2),
         Line2D([0], [0], color=SMOOTH_COLOR, linestyle='-',  lw=2)]
     custom_handles = color_handles + style_handles
-    # Valley curves use surface-relative (shifted) z+, so absolute-z+ layer
-    # markers are placed only on the smooth (unshifted) profile.
+    # Each valley curve starts at its OWN local surface (eps_hgt[col]: crest,
+    # flanks, valley bottom) and is plotted on a surface-relative z+ axis
+    # (y_in[start:] - y_in[shift]).  So the layer markers must be remapped into
+    # each curve's shifted axis — the absolute-z+ indices _iv_* would land at the
+    # wrong place.  _mark_oro rebuilds z+ relative to that curve's surface and
+    # places 'o' (visc, z+~5), '^' (log start, z+~75), 'D' (log top, z+~200)
+    # above the local surface, plus 's' (canopy = positive peak of THIS column's
+    # dispersive uv below the log start).  start/shift match each plotted line.
+    def _mark_oro(start, shift, col, field, sign):
+        zsh = y_in[start:] - y_in[shift]
+        yc  = sign * field[start:, col] / ustr_s1
+        mk  = {'o': _zidx(zsh, 5), '^': _zidx(zsh, 75), 'D': _zidx(zsh, 200)}
+        cmax  = _zidx(zsh, 75)
+        cprof = UV_disp[start:, col] * mask0[start:, col]
+        if cmax >= 1 and cprof.size:
+            mk['s'] = int(np.argmax(cprof[:cmax + 1]))
+        mark_layers(zsh, yc, mk, filled=True)
+    # (start, shift, col) for the u (solid) and -w (dashed) curves, exactly as
+    # plotted above so the markers sit ON each curve.
+    for s0, sh, col in [(eps_hgt[0]-1,      eps_hgt[0]-1,      0),
+                        (eps_hgt[eps_lf]-1, eps_hgt[eps_lf],   eps_lf),
+                        (eps_hgt[512],      eps_hgt[512],      512),
+                        (eps_hgt[eps_rf]-1, eps_hgt[eps_rf]-1, eps_rf)]:
+        _mark_oro(s0, sh, col, u_pl_rot2D,  1.0)
+    for s0, sh, col in [(eps_hgt[0]-1,      eps_hgt[0]-1,      0),
+                        (eps_hgt[eps_lf]-1, eps_hgt[eps_lf]-1, eps_lf),
+                        (eps_hgt[512],      eps_hgt[512],      512),
+                        (eps_hgt[eps_rf]-1, eps_hgt[eps_rf]-1, eps_rf)]:
+        _mark_oro(s0, sh, col, w_pl_rot2D, -1.0)
+    # Smooth curve keeps its absolute-z+ (unshifted) hollow markers.
     ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [GblU_s/ustr_s1, -GblW_s/ustr_s1], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title('Velocity Profile')
@@ -2662,6 +2726,14 @@ if (1 == plotRes):
     plt.plot(_z_can_v, u_canopy_v, color='green', linestyle='--')
     plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
     plt.text((Re_tau), 0.5, r'$\delta_{o}$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    # Smooth-case BL depth in ITS OWN wall units: δ_s⁺ = u★_s²/ν (u★_s = ustr_s1,
+    # the SAME u★ that scales y_s_p), so it lands at the true edge of the smooth
+    # curve.  Gated/coloured with the smooth reference (grey dotted) to distinguish
+    # it from the solid orographic δ_o and the dashed crest line 'h'.
+    if plot_ref_smooth:
+        plt.axvline(x=ustr_s1**2/nu, color=SMOOTH_COLOR, linestyle=':', linewidth=1)
+        plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90,
+                 verticalalignment='center', horizontalalignment='right', color=SMOOTH_COLOR)
     mark_layers_multi(y_in, [_valley_u, w_plus_rot/0.0617], _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [_smooth_u, -np.mean(W_s_p, axis=1)], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
@@ -3442,5 +3514,240 @@ if animate == 1:
     print(f'Animation saved as {out_path}')
     plt.close(fig_p)
     del anim_p, update_planes, fig_p, axes, axes_flat, suptitle_p
+
+    # %%
+
+# %%
+###############################################################################
+######## Streamwise energy spectra — Kolmogorov -5/3 inertial-range check ######
+###############################################################################
+# Purpose: test whether a -5/3 inertial subrange is present in this simulation.
+#
+# Why planesK.* (instantaneous), NOT the phase-averaged fields: a -5/3 range is a
+# property of the *resolved turbulent fluctuations*.  The phase-averaged AvgPh /
+# DispVel fields are coherent (time-mean) quantities and carry no inertial-range
+# cascade, so spectra of those (spectra.py) cannot show -5/3.  The planesK.* files
+# store instantaneous z-planes of (u, v, w, theta, p) — exactly the snapshots
+# needed.  We take the 1-D streamwise (periodic x) FFT of the velocity
+# fluctuations u' = u - <u>_x at each wall-normal height, average |F|^2 over all
+# available frames, and convert to a spectral density E(kx) normalised so that
+# integral E(kx) dkx = variance.  The longitudinal spectrum E_uu(kx) ~ kx^{-5/3}
+# in the inertial subrange (Kolmogorov); the transverse spectra E_vv, E_ww share
+# the same slope.  A compensated plot kx^{5/3} E(kx) is flat where -5/3 holds.
+#
+# Coordinate / index convention (tlab order, see the animation block above):
+#   idx 0 = u  streamwise         (meteo u)
+#   idx 1 = v  wall-normal        (meteo w)   -> "vertical"
+#   idx 2 = w  spanwise           (meteo v)
+# The 1-D spectrum is always taken along x (streamwise), at fixed height z.
+#
+# Standalone: reads only the grid + planesK.* + (u_star, nu, l_in); does not need
+# the cal_Avg averages, so it runs with cal_Avg=0.  u_star/nu/l_in are the
+# Method-2 values when the cal_Avg block ran, otherwise the config.py scalars.
+if plot_spectra == 1:
+    import glob as _glob
+
+    _SP_NK, _SP_NV, _SP_KP = 1, 5, 0    # N_KPLANES, NVARS, KPLANE_IDX (planesK layout)
+    _SP_VEL_MAX = 1.5                   # discard frames with |u|,|v| above this (unphysical)
+    _SP_COMPS = [(0, r"$E_{uu}$ (streamwise $u'$)",  'tab:blue'),
+                 (1, r"$E_{ww}$ (wall-normal $w'$)", 'tab:green'),
+                 (2, r"$E_{vv}$ (spanwise $v'$)",    'tab:red')]
+    # Wall-normal heights (z+) at which to draw 1-D spectra — picked in the
+    # log/inertial region, above the valley crest and below the Rayleigh sponge.
+    _SP_Z_TARGETS = [30.0, 60.0, 100.0, 150.0]
+
+    # Frame sources, in order of preference.  Each descriptor yields one
+    # instantaneous (ny, nx) plane per velocity component (tlab idx 0=u streamwise,
+    # 1=v wall-normal, 2=w spanwise):
+    #   ('planesK', path)          — one saved k-plane file (full time series)
+    #   ('flow',    {vi: path})    — first z-plane of the raw flow field component
+    # A single instantaneous plane is enough for a -5/3 spectrum (one realisation,
+    # just noisier), so when NO planesK.* time series is present we fall back to the
+    # raw flow field, which is always in the case folder.  That flow field is a
+    # BROKEN file — only the first few z-planes were copied — so ONLY the first
+    # plane (pl_id=1) is read.  (The intermittency γ(z) above is a statistical
+    # average over many frames and is NOT given this single-plane fallback.)
+    _sp_files = sorted(_glob.glob(cwd + 'planesK.*'))
+    # keep only real data files (drop e.g. planesK_animation.* and .npy/.gif)
+    _sp_files = [f for f in _sp_files
+                 if os.path.isfile(f) and os.path.basename(f).split('.')[-1].isdigit()]
+
+    _frames = [('planesK', f) for f in _sp_files]
+    if not _frames:
+        # Fallback: first k-plane of the raw flow field (tlab velocity triplet).
+        # flow.old.1/2/3 = u / v(wall-normal) / w(spanwise); also try flow.1/2/3.
+        for _stem in ('flow.old.', 'flow.'):
+            _flow = {vi: cwd + _stem + str(vi + 1) for vi in (0, 1, 2)}
+            _flow = {vi: p for vi, p in _flow.items() if os.path.isfile(p)}
+            if 0 in _flow:                      # need at least u for E_uu
+                _frames = [('flow', _flow)]
+                print('[spectra] no planesK.* time series — using the first k-plane '
+                      f'(plane 1 only; broken flow file) of {sorted(_flow.values())}.')
+                break
+
+    if not _frames:
+        print('[spectra] no planesK.* and no flow field found — -5/3 spectra skipped.')
+    else:
+        # uniform streamwise grid spacing (NB: the global `dx` was overwritten to a
+        # wavenumber spacing earlier in the script, so recompute the grid step here)
+        dx_grid = float(x[1] - x[0])
+        L_x     = nx * dx_grid
+        kx      = 2.0 * np.pi * np.fft.rfftfreq(nx, d=dx_grid)   # rad / length, (nk,)
+        dk      = 2.0 * np.pi / L_x
+
+        def _streamwise_psd(fluc_2d):
+            """1-D streamwise spectral density E(kx) per row; integral E dkx = variance.
+
+            fluc_2d : (ny, nx) fluctuation field, periodic in x (x-mean already removed).
+            Returns E with shape (ny, nk) on the wavenumbers `kx` above.
+            """
+            F = np.fft.rfft(fluc_2d, axis=1)            # (ny, nk)
+            P = (np.abs(F) ** 2) / (nx ** 2)            # variance per mode (two-sided)
+            P[:, 1:] *= 2.0                             # fold negative wavenumbers (skip DC)
+            if nx % 2 == 0:                             # Nyquist mode is not doubled
+                P[:, -1] /= 2.0
+            return P / dk                               # -> spectral density
+
+        # Accumulate E(kx, z) per component, averaged over valid frames.  A frame
+        # may carry only a subset of components (a broken flow file may have only u),
+        # so accumulate per component and remember which ones appeared.
+        nk      = kx.size
+        _E_acc  = {vi: np.zeros((ny, nk)) for vi, _, _ in _SP_COMPS}
+        _E_cnt  = {vi: 0 for vi, _, _ in _SP_COMPS}
+        _nf     = 0
+        for _kind, _src in _frames:
+            if _kind == 'planesK':
+                try:
+                    _pl = read_all_planes(_src, nx, ny, _SP_NK, _SP_NV, _SP_KP)
+                except (ValueError, OSError):
+                    continue
+                _comp = {vi: _pl[vi] for vi, _, _ in _SP_COMPS}
+                _tag  = os.path.basename(_src)
+            else:   # 'flow' — first z-plane (pl_id=1) of each available component
+                _comp = {}
+                for vi, _p in _src.items():
+                    try:
+                        _hdr = read_header(_p)[0]
+                        _comp[vi] = readplane(_p, nx, ny, 1, _hdr)
+                    except (ValueError, OSError):
+                        continue
+                _tag = 'flow field (plane 1)'
+            if 0 not in _comp:
+                continue
+            # velocity sanity check (streamwise idx0; spanwise idx2 if present)
+            _bad = float(np.max(np.abs(_comp[0]))) > _SP_VEL_MAX
+            if 2 in _comp:
+                _bad = _bad or float(np.max(np.abs(_comp[2]))) > _SP_VEL_MAX
+            if _bad:
+                print(f'[spectra] discarding {_tag}: velocity over threshold.')
+                continue
+            for vi in _comp:
+                _f = _comp[vi]
+                _fluc = _f - _f.mean(axis=1, keepdims=True)   # remove x-mean per row
+                _E_acc[vi] += _streamwise_psd(_fluc)
+                _E_cnt[vi] += 1
+            _nf += 1
+
+        if _nf == 0 or _E_cnt[0] == 0:
+            print('[spectra] all frames rejected (no usable u plane) — -5/3 spectra skipped.')
+        else:
+            for vi in _E_acc:                     # per-component frame average
+                if _E_cnt[vi] > 0:
+                    _E_acc[vi] /= _E_cnt[vi]
+            _avail = [vi for vi in _E_acc if _E_cnt[vi] > 0]
+            print(f'[spectra] streamwise spectra from {_nf} frame(s); '
+                  f'components available: {sorted(_avail)}.')
+
+            # Inner (wall) units: kx+ = kx*l_in,  E+ = E/(u*^2 * l_in)  (dimensionless)
+            kx_plus = kx * l_in
+            E_plus  = {vi: _E_acc[vi] / (u_star ** 2 * l_in) for vi in _E_acc}
+
+            # Choose heights above the crest, below the sponge, nearest the targets.
+            _j_lo = int(hill_hgt) + 2
+            _j_hi = int(0.5 * ny)                 # stay well below the Rayleigh sponge
+            _sel  = []
+            for _zt in _SP_Z_TARGETS:
+                _j = int(np.argmin(np.abs(y_in - _zt)))
+                if _j_lo <= _j <= _j_hi and _j not in [j for _, j in _sel]:
+                    _sel.append((_zt, _j))
+            if not _sel:                          # fallback: a few rows in the lower half
+                _sel = [(float(y_in[_j]), _j)
+                        for _j in np.linspace(_j_lo, _j_hi, 4).astype(int)]
+
+            # Positive wavenumbers only (skip DC at index 0) for the log-log plots.
+            _ks = slice(1, None)
+            kxp = kx_plus[_ks]
+
+            # ---- Figure 1: E_uu(kx+) at several heights + -5/3 guide & compensated ----
+            figS, (axA, axB) = plt.subplots(1, 2, figsize=(13, 5.5))
+            _cmap = plt.cm.viridis(np.linspace(0.15, 0.9, len(_sel)))
+            for (_zt, _j), _col in zip(_sel, _cmap):
+                _E = E_plus[0][_j, _ks]           # streamwise (u') spectrum at this height
+                axA.loglog(kxp, _E, color=_col, lw=1.4,
+                           label=fr'$z^+ \approx {y_in[_j]:.0f}$')
+                axB.loglog(kxp, kxp ** (5.0 / 3.0) * _E, color=_col, lw=1.4,
+                           label=fr'$z^+ \approx {y_in[_j]:.0f}$')
+
+            # -5/3 reference line anchored to the lowest selected height in the
+            # low-wavenumber (inertial) part of the resolved range.
+            _Eref = E_plus[0][_sel[0][1], _ks]
+            _good = np.isfinite(_Eref) & (_Eref > 0)
+            if _good.any():
+                _i0 = np.where(_good)[0][max(1, len(kxp) // 12)]
+                _k_line = kxp[_i0:]
+                _C53 = _Eref[_i0] * kxp[_i0] ** (5.0 / 3.0)
+                axA.loglog(_k_line, _C53 * _k_line ** (-5.0 / 3.0),
+                           'k--', lw=1.6, label=r'$k_x^{-5/3}$ (Kolmogorov)')
+                axB.axhline(_C53, color='k', ls='--', lw=1.2,
+                            label=r'$-5/3$ plateau')
+
+            axA.set_xlabel(r'$k_x^+ = k_x\,\nu/u_*$')
+            axA.set_ylabel(r'$E_{uu}^+ = E_{uu}/(u_*^2\,\nu/u_*)$')
+            axA.set_title('Streamwise spectrum  $E_{uu}(k_x^+)$')
+            axA.grid(True, which='both', ls=':', alpha=0.4)
+            axA.legend(fontsize=8)
+
+            axB.set_xlabel(r'$k_x^+ = k_x\,\nu/u_*$')
+            axB.set_ylabel(r'$(k_x^+)^{5/3}\,E_{uu}^+$')
+            axB.set_title('Compensated  $k_x^{5/3}E_{uu}$  (flat $\\Rightarrow$ -5/3)')
+            axB.set_xscale('log')
+            axB.grid(True, which='both', ls=':', alpha=0.4)
+            axB.legend(fontsize=8)
+
+            _src_lbl = ('flow-field plane 1' if _frames[0][0] == 'flow'
+                        else f'{_nf} planesK frame(s)')
+            figS.suptitle('Streamwise energy spectra — inertial-range (-5/3) check '
+                          f'({_src_lbl})', fontsize=12)
+            figS.tight_layout()
+            _outS = os.path.join(fig_dir, 'Spectra_Euu_kx.png')
+            figS.savefig(_outS, dpi=300)
+            plt.close(figS)
+            print(f'[spectra] saved {_outS}')
+
+            # ---- Figure 2: three velocity components at one representative height ----
+            _zt2, _j2 = _sel[len(_sel) // 2]      # middle of the selected heights
+            figC, axC = plt.subplots(figsize=(7, 5.5))
+            for vi, _lbl, _col in _SP_COMPS:
+                if vi not in _avail:              # broken flow file may lack v/w
+                    continue
+                axC.loglog(kxp, E_plus[vi][_j2, _ks], color=_col, lw=1.4, label=_lbl)
+            _Ec = E_plus[0][_j2, _ks]
+            _gc = np.isfinite(_Ec) & (_Ec > 0)
+            if _gc.any():
+                _i0 = np.where(_gc)[0][max(1, len(kxp) // 12)]
+                _k_line = kxp[_i0:]
+                _C = _Ec[_i0] * kxp[_i0] ** (5.0 / 3.0)
+                axC.loglog(_k_line, _C * _k_line ** (-5.0 / 3.0),
+                           'k--', lw=1.6, label=r'$k_x^{-5/3}$')
+            axC.set_xlabel(r'$k_x^+ = k_x\,\nu/u_*$')
+            axC.set_ylabel(r'$E^+ = E/(u_*^2\,\nu/u_*)$')
+            axC.set_title(fr'Velocity-component spectra at $z^+\approx{y_in[_j2]:.0f}$')
+            axC.grid(True, which='both', ls=':', alpha=0.4)
+            axC.legend(fontsize=8)
+            figC.tight_layout()
+            _outC = os.path.join(fig_dir, 'Spectra_components.png')
+            figC.savefig(_outC, dpi=300)
+            plt.close(figC)
+            print(f'[spectra] saved {_outC}')
 
     # %%
