@@ -136,6 +136,15 @@ var_names = [
     'vort_z', 'disp_vortz',
 
     # -------------------------------------------------------------------------
+    # Gravity-wave vertical-wavenumber fields  (2D: ny×nx)
+    # Signed local horizontal (k) and vertical (m) wavenumbers from the
+    # dispersive velocity via the Hilbert phase-gradient method.  sign(m) (with
+    # the Hilbert-fixed k>0) gives the phase-line tilt; km_dispV<0 ⇒ upward
+    # energy propagation.  Computed from DispVelV (vertical) and DispVelU.
+    # -------------------------------------------------------------------------
+    'm_dispV', 'k_dispV', 'm_dispU', 'k_dispU', 'km_dispV',
+
+    # -------------------------------------------------------------------------
     # Advection term u_j ∂U/∂x_j at four orographic landmarks  (1D: ny)
     # -------------------------------------------------------------------------
     'conv_top', 'conv_lf', 'conv_bottom', 'conv_rf',

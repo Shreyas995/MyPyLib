@@ -807,6 +807,17 @@ if (1 == cal_Avg):
     if (nscal == 2):
         AvgScal2[:,:] = (AvgScal2[:,:]*mask_zero)/good_sc[1]
 
+    # Dispersive scalar  θ̃ = ⟨b̄⟩(x,z) − ⟨b̄⟩(z): the x-mean of the phase-averaged
+    # scalar is removed, so θ̃ has zero x-mean by construction (parallels DispVel /
+    # DispP above).  Consumed locally by PhAvg_rotated.py (loaded from DispScal.npy)
+    # for the dispersive buoyancy flux  ũb̃ = DispVelU·DispScal.  Same definition as
+    # PhAvg_rotated.py: plain x-mean of the masked AvgScal, solid cells zeroed.
+    ScalGbl  = np.mean(AvgScal, axis=1)
+    DispScal = (AvgScal - ScalGbl[:,np.newaxis]) * mask_zero
+    if (nscal == 2):
+        ScalGbl2  = np.mean(AvgScal2, axis=1)
+        DispScal2 = (AvgScal2 - ScalGbl2[:,np.newaxis]) * mask_zero
+
     # Time means of the buoyancy cross-moments ⟨Ū_i·Θ̄⟩_t  (Route C).  Downstream
     # (PhAvg_rotated.py) the turbulent buoyancy flux is recovered by subtracting
     # the mean product:  Cov_t(Ū_i,Θ̄) = MeanU_iTheta − AvgPh_i·AvgScal.
@@ -922,8 +933,10 @@ if (1 == save_avg):
     np.save('PGbl.npy', PGbl)
     np.save('DispP.npy', DispP)
     np.save('AvgScal.npy', AvgScal[:,:])
+    np.save('DispScal.npy', DispScal)
     if (nscal == 2):
         np.save('AvgScal2.npy', AvgScal2[:,:])
+        np.save('DispScal2.npy', DispScal2)
 
     # Buoyancy-flux cross-moments (Route C) consumed by PhAvg_rotated.py.
     np.save('MeanUTheta.npy', MeanUTheta)

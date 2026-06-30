@@ -1080,6 +1080,42 @@ def diffu_dx(field, ny, nx, case_h, x, order):    # ny is number of points in ve
                 du[j,i] = 0
     return du
 
+def local_wavenumbers(field, xc, yc):
+    """Signed local horizontal (k) and vertical (m) wavenumbers of a real 2-D
+    field via the analytic-signal (Hilbert) phase-gradient method.
+
+    Used for the gravity-wave vertical-wavenumber diagnostic m(x,z): the sign of
+    m (with the Hilbert-fixed dominant k>0) encodes the phase-line tilt, and
+    k*m<0 ⇒ upward energy propagation for the mountain-wave branch.
+
+    Parameters
+    ----------
+    field : (ny, nx) real array, periodic & uniform in x (axis 1), non-uniform
+            yc allowed (axis 0).
+    xc, yc : 1-D coordinate arrays for x (axis 1) and y (axis 0).
+
+    Returns
+    -------
+    k, m : (ny, nx) arrays — local horizontal and vertical wavenumbers, via the
+           unwrap-free identity  wavenumber = Im((d/ds A)/A), with the analytic
+           signal A = field + i*Hilbert_x[field] built from numpy FFT only
+           (x is periodic, so the FFT-based Hilbert is exact).
+    """
+    ny_, nx_ = field.shape
+    dxc = float(xc[1] - xc[0])
+    F = np.fft.fft(field, axis=1)
+    h = np.zeros(nx_)                       # one-sided (analytic) multiplier
+    if nx_ % 2 == 0:
+        h[0] = 1.0; h[nx_ // 2] = 1.0; h[1:nx_ // 2] = 2.0
+    else:
+        h[0] = 1.0; h[1:(nx_ + 1) // 2] = 2.0
+    kx_ = 2.0 * np.pi * np.fft.fftfreq(nx_, d=dxc)
+    A   = np.fft.ifft(F * h[np.newaxis, :], axis=1)             # analytic signal
+    A_x = np.fft.ifft(1j * kx_[np.newaxis, :] * F * h[np.newaxis, :], axis=1)
+    A_y = np.gradient(A, yc, axis=0)        # complex-safe, non-uniform yc
+    _den = A + 1e-30
+    return np.imag(A_x / _den), np.imag(A_y / _den)
+
 def vIntegral(varaible, ny, y): # ny is number of points in vertical
     I = np.zeros((ny))
     for j in range (1,ny):
@@ -1349,6 +1385,96 @@ LAYER_MARKER_NAMES = {
 }
 
 
+# ── Reference-overlay helpers (gated by the config master switches) ──────────
+# Plot / mark a reference-case curve only when its switch (plot_ref_smooth /
+# plot_ref_rough) is True, so the same plot code serves publication (smooth-only)
+# and testing (smooth + rough) without duplicating every figure.
+def ref_plot(flag, *args, **kwargs):
+    if flag:
+        import matplotlib.pyplot as plt
+        plt.plot(*args, **kwargs)
+
+
+def ref_mark(flag, fn, *args, **kwargs):
+    if flag:
+        fn(*args, **kwargs)
+
+
+def plot_fig4_budget(nc_path, nu_case, label, fig_dir, top_frac=0.8):
+    """Replicate Kostelecky & Ansorge (2024) figure 4 for a reference .nc case.
+
+    Builds the vertically-integrated momentum budget (their eq. 4.2) DIRECTLY and
+    transparently from the horizontally-averaged profiles — this is the paper-correct
+    "Method 2", kept independent of the loader's tau_* sign conventions so it serves
+    as a validation reference:
+
+        ⟨τ⟩_zi(z) = C + V + R           (temporal tendency T≈0 for these avg files)
+          C_zx = f ∫₀ᶻ (g₂ − ⟨v⟩) dz' ,   C_zy = f ∫₀ᶻ (g₁ − ⟨u⟩) dz'   (f = 1)
+          V    = (1/Re_Λ) d⟨u_i⟩/dz ,      R = −⟨u_i' w'⟩
+
+    g = (g₁, g₂) is the geostrophic UNIT vector read from the velocity at the BL top
+    (⟨u⟩, ⟨v⟩ at `top_frac`·domain height, below the Rayleigh sponge).  The Total of
+    each component is the (height-independent) surface stress; u* = (τ_zx² + τ_zy²)^¼.
+
+    Panels mirror fig. 4: (a) τ_zx and (b) τ_zy near-wall in inner units (z⁺, /u*²);
+    (c,d) the same in outer units (z⁻ = y/u*, ·10⁻³/G²).  Returns the Method-2 u*.
+    """
+    import matplotlib.pyplot as plt
+    ds = nc.Dataset(nc_path, 'r')
+    y  = np.asarray(ds.variables['y'][:], float)
+    su = np.asarray(ds.variables['fU'][:], float).T.mean(1)   # ⟨u⟩ streamwise
+    sv = np.asarray(ds.variables['fW'][:], float).T.mean(1)   # ⟨v⟩ spanwise (veer comp.)
+    Ruw = np.asarray(ds.variables['Rxy'][:], float).T.mean(1)  # ⟨u'w'⟩
+    Rvw = np.asarray(ds.variables['Ryz'][:], float).T.mean(1)  # ⟨v'w'⟩
+    ds.close()
+
+    def _cumtrap(fp):                                # cumulative ∫ from the wall
+        out = np.zeros_like(fp)
+        out[1:] = np.cumsum(0.5 * (fp[1:] + fp[:-1]) * np.diff(y))
+        return out
+
+    top = int(top_frac * y.size)
+    g1, g2 = su[top], sv[top]
+    G = float(np.hypot(g1, g2))
+    C_zx = _cumtrap(g2 - sv); V_zx = nu_case * np.gradient(su, y); R_zx = -Ruw
+    C_zy = _cumtrap(g1 - su); V_zy = nu_case * np.gradient(sv, y); R_zy = -Rvw
+    Tx = C_zx + V_zx + R_zx
+    Ty = C_zy + V_zy + R_zy
+    _pl = (y > 0.05 * y[top]) & (y < y[top])         # plateau window (below sponge)
+    ustar = float(((Tx[_pl].mean())**2 + (Ty[_pl].mean())**2) ** 0.25)
+    u2 = ustar**2; G2 = G**2
+    zin = y * ustar / nu_case                        # inner z+
+    zout = y / ustar                                 # outer z-
+
+    def _panel(ax, x, C, V, R, T, sc, xlim, title, ylab, xlab):
+        ax.plot(x, C/sc, color='blue',   label='Coriolis C')
+        ax.plot(x, V/sc, color='red',    label='Viscous V')
+        ax.plot(x, R/sc, color='orange', label='Reynolds R')
+        ax.plot(x, T/sc, color='black',  lw=2, label='Total ⟨τ⟩')
+        ax.axhline(0, color='grey', lw=0.5); ax.set_xlim(*xlim)
+        ax.set_title(title, fontsize=9); ax.set_ylabel(ylab); ax.set_xlabel(xlab)
+        ax.grid(alpha=0.3)
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 9), dpi=200)
+    _panel(axs[0, 0], zin, C_zx, V_zx, R_zx, Tx, u2, (0, 100),
+           f'(a) $\\tau_{{zx}}$ inner — {label}', r'$\langle\tau\rangle^{+}_{zx}$', r'$z^{+}$')
+    _panel(axs[0, 1], zin, C_zy, V_zy, R_zy, Ty, u2, (0, 100),
+           '(b) $\\tau_{zy}$ inner', r'$\langle\tau\rangle^{+}_{zy}$', r'$z^{+}$')
+    _panel(axs[1, 0], zout, C_zx, V_zx, R_zx, Tx, G2*1e-3, (0, 1.2),
+           '(c) $\\tau_{zx}$ outer', r'$\langle\tau\rangle^{-}_{zx}\cdot10^{-3}$', r'$z^{-}$')
+    _panel(axs[1, 1], zout, C_zy, V_zy, R_zy, Ty, G2*1e-3, (0, 1.2),
+           '(d) $\\tau_{zy}$ outer', r'$\langle\tau\rangle^{-}_{zy}\cdot10^{-3}$', r'$z^{-}$')
+    axs[0, 0].legend(fontsize=7, loc='upper right')
+    fig.suptitle(f'Integrated momentum budget (eq. 4.2) — {label}   '
+                 f'[Method-2 $u_*$ = {ustar:.4f}, geostrophic veer = {np.degrees(np.arctan2(g2, g1)):.1f}°]')
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
+    plt.show()
+    print(f"  [Fig4 budget] {label}: Method-2 u* = {ustar:.4f}  (G={G:.3f}, "
+          f"τ_zx plateau={Tx[_pl].mean():.3e}, τ_zy plateau={Ty[_pl].mean():.3e})")
+    return ustar
+
+
 def mark_h(pos, orient='v', label=True, lblpos=0.04, ha='right', ax=None,
            color='black', linestyle='--', linewidth=0.8):
     """Mark a reference height with a dashed line labelled 'h'.
@@ -1438,20 +1564,29 @@ def layer_legend_handles(symbols=('o', 's', '^', 'D'), oro=True, smooth=True,
 
 
 def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5):
-    """Add a separate, fine-print legend explaining the layer markers at the
-    BOTTOM of the plot, without disturbing the plot's existing (line) legend.
+    """Add a separate, fine-print legend explaining the layer markers BELOW the
+    x-axis label (outside the data area), without disturbing the plot's existing
+    (line) legend.
 
     The on-curve markers are large for visibility; this legend uses small glyphs
     (markersize) and small text (fontsize) so it reads as a discreet footnote.
-    It sits inside the axes (lower-centre, light semi-transparent box) so it is
-    always captured by savefig regardless of tight_layout / bbox settings.
-    Call it AFTER the main legend has been created on the same axes.
+    It is anchored just under the x-axis label (loc='upper center',
+    bbox_to_anchor=(0.5, -0.18)) so it no longer overlaps the curves.  The bottom
+    figure margin is widened (subplots_adjust) so the footnote clears the x-axis
+    label and is captured by a plain savefig; tight_layout also reserves room for
+    it because the legend is an in-layout child of the axes (the matplotlib
+    default).  Call it AFTER the main legend has been created on the same axes.
     """
     import matplotlib.pyplot as plt
     a = ax if ax is not None else plt.gca()
     main = a.get_legend()                 # main (line) legend already on the axes
     handles = layer_legend_handles(oro=oro, smooth=smooth, markersize=markersize)
-    leg = a.legend(handles=handles, loc='lower center', ncol=min(3, len(handles)),
+    # Reserve whitespace beneath the axes so the footnote sits below the x-axis
+    # label and is still inside the figure canvas for a default (no bbox_inches)
+    # savefig — most callers save without bbox_inches='tight'.
+    a.figure.subplots_adjust(bottom=0.24)
+    leg = a.legend(handles=handles, loc='upper center',
+                   bbox_to_anchor=(0.5, -0.18), ncol=min(4, len(handles)),
                    fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
                    frameon=True, framealpha=0.7, facecolor='white',
                    edgecolor='none')

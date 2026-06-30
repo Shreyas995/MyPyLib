@@ -975,7 +975,7 @@ if (1 == plotRes):
         return min(max(_j, 1), len(_yp))
 
     def plot2D_allFr(field_key, suptitle, cmap_name, savename,
-                     ylim=None, use_inner=True):
+                     ylim=None, use_inner=True, cbar_label=None):
         if ylim is None:
             ylim = limity
         _avail = [(cn, lb) for cn, lb in zip(SIM_NAMES, SIM_LABELS)
@@ -1034,6 +1034,8 @@ if (1 == plotRes):
         # always renders regardless of bbox_inches='tight' clipping
         _cb = fig.colorbar(_pcm, ax=axes, orientation='vertical',
                            shrink=0.85, pad=0.02)
+        if cbar_label is not None:
+            _cb.set_label(cbar_label, fontsize=9)
         _cb.ax.tick_params(labelsize=8)
 
         fig.suptitle(suptitle, fontsize=11)
@@ -1088,10 +1090,15 @@ if (1 == plotRes):
     plot2D_allFr('AvgPhV',   r'Ph-avg $\langle\bar{v}\rangle$ — Re=500',              'RdBu_r',  'PhAvgV_allFr.png')
     plot2D_allFr('AvgPhW',   r'Ph-avg $\langle\bar{w}\rangle$ — Re=500',              'RdBu_r',  'PhAvgW_allFr.png')
     plot2D_allFr('AvgP',     r'Ph-avg pressure $\langle\bar{p}\rangle$ — Re=500',     'PiYG',    'AvgP_allFr.png')
+    plot2D_allFr('AvgScal',  r'Ph-avg potential temperature $\langle\bar{\theta}\rangle$ — Re=500', 'inferno', 'PotTemp_allFr.png',
+                 cbar_label=r'$\langle\overline{\theta}\rangle$ (buoyancy $b$)')
     plot2D_allFr('DispVelU', r'Dispersive streamwise $\tilde{u}$ — Re=500',           'RdBu_r',  'DispU_allFr.png')
     plot2D_allFr('DispVelV', r'Dispersive wall-normal $\tilde{v}$ — Re=500',          'RdBu_r',  'DispV_allFr.png')
     plot2D_allFr('DispVelW', r'Dispersive spanwise $\tilde{w}$ — Re=500',             'RdBu_r',  'DispW_allFr.png')
-    plot2D_allFr('TKE',      r'TKE $k$ — Re=500',                                    'hot_r',   'TKE_allFr.png')
+    # Raw turbulent kinetic energy k = ½⟨u_i'u_i'⟩ (NOT wall-normalised — the z+/x+
+    # axes use the single 0.0618 reference l_in, but the field is raw, shared scale).
+    plot2D_allFr('TKE',      r'Turbulent kinetic energy — Re=500',                   'hot_r',   'TKE_allFr.png',
+                 cbar_label=r"$k=\frac{1}{2}\,\overline{u_i'u_i'}$ (raw)")
     plot2D_allFr('disp_vortz', r'Dispersive vorticity $\tilde{\omega}_z$ — Re=500',   'coolwarm','disp_vortz_allFr.png', ylim=200)
     plot2D_allFr('vort_z',   r'Ph-avg vorticity $\langle\bar{\omega}_z\rangle$ — Re=500', 'coolwarm','vort_z_allFr.png', ylim=200)
     plot2D_allFr('rey_uv',   r"Reynolds stress $\overline{u'v'}$ — Re=500",           'RdBu_r',  'rey_uv_allFr.png')

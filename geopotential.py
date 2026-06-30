@@ -1526,7 +1526,7 @@ if __name__ == "__main__":
     phi_final = phi_final*mask0
     psi_final = psi_final*mask0
     plot2D_equipotential(
-        x_in, y_in[:450], phi_final[:450, :],
+        x_in, y_in[:], phi_final[:, :],
         title=r'Equipotential lines of $\phi$',
         xname=r'$x^+$', yname=r'$z^+$',
         savename=cwd + '/fig/phi_equipotential.png',
@@ -1535,7 +1535,7 @@ if __name__ == "__main__":
     )
     
     plot2D_streamline(
-        x_in, y_in[:300], psi_final[:300, :],
+        x_in, y_in[:], psi_final[:, :],
         title=r'Streamfunction $\psi$',
         xname=r'$x^+$', yname=r'$z^+$',
         savename=cwd + '/fig/psi_streamfunction_full.png',
@@ -1560,10 +1560,35 @@ if __name__ == "__main__":
     # ═══════════════════════════════════════════════════════════════════════════
     
     # ── Configuration ──────────────────────────────────────────────────────────
-    INST_FILE_U  = cwd + 'flow.264000.1'   # binary file — u-velocity component
-    INST_FILE_V  = cwd + 'flow.264000.2'   # binary file — v-velocity component
-    INST_PLANE   = 2                      # 1-based spanwise (z) plane index
-    ENSTR_THRESH = 0.01                     # TNTI enstrophy threshold (fraction of peak)
+    #  The full instantaneous flow fields are too large to copy here; only the
+    #  FIRST spanwise (z) plane of each component file has been downloaded (the
+    #  rest of every 'flow.*' file on this machine is truncated/broken).  So
+    #  rather than hard-code one iteration, discover whatever snapshot is present:
+    #  take any 'flow.<iter>.1' (u-component) and pair it with 'flow.<iter>.2'
+    #  (v-component).  INST_PLANE is pinned to 1 — the only plane that exists.
+    import glob
+
+    _u_candidates = sorted(glob.glob(os.path.join(cwd, 'flow.*.1')))
+    if not _u_candidates:
+        raise FileNotFoundError(
+            "No instantaneous u-velocity file matching 'flow.*.1' found in "
+            f"{cwd} — place a (first-plane) flow snapshot here to run the "
+            "turbulence extension."
+        )
+
+    INST_FILE_U  = _u_candidates[0]          # u-velocity component (first match)
+    INST_FILE_V  = INST_FILE_U[:-1] + '2'    # matching v-velocity component
+    INST_PLANE   = 1                         # only the first z-plane is available
+    ENSTR_THRESH = 0.01                      # TNTI enstrophy threshold (fraction of peak)
+
+    if not os.path.exists(INST_FILE_V):
+        raise FileNotFoundError(
+            f"Found {os.path.basename(INST_FILE_U)} but its v-component "
+            f"{os.path.basename(INST_FILE_V)} is missing in {cwd}."
+        )
+
+    print(f"\n   Instantaneous snapshot : {os.path.basename(INST_FILE_U)} / "
+          f"{os.path.basename(INST_FILE_V)}  (spanwise plane {INST_PLANE})")
     
     # Header size: read once from the u-file; both component files are identical
     # in format so the same hdr value applies to INST_FILE_V without re-reading.

@@ -53,6 +53,7 @@ load_arrays    = 1  # 1 → load pre-saved .npy arrays; 0 → recompute from fie
 postprocess    = 1  # 1 → execute the post-processing block
 plotRes        = 1  # 1 → generate result plots
 animate        = 0  # 1 → produce animation frames
+plot_spectra   = 1  # 1 → streamwise energy spectra from planesK.* (Kolmogorov -5/3 check)
 
 # ── 7. Derivative & interpolation settings ────────────────────────────────────
 # DY_METHOD / D2Y_METHOD — wall-normal derivative scheme (CompactDerivatives2D).
