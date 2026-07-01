@@ -37,7 +37,6 @@ Run with --info to only print a summary (no output written).
 import os
 import argparse
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
 
 HEAD_PARAMS = 5          # number of int32 in the header
 HEAD_SIZE   = HEAD_PARAMS * 4
@@ -117,20 +116,34 @@ def write_eps(path, eps2d, nz):
 # --------------------------------------------------------------------------- #
 # Remap
 # --------------------------------------------------------------------------- #
+def _nearest_index(src, dst):
+    """Index of the nearest src node for each dst coordinate.
+
+    src must be sorted ascending. Ties (dst exactly at a cell midpoint) resolve
+    to the lower index. dst points outside [src[0], src[-1]] map to the nearest
+    end node. Pure NumPy -- no scipy needed (Hunter has no scipy). Reproduces
+    scipy.RegularGridInterpolator(method='nearest', fill_value=None) bit-for-bit
+    on a tensor-product grid, where nearest is separable per axis.
+    """
+    src = np.asarray(src)
+    dst = np.asarray(dst)
+    pos = np.clip(np.searchsorted(src, dst), 1, src.size - 1)
+    choose_left = (dst - src[pos - 1]) <= (src[pos] - dst)
+    return pos - choose_left
+
+
 def remap_eps(eps_src, x_src, y_src, x_dst, y_dst):
     """Nearest-neighbour resample eps_src[y,x] onto the (y_dst, x_dst) grid.
 
-    Nearest-neighbour keeps the field strictly {0,1}. Points of the destination
-    grid outside the source extent take the value of the nearest source node
-    (fill_value=None -> extrapolate by nearest).
+    Nearest-neighbour keeps the field strictly {0,1}. Because both grids are
+    tensor products (independent x and y node vectors), the nearest source node
+    is the (nearest-y, nearest-x) pair, so the remap factorises into two 1-D
+    nearest-index lookups. Destination points outside the source extent take the
+    value of the nearest source node.
     """
-    interp = RegularGridInterpolator(
-        (y_src, x_src), eps_src.astype(np.float64),
-        method='nearest', bounds_error=False, fill_value=None)
-    Yd, Xd = np.meshgrid(y_dst, x_dst, indexing='ij')  # (ny_dst, nx_dst)
-    pts = np.column_stack([Yd.ravel(), Xd.ravel()])
-    eps_dst = interp(pts).reshape(Yd.shape)
-    return np.rint(eps_dst).astype(np.int8)
+    iy = _nearest_index(y_src, y_dst)                  # (ny_dst,)
+    ix = _nearest_index(x_src, x_dst)                  # (nx_dst,)
+    return eps_src[np.ix_(iy, ix)].astype(np.int8)
 
 
 # --------------------------------------------------------------------------- #
