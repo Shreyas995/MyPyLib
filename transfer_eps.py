@@ -25,12 +25,17 @@ re-encoded in the same bit-packed format.
 
 Usage
 -----
+Positional (EPS GRID_SRC GRID_DST OUT):
     python3 transfer_eps.py \
-        --eps      eps0.1 \
-        --grid-src 1024x832x1024/grid_1024x832x1024 \
-        --grid-dst 1728x784x1728/grid_1728x784x1728 \
-        --out      eps0.1_1728x784x1728
+        ~/1056x672x1056/eps0.1 \
+        ~/1056x672x1056/EkRe500FrInf/grid \
+        ~/1728x784x1728/EkRe750FrInf/grid \
+        ~/1728x784x1728/EkRe750FrInf/eps0.1_transfered
 
+or equivalently with flags (which override the positionals):
+    python3 transfer_eps.py --eps ... --grid-src ... --grid-dst ... --out ...
+
+Paths accept ~, ~user, $HOME/${VAR}, and relative paths (resolved to the cwd).
 Run with --info to only print a summary (no output written).
 """
 
@@ -159,26 +164,42 @@ def surface_profile(eps2d):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Transfer a bit-packed eps field between grids.")
-    ap.add_argument('--eps',      default='eps0.1',
+    ap = argparse.ArgumentParser(
+        description="Transfer a bit-packed eps field between grids.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="positional order:  EPS  GRID_SRC  GRID_DST  OUT\n"
+               "  e.g.  transfer_eps.py ~/case/eps0.1 ~/A/grid ~/B/grid ~/B/eps0.1_transfered\n"
+               "flags --eps/--grid-src/--grid-dst/--out override the positionals.\n"
+               "paths accept ~, ~user, $HOME/${VAR}, and relative paths (resolved to cwd).")
+    # positional form (natural CLI order); all optional so defaults still apply
+    ap.add_argument('eps_pos',      nargs='?', metavar='EPS',
                     help='input bit-packed eps field (source grid)')
-    ap.add_argument('--grid-src', default='1024x832x1024/grid_1024x832x1024',
+    ap.add_argument('grid_src_pos', nargs='?', metavar='GRID_SRC',
                     help='source grid file')
-    ap.add_argument('--grid-dst', default='1728x784x1728/grid_1728x784x1728',
+    ap.add_argument('grid_dst_pos', nargs='?', metavar='GRID_DST',
                     help='destination grid file')
-    ap.add_argument('--out',      default='eps0.1_1728x784x1728',
+    ap.add_argument('out_pos',      nargs='?', metavar='OUT',
                     help='output bit-packed eps field (destination grid)')
+    # flag form (overrides the positional if given)
+    ap.add_argument('--eps')
+    ap.add_argument('--grid-src', dest='grid_src')
+    ap.add_argument('--grid-dst', dest='grid_dst')
+    ap.add_argument('--out')
     ap.add_argument('--info', action='store_true',
                     help='only print a summary; do not write the output file')
     args = ap.parse_args()
 
-    # normalise every path arg so the script can be run from any working
-    # directory and accepts ~, $HOME/env vars, and relative paths:
-    #   expandvars -> $HOME, ${VAR}      expanduser -> ~ / ~user
-    #   abspath    -> resolve relative to the current working directory
-    for _k in ('eps', 'grid_src', 'grid_dst', 'out'):
-        _p = os.path.expanduser(os.path.expandvars(getattr(args, _k)))
-        setattr(args, _k, os.path.abspath(_p))
+    # resolve each path: flag > positional > default, then normalise so the
+    # script can run from any cwd and accept ~, $HOME/env vars, relative paths.
+    #   expandvars -> $HOME/${VAR}   expanduser -> ~ / ~user   abspath -> cwd
+    _defaults = {'eps':      'eps0.1',
+                 'grid_src': '1024x832x1024/grid_1024x832x1024',
+                 'grid_dst': '1728x784x1728/grid_1728x784x1728',
+                 'out':      'eps0.1_1728x784x1728'}
+    for _k, _pos in (('eps', 'eps_pos'), ('grid_src', 'grid_src_pos'),
+                     ('grid_dst', 'grid_dst_pos'), ('out', 'out_pos')):
+        _val = getattr(args, _k) or getattr(args, _pos) or _defaults[_k]
+        setattr(args, _k, os.path.abspath(os.path.expanduser(os.path.expandvars(_val))))
 
     # --- source ---
     nS, sclS, xS, yS, zS = read_grid(args.grid_src)
