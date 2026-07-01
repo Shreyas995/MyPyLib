@@ -159,6 +159,14 @@ def main():
                     help='only print a summary; do not write the output file')
     args = ap.parse_args()
 
+    # normalise every path arg so the script can be run from any working
+    # directory and accepts ~, $HOME/env vars, and relative paths:
+    #   expandvars -> $HOME, ${VAR}      expanduser -> ~ / ~user
+    #   abspath    -> resolve relative to the current working directory
+    for _k in ('eps', 'grid_src', 'grid_dst', 'out'):
+        _p = os.path.expanduser(os.path.expandvars(getattr(args, _k)))
+        setattr(args, _k, os.path.abspath(_p))
+
     # --- source ---
     nS, sclS, xS, yS, zS = read_grid(args.grid_src)
     eps_src, hdr = read_eps_plane(args.eps)
