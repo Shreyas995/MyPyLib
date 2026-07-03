@@ -1,46 +1,75 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Intermittency.py — 3-D external/global intermittency from a tlab velocity field.
+Intermittency.py — 3-D external/global intermittency from a tlab velocity
+(+ optional scalar buoyancy) field.
 
-Method (Ansorge & Mellado 2016, J. Fluid Mech. 805, 611-635):
+Velocity (mechanical) intermittency — Ansorge & Mellado (2016), JFM 805:
 
-    γ(x) = ⟨ H(|ω'| − ω₀) ⟩ ,   ω₀ = e_ω ≡ ω_rms(δ)              (eqs 4.1, 4.2)
+    γ(x)  = ⟨ H(|ω'| − ω₀) ⟩ ,   ω₀ = e_ω ≡ ω_rms(δ)              (eqs 4.1, 4.2)
+
+Scalar (buoyancy) intermittency — same recipe, substituting the buoyancy
+fluctuation for the vorticity fluctuation.  Own physical threshold (NOT a
+reuse of ω₀ — different field, different units/dynamics):
+
+    γ_b(x) = ⟨ H(|b'| − b₀) ⟩ ,   b₀ = e_b ≡ b_rms(δ)
+
+Conditional buoyancy statistics — independent of γ_b; uses the *velocity*-
+defined instantaneous state H(|ω'|−ω₀) at each snapshot to split the raw
+scalar into "inside the mechanically turbulent region" vs "outside it":
+
+    ⟨b⟩_turb(x), ⟨b⟩_quiet(x), ⟨b'²⟩_turb(x), ⟨b'²⟩_quiet(x)
 
     H         Heaviside step,
     |ω'|      magnitude of the vorticity of the HIGH-PASS velocity field,
-    ω₀        threshold = the rms fluctuation-vorticity at the BL edge δ — a
-              fixed PHYSICAL reference (NOT a fraction of the max: a max-fraction
-              cut collapses because the max is set by the near-wall shear / IBM
-              interface spike, exactly the failure the paper warns about, §4.1).
+    |b'|      magnitude of the HIGH-PASS (spanwise-fluctuation) scalar field,
+    ω₀, b₀    thresholds = the rms fluctuation at the BL edge δ — fixed
+              PHYSICAL references (NOT a fraction of the max: a max-fraction
+              cut collapses because the max is set by near-wall shear / the
+              IBM interface spike, exactly the failure the paper warns
+              about, §4.1).
 
-The "high-pass" here is the spanwise (z) fluctuation  u' = u − ⟨u⟩_z, i.e. the
-turbulent part of the triple decomposition (mean + dispersive removed).  With
-the full 3-D field we get the TRUE vorticity magnitude
+The "high-pass" here is the spanwise (z) fluctuation  q' = q − ⟨q⟩_z, i.e.
+the turbulent part of the triple decomposition (mean + dispersive removed) —
+the same convention PhAvg_rotated.py uses for both velocity and the scalar
+buoyancy field (AvgScal IS b; see CLAUDE.md).  With the full 3-D field we get
+the TRUE vorticity magnitude
     |ω'| = sqrt(ω'x² + ω'y² + ω'z²),   ω'x = ∂w'/∂y − ∂v'/∂z, …
 (a single plane only gives ω'z).
 
 ═════════════════════════════════════════════════════════════════════════════
 CLUSTER-SAFE.  The COMPUTE path uses ONLY numpy + the standard library — no
-scipy, no matplotlib.  matplotlib is imported lazily, only inside --plot mode,
-so this runs where the cluster python lacks it.
+scipy, no matplotlib.  matplotlib is imported lazily, only inside --plot
+mode, so this runs where the cluster python lacks it.  All field files are
+opened strictly read-only ('rb'); nothing in this script ever writes back to
+flow.*/scal.* — only new *.npy/*.npz output files are created.
 
-WORKFLOW — never download the whole field, only the chosen 2-D plane:
-    # 1. on the cluster: compute γ(x,y,z), save it, write ONE requested plane:
+WORKFLOW — never download the whole field, only the chosen 2-D plane(s):
+    # 1. on the cluster: compute γ (+ γ_b + conditional stats, automatically,
+    #    if scal.<tag>.1 is present alongside each flow.<tag>.1/2/3), save,
+    #    and write ONE requested plane:
     python3 Intermittency.py --workdir /path/to/case --save-full --slice z --index 0
-    # 2. copy back the small  *_slice_*.npz  (a few MB), then LOCALLY:
-    python3 Intermittency.py --plot intermittency_slice_z0000.npz
-    # extra planes later, no recompute (slice the saved 3-D γ):
+    # 2. copy back the small  *_xy.npz / *_slice_*.npz  (a few MB), then LOCALLY:
+    python3 Intermittency.py --plot intermittency_xy.npz
+    # extra planes later, no recompute (slices the saved 3-D velocity γ only):
     python3 Intermittency.py --workdir . --from-full intermittency_gamma3d.npy \\
             --slice y --index 40
+    # skip the scalar path even if scal.* is present (velocity γ only, faster):
+    python3 Intermittency.py --workdir . --skip-scalar
 
 Coordinates (tlab engineering): axis0 = y wall-normal, axis1 = x streamwise
 (periodic), axis2 = z spanwise (periodic).  Velocity components on disk:
 1 = u streamwise, 2 = v wall-normal, 3 = w spanwise  (flow.<tag>.1/2/3).
+Scalar (buoyancy) component on disk: scal.<tag>.1, matched to flow.<tag>.*
+by <tag> (same tag, missing scal.* for a given tag just drops that snapshot
+from the scalar-side averages — the velocity γ is unaffected).
 
-MEMORY: the compute path holds a few field-sized float32 arrays at once
-(≈ 6–8 × nx·ny·nz · 4 B).  Fine up to ~1e9 points on a big-memory node; for
-larger grids run on fewer snapshots or a high-memory queue.
+MEMORY: the compute path holds a few field-sized arrays at once (≈6-8x
+nx·ny·nz·4B for velocity alone; roughly double that while the scalar path is
+also active, since it carries six more float64 accumulators of the same
+shape across the whole snapshot loop). Fine up to ~1e9 points on a
+big-memory node; for larger grids run on fewer snapshots, --skip-scalar, or
+a high-memory queue.
 """
 
 import os
@@ -77,7 +106,8 @@ def read_header(path):
 
 
 def read_full_field(path, nx, ny, nz, dtype_out=np.float32):
-    """Read a component's full 3-D field (ny, nx, nz), one z-plane at a time."""
+    """Read a component's full 3-D field (ny, nx, nz), one z-plane at a time.
+    Opens the file strictly read-only — never writes back to the raw record."""
     hdr = read_header(path)
     field = np.empty((ny, nx, nz), dtype=dtype_out)
     with open(path, 'rb') as f:
@@ -134,36 +164,72 @@ def omega_highpass(u, v, w, x, y, z):
     return np.sqrt(osq, out=osq)
 
 
+def _rms_at_row(absfield_row, mask_er, j, nz):
+    """rms of |field| at wall-normal index j, masked to interior fluid if
+    mask_er is given. absfield_row is (nx, nz)."""
+    if mask_er is not None:
+        wgt = mask_er[j, :][:, None]
+        denom = max(float(np.sum(wgt)) * nz, 1.0)
+        return float(np.sqrt(np.sum((absfield_row ** 2) * wgt) / denom))
+    return float(np.sqrt(np.mean(absfield_row ** 2)))
+
+
+def _safe_divide(num, den):
+    return np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Compute γ(x,y,z)  (average of the indicator over the given snapshots)
+# Compute γ(x,y,z) [+ γ_b, conditional buoyancy stats] over the given snapshots
 # ─────────────────────────────────────────────────────────────────────────────
-def component_triplets(args, workdir):
-    """List of (u,v,w) file triplets; each triplet = one snapshot to average."""
+def component_quads(args, workdir):
+    """List of (u, v, w, scalar_or_None) file quads; each = one snapshot.
+    scalar_or_None is scal.<tag>.1 matched to flow.<tag>.1 by <tag>; a
+    snapshot missing its scalar file still contributes to gamma (velocity),
+    just not to gamma_b / the conditional buoyancy statistics."""
     if args.u:
         if not (args.v and args.w):
             sys.exit("ERROR: --u requires --v and --w (all three components).")
-        return [(args.u, args.v, args.w)]
-    trip = []
+        return [(args.u, args.v, args.w, args.scalar)]
+    quads = []
     for uf in sorted(glob.glob(os.path.join(workdir, 'flow.*.1'))):
-        vf, wf = uf[:-1] + '2', uf[:-1] + '3'            # flow.<tag>.1 → .2/.3
-        if os.path.exists(vf) and os.path.exists(wf):
-            trip.append((uf, vf, wf))
-    return trip
+        vf, wf = uf[:-1] + '2', uf[:-1] + '3'
+        if not (os.path.exists(vf) and os.path.exists(wf)):
+            continue
+        tag = os.path.basename(uf)[len('flow.'):]        # '<tag>.1'
+        sf = os.path.join(os.path.dirname(uf), 'scal.' + tag)
+        quads.append((uf, vf, wf, sf if os.path.exists(sf) else None))
+    return quads
 
 
-def compute_gamma3d(args, workdir, x, y, z, mask_er):
+def compute_all(args, workdir, x, y, z, mask_er):
+    """Returns (fields: dict[name]->3-D array, meta: dict, j_delta)."""
     nx, ny, nz = x.size, y.size, z.size
-    trips = component_triplets(args, workdir)
-    if not trips:
+    quads = component_quads(args, workdir)
+    if not quads:
         sys.exit("ERROR: no flow.*.1/2/3 velocity triplet found — nothing to do.")
-    print(f"  snapshots to average: {len(trips)}")
+    n_scalar = sum(1 for q in quads if q[3] is not None)
+    do_scalar = (not args.skip_scalar) and n_scalar > 0
+    print(f"  snapshots to average: {len(quads)}  (with matching scal.*: "
+          f"{n_scalar}{'' if do_scalar else ' — scalar path skipped'})")
 
     j_delta = (int(np.searchsorted(y, args.delta)) if args.delta is not None
                else None)
+
     gamma3d = np.zeros((ny, nx, nz), dtype=np.float32)
     omega0 = None
-    for s, (uf, vf, wf) in enumerate(trips):
-        print(f"  [{s + 1}/{len(trips)}] {os.path.basename(uf)} …", flush=True)
+
+    if do_scalar:
+        gamma3d_b    = np.zeros((ny, nx, nz), dtype=np.float32)
+        omega0_b     = None
+        sum_b_turb   = np.zeros((ny, nx, nz), dtype=np.float64)
+        sum_b2_turb  = np.zeros((ny, nx, nz), dtype=np.float64)
+        cnt_turb     = np.zeros((ny, nx, nz), dtype=np.float64)
+        sum_b_quiet  = np.zeros((ny, nx, nz), dtype=np.float64)
+        sum_b2_quiet = np.zeros((ny, nx, nz), dtype=np.float64)
+        cnt_quiet    = np.zeros((ny, nx, nz), dtype=np.float64)
+
+    for s, (uf, vf, wf, sf) in enumerate(quads):
+        print(f"  [{s + 1}/{len(quads)}] {os.path.basename(uf)} …", flush=True)
         u = read_full_field(uf, nx, ny, nz)
         v = read_full_field(vf, nx, ny, nz)
         w = read_full_field(wf, nx, ny, nz)
@@ -173,30 +239,61 @@ def compute_gamma3d(args, workdir, x, y, z, mask_er):
             j_delta = int(np.argmax(Umag >= 0.95 * Umag.max()))
             print(f"      δ (95% wind) at j={j_delta}, z={float(y[j_delta]):.4g}")
 
-        omega = omega_highpass(u, v, w, x, y, z)         # u,v,w → fluctuations
+        omega = omega_highpass(u, v, w, x, y, z)          # u,v,w → fluctuations
         del u, v, w
 
-        if s == 0:                                       # ω₀ = e_ω = ω_rms(δ)
-            row = omega[j_delta, :, :]                   # (nx, nz) at the BL edge
-            if mask_er is not None:
-                wgt = mask_er[j_delta, :][:, None]
-                denom = max(float(np.sum(wgt)) * nz, 1.0)
-                e_omega = float(np.sqrt(np.sum((row ** 2) * wgt) / denom))
-            else:
-                e_omega = float(np.sqrt(np.mean(row ** 2)))
+        if omega0 is None:                                # ω₀ = e_ω = ω_rms(δ)
+            e_omega = _rms_at_row(omega[j_delta, :, :], mask_er, j_delta, nz)
             omega0 = args.factor * e_omega
             print(f"      e_ω = ω_rms(δ) = {e_omega:.4g};  "
                   f"ω₀ = {args.factor:g}·e_ω = {omega0:.4g}")
 
-        gamma3d += (omega > omega0)                      # accumulate H(|ω'|−ω₀)
+        H_inst = omega > omega0                           # this snapshot's turbulent mask
+        gamma3d += H_inst
         del omega
 
-    gamma3d /= len(trips)                                # → intermittency factor
-    return gamma3d, omega0, j_delta
+        if do_scalar and sf is not None:
+            b = read_full_field(sf, nx, ny, nz)
+            bp = b - b.mean(axis=2, keepdims=True)         # high-pass, same z-mean convention
+
+            if omega0_b is None:                           # b₀ = e_b = b_rms(δ)
+                e_b = _rms_at_row(np.abs(bp[j_delta, :, :]), mask_er, j_delta, nz)
+                omega0_b = args.factor_b * e_b
+                print(f"      e_b = b_rms(δ) = {e_b:.4g};  "
+                      f"b₀ = {args.factor_b:g}·e_b = {omega0_b:.4g}")
+
+            gamma3d_b += np.abs(bp) > omega0_b
+
+            sum_b_turb   += np.where(H_inst, b, 0.0)
+            sum_b2_turb  += np.where(H_inst, bp * bp, 0.0)
+            cnt_turb     += H_inst
+            sum_b_quiet  += np.where(~H_inst, b, 0.0)
+            sum_b2_quiet += np.where(~H_inst, bp * bp, 0.0)
+            cnt_quiet    += ~H_inst
+            del b, bp
+
+        del H_inst
+
+    gamma3d /= len(quads)
+    fields = {'gamma': gamma3d}
+    meta = {'omega0': omega0, 'factor': args.factor, 'j_delta': j_delta,
+            'n_snapshots': len(quads)}
+
+    if do_scalar:
+        gamma3d_b /= n_scalar
+        fields['gamma_b']      = gamma3d_b
+        fields['mean_b_turb']  = _safe_divide(sum_b_turb,  cnt_turb ).astype(np.float32)
+        fields['mean_b_quiet'] = _safe_divide(sum_b_quiet, cnt_quiet).astype(np.float32)
+        fields['var_b_turb']   = _safe_divide(sum_b2_turb, cnt_turb ).astype(np.float32)
+        fields['var_b_quiet']  = _safe_divide(sum_b2_quiet,cnt_quiet).astype(np.float32)
+        meta.update({'omega0_b': omega0_b, 'factor_b': args.factor_b,
+                     'n_scalar_snapshots': n_scalar})
+
+    return fields, meta, j_delta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Slice extraction + masking + write
+# Slice extraction + masking + write (multi-field: gamma, gamma_b, bcond stats)
 # ─────────────────────────────────────────────────────────────────────────────
 def extract_slice(field3d, direction, index, x, y, z):
     """Return (plane2d, axis_h, axis_v, h_label, v_label, resolved_index).
@@ -226,65 +323,116 @@ def mask_plane(plane, direction, idx, mask_er):
     return np.where(mask_er[:, idx][:, None] > 0, plane, np.nan)   # x: (ny, nz)
 
 
-def write_plane_npz(out_path, plane, axis_h, axis_v, h_label, v_label, meta):
-    np.savez_compressed(
-        out_path, gamma=plane.astype(np.float32),
-        axis_h=np.asarray(axis_h, np.float64), axis_v=np.asarray(axis_v, np.float64),
-        h_label=np.array(h_label), v_label=np.array(v_label), meta=np.array(str(meta)))
-    print(f"  wrote {out_path}  ({plane.shape[1]}×{plane.shape[0]})")
+def spanwise_mean_fields(fields3d, mask_er):
+    """Spanwise-average (axis=2) every field in the dict; nan solid cells."""
+    planes = {}
+    for name, f3d in fields3d.items():
+        p = np.nanmean(f3d, axis=2)
+        if mask_er is not None:
+            p = np.where(mask_er > 0, p, np.nan)
+        planes[name] = p
+    return planes
+
+
+def extract_slice_fields(fields3d, direction, index, x, y, z, mask_er):
+    """Slice every field in `fields3d` at the same (direction, index); all
+    fields share the grid so axis/label/idx are identical across them."""
+    planes = {}
+    axis_h = axis_v = h_label = v_label = idx = None
+    for name, f3d in fields3d.items():
+        plane, axis_h, axis_v, h_label, v_label, idx = extract_slice(
+            f3d, direction, index, x, y, z)
+        planes[name] = mask_plane(plane, direction, idx, mask_er)
+    return planes, axis_h, axis_v, h_label, v_label, idx
+
+
+def write_plane_npz(out_path, fields, axis_h, axis_v, h_label, v_label, meta):
+    """fields: dict[name] -> 2-D array. Each becomes its own array in the npz."""
+    payload = {name: f.astype(np.float32) for name, f in fields.items()}
+    payload.update(axis_h=np.asarray(axis_h, np.float64),
+                    axis_v=np.asarray(axis_v, np.float64),
+                    h_label=np.array(h_label), v_label=np.array(v_label),
+                    field_names=np.array(list(fields.keys())),
+                    meta=np.array(str(meta)))
+    np.savez_compressed(out_path, **payload)
+    shp = next(iter(fields.values())).shape
+    print(f"  wrote {out_path}  fields={list(fields.keys())}  ({shp[1]}×{shp[0]})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plot (LOCAL only — matplotlib imported here, never on the cluster path)
 # ─────────────────────────────────────────────────────────────────────────────
-def plot_npz(npz_path, out_png=None):
+def plot_npz(npz_path, out_png=None, field=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     d = np.load(npz_path, allow_pickle=True)
-    field, ax_h, ax_v = d['gamma'], d['axis_h'], d['axis_v']
-    fig, ax = plt.subplots(figsize=(9, 4.5), dpi=200)
-    cf = ax.contourf(ax_h, ax_v, field, levels=np.linspace(0, 1, 21), cmap='hot_r')
-    ax.contour(ax_h, ax_v, np.nan_to_num(field), levels=[0.5],
-               colors='cyan', linewidths=1.0)
-    plt.colorbar(cf, ax=ax, label=r'intermittency $\gamma$')
-    ax.set_xlabel(str(d['h_label'])); ax.set_ylabel(str(d['v_label']))
-    ax.set_title(f"Intermittency  [{str(d['meta'])}]", fontsize=8)
-    out_png = out_png or os.path.splitext(npz_path)[0] + '.png'
-    plt.tight_layout(); plt.savefig(out_png); plt.close(fig)
-    print(f"  wrote {out_png}")
+    ax_h, ax_v = d['axis_h'], d['axis_v']
+    h_label, v_label = str(d['h_label']), str(d['v_label'])
+    meta = str(d['meta'])
+    names = [field] if field else (
+        [str(n) for n in d['field_names']] if 'field_names' in d.files else ['gamma'])
+    stem = os.path.splitext(out_png or npz_path)[0]
+    for name in names:
+        if name not in d.files:
+            print(f"  [warn] field '{name}' not in {npz_path} "
+                  f"(has: {list(d.files)}) — skipping.")
+            continue
+        fplane = d[name]
+        is_gamma = name.startswith('gamma')
+        fig, ax = plt.subplots(figsize=(9, 4.5), dpi=200)
+        cf = ax.contourf(ax_h, ax_v, fplane,
+                         levels=np.linspace(0, 1, 21) if is_gamma else 21,
+                         cmap='hot_r' if is_gamma else 'RdBu_r')
+        if is_gamma:
+            ax.contour(ax_h, ax_v, np.nan_to_num(fplane), levels=[0.5],
+                       colors='cyan', linewidths=1.0)
+        plt.colorbar(cf, ax=ax, label=name)
+        ax.set_xlabel(h_label); ax.set_ylabel(v_label)
+        ax.set_title(f"{name}  [{meta}]", fontsize=8)
+        out = f"{stem}.png" if len(names) == 1 else f"{stem}_{name}.png"
+        plt.tight_layout(); plt.savefig(out); plt.close(fig)
+        print(f"  wrote {out}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--workdir', default='.', help='case dir (grid + flow.*)')
+    ap.add_argument('--workdir', default='.', help='case dir (grid + flow.*/scal.*)')
     ap.add_argument('--grid', default=None, help='grid file [workdir/grid]')
     ap.add_argument('--eps', default=None,
                     help='eps_save.npy (ny,nx) [workdir/eps_save.npy]')
     ap.add_argument('--u', default=None, help='explicit u file (else glob flow.*.1)')
     ap.add_argument('--v', default=None, help='explicit v file')
     ap.add_argument('--w', default=None, help='explicit w file')
+    ap.add_argument('--scalar', default=None,
+                    help='explicit scalar (buoyancy) file, paired with --u/--v/--w')
+    ap.add_argument('--skip-scalar', action='store_true',
+                    help='ignore scal.<tag>.1 even if present (velocity gamma only)')
     ap.add_argument('--factor', type=float, default=1.0,
-                    help='ω₀ = factor·e_ω  (Ansorge sweeps 1/8…3; default 1)')
+                    help='omega0 = factor * e_omega  (Ansorge sweeps 1/8...3; default 1)')
+    ap.add_argument('--factor-b', type=float, default=1.0,
+                    help='b0 = factor_b * e_b, the buoyancy threshold (own scale; default 1)')
     ap.add_argument('--delta', type=float, default=None,
-                    help='BL-edge height (y units) for e_ω; default = auto δ₉₅')
+                    help='BL-edge height (y units) for e_omega/e_b; default = auto delta_95')
     ap.add_argument('--slice', default=None, choices=['x', 'y', 'z'],
                     help='write this plane for download')
     ap.add_argument('--index', type=int, default=0,
                     help='plane index (0-based; negative wraps from the end)')
     ap.add_argument('--save-full', action='store_true',
-                    help='also save the whole 3-D γ (big; stays on cluster)')
+                    help='also save the whole 3-D field(s) (big; stays on cluster)')
     ap.add_argument('--from-full', default=None,
-                    help='slice a previously saved 3-D γ .npy (no recompute)')
+                    help='slice a previously saved 3-D gamma .npy (velocity only, no recompute)')
     ap.add_argument('--out-prefix', default='intermittency')
     ap.add_argument('--plot', default=None, help='LOCAL: plot a saved *.npz')
+    ap.add_argument('--field', default=None,
+                    help='LOCAL: which field to plot from --plot npz (default: all)')
     args = ap.parse_args()
 
     # ---- LOCAL plot mode ----------------------------------------------------
     if args.plot:
-        plot_npz(args.plot)
+        plot_npz(args.plot, field=args.field)
         return
 
     workdir = args.workdir
@@ -296,35 +444,33 @@ def main():
     if eps is not None:
         print("  eps loaded → IBM interface ring eroded from stats/output.")
 
-    # ---- γ(x,y,z): recompute, or slice a previously saved one ---------------
+    # ---- field(s): recompute, or slice a previously saved velocity gamma ----
     if args.from_full:
         gamma3d = np.load(args.from_full)
-        print(f"  loaded γ3d {gamma3d.shape} from {args.from_full}")
+        print(f"  loaded gamma3d {gamma3d.shape} from {args.from_full}")
+        fields3d = {'gamma': gamma3d}
         meta = {'source': os.path.basename(args.from_full)}
     else:
-        gamma3d, omega0, j_delta = compute_gamma3d(args, workdir, x, y, z, mask_er)
-        meta = {'omega0': omega0, 'factor': args.factor, 'j_delta': j_delta}
+        fields3d, meta, j_delta = compute_all(args, workdir, x, y, z, mask_er)
         if args.save_full:
-            fp = os.path.join(workdir, f'{args.out_prefix}_gamma3d.npy')
-            np.save(fp, gamma3d)
-            print(f"  wrote {fp}  ({gamma3d.nbytes / 1e9:.2f} GB, stays on cluster)")
+            for name, f3d in fields3d.items():
+                fp = os.path.join(workdir, f'{args.out_prefix}_{name}3d.npy')
+                np.save(fp, f3d)
+                print(f"  wrote {fp}  ({f3d.nbytes / 1e9:.2f} GB, stays on cluster)")
 
-    # ---- always: spanwise-averaged γ(x,z) — the small valley intermittency --
-    g_xy = np.nanmean(gamma3d, axis=2)
-    if mask_er is not None:
-        g_xy = np.where(mask_er > 0, g_xy, np.nan)
-    fp = os.path.join(workdir, f'{args.out_prefix}_gamma_xy.npz')
-    write_plane_npz(fp, g_xy, x, y, 'x', 'z (wall-normal)',
+    # ---- always: spanwise-averaged plane(s) — the small valley intermittency
+    planes = spanwise_mean_fields(fields3d, mask_er)
+    fp = os.path.join(workdir, f'{args.out_prefix}_xy.npz')
+    write_plane_npz(fp, planes, x, y, 'x', 'z (wall-normal)',
                     {**meta, 'reduction': 'spanwise-mean'})
 
-    # ---- requested plane ----------------------------------------------------
+    # ---- requested plane ------------------------------------------------------
     if args.slice:
-        plane, ax_h, ax_v, hl, vl, idx = extract_slice(
-            gamma3d, args.slice, args.index, x, y, z)
-        plane = mask_plane(plane, args.slice, idx, mask_er)
+        planes, ax_h, ax_v, hl, vl, idx = extract_slice_fields(
+            fields3d, args.slice, args.index, x, y, z, mask_er)
         out = os.path.join(workdir,
                            f'{args.out_prefix}_slice_{args.slice}{idx:04d}.npz')
-        write_plane_npz(out, plane, ax_h, ax_v, hl, vl,
+        write_plane_npz(out, planes, ax_h, ax_v, hl, vl,
                         {**meta, 'slice': f'{args.slice}={idx}'})
 
 
