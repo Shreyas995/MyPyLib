@@ -854,13 +854,43 @@ if __name__ == "__main__":
     print("\n── Step 3: Load and interpolate velocity fields ──")
     AvgPhU = np.load(os.path.join(cwd, "AvgPhU.npy"))
     AvgPhV = np.load(os.path.join(cwd, "AvgPhV.npy"))
-    print(f"   AvgPhU: {AvgPhU.shape}   AvgPhV: {AvgPhV.shape}")
+    AvgPhW = np.load(os.path.join(cwd, "AvgPhW.npy"))
+    print(f"   AvgPhU: {AvgPhU.shape}   AvgPhV: {AvgPhV.shape}   AvgPhW: {AvgPhW.shape}")
     print("   Interpolating U …")
     AvgPhU_i, AvgPhU_j = interpolate_component(
         x, y, nx, ny, eps, AvgPhU, ghost_depth=5, n_anchor=4, smooth_width=5)
     print("   Interpolating V …")
     AvgPhV_i, AvgPhV_j = interpolate_component(
         x, y, nx, ny, eps, AvgPhV, ghost_depth=5, n_anchor=4, smooth_width=5)
+    print("   Interpolating W …")
+    AvgPhW_i, AvgPhW_j = interpolate_component(
+        x, y, nx, ny, eps, AvgPhW, ghost_depth=5, n_anchor=4, smooth_width=5)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 3a — Rotate horizontal components into the geostrophic-aligned
+    # frame, matching PhAvg_rotated.py exactly: same `alpha` (config),
+    # same proper rotation  U' = U·cosα − W·sinα ,  W' = U·sinα + W·cosα.
+    # Applied right after interpolation and BEFORE any divergence /
+    # vorticity / psi_bc_top computation below, so the phi/psi Poisson
+    # solve and everything downstream operates on the rotated U unchanged
+    # (PhAvg_rotated.py comment: "Applied AFTER interpolation and BEFORE
+    # the derivatives, so the derivative/budget pipeline ... operates on
+    # the rotated fields unchanged").  V (rotation axis, wall-normal) is
+    # left untouched, exactly as in PhAvg_rotated.py.  `_geo_alpha` (not
+    # `alpha`) is used below because this driver later reassigns a local
+    # `alpha` to the flow-deflection-angle field (Step 15+) — keeping the
+    # rotation angle under its own name avoids that later shadowing.
+    # ══════════════════════════════════════════════════════════════════
+    _geo_alpha = alpha
+    _rc, _rs = np.cos(_geo_alpha), np.sin(_geo_alpha)
+    def _rotate_pair(a, b):
+        return a * _rc - b * _rs, a * _rs + b * _rc
+    AvgPhU,   AvgPhW   = _rotate_pair(AvgPhU,   AvgPhW)
+    AvgPhU_i, AvgPhW_i = _rotate_pair(AvgPhU_i, AvgPhW_i)
+    AvgPhU_j, AvgPhW_j = _rotate_pair(AvgPhU_j, AvgPhW_j)
+    print(f"   [ROTATED] U,W rotated by alpha={_geo_alpha:.4f} rad "
+          f"({np.degrees(_geo_alpha):.1f}°) into the geostrophic-aligned "
+          f"frame (matches PhAvg_rotated.py); V left unchanged (rotation axis)")
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 3b — Compute psi_bc_top BEFORE zeroing solid

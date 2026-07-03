@@ -130,10 +130,13 @@ sponge_frac = 0.8             # Rayleigh-sponge bottom ≈ sponge_frac*Ly; wave 
 #   windward = left flank, floor = valley bottom, lee = right flank.
 station_fracs = {'windward': 0.25, 'floor': 0.50, 'lee': 0.75}
 
-# Goal 6 intermittency γ(z): instantaneous-planesK enstrophy threshold.
-#   Off by default (reads many planesK files); set to 1 to compute.
-compute_intermittency = 0
-enstrophy_thresh = 0.01       # γ = 1 where ½ω'² > enstrophy_thresh * max(½ω'²)
+# Goal 6 intermittency γ(z) + 2-D fields from instantaneous planesK
+#   (Ansorge & Mellado 2016).  Reads many planesK files; set to 1 to compute.
+compute_intermittency = 1
+# Threshold ω₀ = omega_thresh_factor · e_ω, with e_ω ≡ ω_rms(δ) the rms
+# fluctuation-vorticity at the BL edge (eq 4.2); γ(z)=⟨H(|ω'|−ω₀)⟩ (eq 4.1).
+# Paper sweeps the factor over 1/8…3; default = 1 (ω₀ = e_ω).
+omega_thresh_factor = 1.0
 
 # Goal 2 flat-wall stratified reference: {(Re, Fr): nc_path}.  Empty until that
 # data exists (all current .nc are ri00.00 = neutral); loaded via load_smooth_case.

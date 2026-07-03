@@ -352,8 +352,6 @@ def diffu_dy(field, ny, nx, eps, y):    # ny is number of points in vertical
             elif j == ny-3:
                 # Backward Bias 2 (4,c,2)
                 du[j,i] = np.dot(field[j-4:j+3,i],coef_b2)/np.dot(y[j-4:j+3],coef_b2)
-            # else:
-            #     print('Undefined case')
     return du
 
 def diffu_dx(field, ny, nx, eps, x):    # ny is number of points in vertical
@@ -404,9 +402,6 @@ def diffu_dx(field, ny, nx, eps, x):    # ny is number of points in vertical
                 
             elif (i<3 and (i>(nx-3)) and (eps[j,i] == 0)):
                 du[j,i] = np.dot(np.concatenate((field[j,i-3:],field[j,i+4])),coef_c)/(x[2]-x[1])
-                
-            else:
-                print('Undefined case', 'i:',i,'j:',j)
     return du
 
 def vIntegral(varaible, ny, y): # ny is number of points in vertical
@@ -1077,7 +1072,7 @@ if (1 == plotRes):
         fig.subplots_adjust(left=0.07, bottom=0.12, top=0.87, wspace=0.12)
         _out = _figdir + savename
         fig.savefig(_out, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+        plt.show()
         print(f'Saved: {_out}')
 
     ###########################################################################
@@ -2373,7 +2368,7 @@ if (1 == plotRes):
         if _mesh is not None:
             fig.colorbar(_mesh, ax=axes, shrink=0.8)
         fig.suptitle(title)
-        fig.savefig(cwd + 'fig/' + savename, dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(cwd + 'fig/' + savename, dpi=300, bbox_inches='tight'); plt.show()
 
     def _tf_disp(cn):
         _du = gv('DispVelU', cn); _dv = gv('DispVelV', cn); _dw = gv('DispVelW', cn)
@@ -2530,9 +2525,9 @@ if (1 == plotRes):
             ax.scatter(_RiB[i], 0.0, color=_col[i], marker=_mk[i], s=90, zorder=5, label=_lab[i])
         ax.set_yticks([]); ax.set_xlim(0, _hi)
         ax.set_xlabel(r'$Ri_B = B_0\,\delta_{neu}/G^2$')
-        ax.set_title('Stability axis (Goal 1): weak | intermediate | strong')
+        ax.set_title('Stability axis: weak | intermediate | strong')
         ax.legend(fontsize=7, ncol=3, loc='upper center')
-        fig.savefig(_figdir_x + 'Xcase_stability_axis.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(_figdir_x + 'Xcase_stability_axis.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── [X2] Dispersive share vs Ri_B (momentum & buoyancy; Goal 4) ───────
         _sm = np.array([_share_BL(n, 'disp_share_mom')  for n in _nm])
@@ -2541,9 +2536,9 @@ if (1 == plotRes):
         ax.plot(_RiB, _sm, 'bo-',  label='momentum')
         ax.plot(_RiB, _sb, 'rs--', label='buoyancy')
         ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel('BL-mean dispersive share')
-        ax.set_title('Dispersive share vs $Ri_B$ (Goal 4)')
+        ax.set_title('Dispersive share vs $Ri_B$')
         ax.legend(); ax.grid(True, ls='--', lw=0.5)
-        fig.savefig(_figdir_x + 'Xcase_dispshare_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(_figdir_x + 'Xcase_dispshare_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── [X3] Scales & Obukhov vs Ri_B (Goals 3 & 1) ───────────────────────
         _panels = [('u_star', 'u*'), ('delta', r'$\delta$'), ('Psi', r'$\Psi=L_x/2\delta$'),
@@ -2555,18 +2550,18 @@ if (1 == plotRes):
         axs.flat[5].plot(_RiB, _Lp, 'ko-'); axs.flat[5].set_title(r'$L_{col}^+$')
         axs.flat[5].axhline(100, color='r', ls=':', label='collapse ~100')
         axs.flat[5].set_xlabel(r'$Ri_B$'); axs.flat[5].legend(fontsize=7); axs.flat[5].grid(True, ls='--', lw=0.5)
-        fig.suptitle('Scales & Obukhov length vs $Ri_B$ (Goals 3 & 1)')
+        fig.suptitle('Scales & Obukhov length vs $Ri_B$')
         fig.tight_layout()
-        fig.savefig(_figdir_x + 'Xcase_scales_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(_figdir_x + 'Xcase_scales_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── [X4] Similarity departure vs Ri_B (Goal 5) ────────────────────────
         fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
         ax.plot(_RiB, [_depmean(n, 'phi_m_dep') for n in _nm], 'bo-',  label=r'$\phi_m$')
         ax.plot(_RiB, [_depmean(n, 'phi_h_dep') for n in _nm], 'rs--', label=r'$\phi_h$')
         ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel('RMS departure from MOST (station mean)')
-        ax.set_title('Similarity departure vs $Ri_B$ (Goal 5)')
+        ax.set_title('Similarity departure vs $Ri_B$')
         ax.legend(); ax.grid(True, ls='--', lw=0.5)
-        fig.savefig(_figdir_x + 'Xcase_phidep_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(_figdir_x + 'Xcase_phidep_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── [X5] Intermittency collapse vs Ri_B (Goal 6; only if γ computed) ──
         _gc = []
@@ -2579,9 +2574,9 @@ if (1 == plotRes):
             fig, ax = plt.subplots(figsize=(7, 5), dpi=300)
             ax.plot(_RiB, _gc, 'ko-')
             ax.set_xlabel(r'$Ri_B$'); ax.set_ylabel(r'BL-mean intermittency $\gamma$')
-            ax.set_title('Intermittency collapse vs $Ri_B$ (Goal 6)')
+            ax.set_title('Intermittency collapse vs $Ri_B$')
             ax.grid(True, ls='--', lw=0.5)
-            fig.savefig(_figdir_x + 'Xcase_gamma_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+            fig.savefig(_figdir_x + 'Xcase_gamma_vs_RiB.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── [X6] Coriolis–topography COUPLING observables vs Ψ ────────────────
         # First look at how the coupling observables organise on Ψ = Lx/(2δ)
@@ -2618,7 +2613,7 @@ if (1 == plotRes):
         fig.suptitle('Coriolis–topography coupling vs $\\Psi$ (first look; '
                      'covaried path, not a scaling law)')
         fig.tight_layout()
-        fig.savefig(_figdir_x + 'Xcase_coupling_vs_Psi.png', dpi=300, bbox_inches='tight'); plt.close(fig)
+        fig.savefig(_figdir_x + 'Xcase_coupling_vs_Psi.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── Console matrix summary + Goal 8 (Re 500 vs 750) status ────────────
         print('\n=== CROSS-CASE RESEARCH MATRIX (Re_D=500) ===')

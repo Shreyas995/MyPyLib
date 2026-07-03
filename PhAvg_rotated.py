@@ -41,6 +41,7 @@ from scipy.integrate import simpson
 from scipy.integrate import trapezoid
 from scipy.stats import linregress
 from scipy.optimize import curve_fit
+from scipy.ndimage import uniform_filter
 import matplotlib.animation as animation
 import matplotlib.patches as mpatches
 from matplotlib import cm
@@ -1441,36 +1442,102 @@ if (1 == postprocess):
                   if int(Re) != 750 else "Re_D=750 active")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # GOAL 6 — Intermittency γ(z) from instantaneous planesK enstrophy (gated)
+    # GOAL 6 — Intermittency from instantaneous planesK (Ansorge & Mellado 2016)
     # ──────────────────────────────────────────────────────────────────────────
-    gamma_z = None; gamma_field = None
+    # γ(z) ≡ ⟨H(|ω'| − ω₀)⟩  (eq 4.1): horizontal average of the Heaviside
+    # indicator on the fluctuation-vorticity magnitude.  Two choices are dictated
+    # by the paper (§4.1), NOT a naive enstrophy cut:
+    #   • threshold ω₀ = e_ω ≡ ω_rms(δ) — the rms fluctuation-vorticity at the BL
+    #     edge (eq 4.2), a fixed PHYSICAL reference, NOT a fraction of the max
+    #     (a max-fraction cut collapses to ~0 because the max is set by the near-
+    #     wall shear and the spurious ∂u/∂y spike at the IBM valley interface);
+    #   • the vorticity is taken from the high-pass (here Reynolds-fluctuation,
+    #     the paper's documented "second filter") field, so mean shear / large-
+    #     scale background do not mask the small-scale turbulent activity.
+    # Only ω_z (out-of-plane) exists in a single streamwise–wall-normal planesK
+    # slice; it is the shear-carrying component there.  The IBM interface ring is
+    # excluded (eroded mask _mom) so its spike sets neither the threshold nor the
+    # field.  Instantaneous ω_z (raw + high-pass) and the 2-D field γ(x,z) are
+    # stored for the Fig-2-style contours (plotted in the plotRes block).
+    gamma_z = None;  gamma_field = None;  omega_rms_z = None
+    e_omega = None;  omega0 = None;  omega_inst_raw = None;  omega_inst_hp = None
     if (1 == compute_intermittency):
         import glob as _glob
+        _NK, _NV, _KP = 1, 5, 0        # N_KPLANES, NVARS, KPLANE_IDX (see animation block)
+        # Frame sources: planesK.* if present, otherwise z-plane 1 of the 3-D
+        # velocity component files flow.*.1 (u) / flow.*.2 (v) — fall back to the
+        # field files when planesK is unavailable (each snapshot tag = one frame).
         _pk = sorted(_glob.glob(cwd + 'planesK.*'))
-        if (len(_pk) == 0):
-            print("[research] intermittency: no planesK.* files found — γ(z) skipped.")
+        if _pk:
+            _frames = [('pk', _p) for _p in _pk];  _src_kind = 'planesK.*'
         else:
-            _NK, _NV, _KP = 1, 5, 0          # N_KPLANES, NVARS, KPLANE_IDX (see animation block)
-            _acc = np.zeros((ny, nx)); _ng = 0
-            for _fp in _pk:
+            _frames = []
+            for _uf in sorted(_glob.glob(cwd + 'flow.*.1')):
+                _vf = _uf[:-1] + '2'                       # flow.<tag>.1 → .2
+                if os.path.exists(_vf):
+                    _frames.append(('flow', _uf, _vf))
+            _src_kind = 'flow.*.1/2 (z-plane 1)'
+        if (len(_frames) == 0):
+            print("[research] intermittency: no planesK.* or flow.*.[12] — γ skipped.")
+        else:
+            # interior-fluid mask: drop solid AND the fluid ring touching solid
+            _mb  = mask0.astype(bool)
+            _mom = _mb & np.roll(_mb, 1, 1) & np.roll(_mb, -1, 1)   # x-neighbours (periodic)
+            _mom[1:, :] &= _mb[:-1, :]; _mom[:-1, :] &= _mb[1:, :]  # y-neighbours
+            _mom = _mom.astype(float)
+
+            def _load_uv(_src):
+                """(u, v) as (ny,nx): a planesK frame, or z-plane 1 of flow.*."""
+                if _src[0] == 'pk':
+                    _pl = read_all_planes(_src[1], nx, ny, _NK, _NV, _KP)
+                    return _pl[0], _pl[1]                  # tlab idx0=u, idx1=v
+                _hu = read_header(_src[1])[0]; _hv = read_header(_src[2])[0]
+                return (readplane(_src[1], nx, ny, 1, _hu),
+                        readplane(_src[2], nx, ny, 1, _hv))
+
+            def _read_omega(_src):
+                """Return (raw ω_z, high-pass ω'_z) for one frame; each (ny,nx)."""
+                _u, _v = _load_uv(_src)                    # idx0=u, idx1=v (wall-normal)
+                _raw = cd.ddx(_v) - cd.ddy(_u, method=DY_METHOD)
+                _dn  = np.maximum(np.sum(mask0, axis=1, keepdims=True), 1.0)
+                _up  = _u - np.sum(_u * mask0, axis=1, keepdims=True) / _dn   # fluid-mean fluct.
+                _vp  = _v - np.sum(_v * mask0, axis=1, keepdims=True) / _dn
+                _hp  = cd.ddx(_vp) - cd.ddy(_up, method=DY_METHOD)
+                return _raw, _hp
+
+            # pass 1 — ω_rms(z) and the threshold ω₀ = e_ω = ω_rms(δ) (eq 4.2)
+            _sumsq = np.zeros((ny, nx)); _ng = 0
+            for _src in _frames:
                 try:
-                    _pl = read_all_planes(_fp, nx, ny, _NK, _NV, _KP)
+                    _raw, _hp = _read_omega(_src)
                 except (ValueError, OSError):
                     continue
-                _u, _v = _pl[0], _pl[1]                     # tlab idx0=u, idx1=v (wall-normal)
-                _up = (_u - _u.mean(axis=1, keepdims=True)) * mask0
-                _vp = (_v - _v.mean(axis=1, keepdims=True)) * mask0
-                _om = (cd.ddx(_vp) - cd.ddy(_up, method=DY_METHOD)) * mask0   # spanwise ω'
-                _en = 0.5 * _om**2
-                _mx = float(np.nanmax(_en))
-                if _mx <= 0:
-                    continue
-                _acc += (_en > enstrophy_thresh * _mx).astype(float)
-                _ng  += 1
+                if (_ng == 0):
+                    omega_inst_raw = _raw * _mom      # first frame → Fig-2-style field
+                    omega_inst_hp  = _hp  * _mom
+                _sumsq += _hp**2; _ng += 1
             if (_ng > 0):
-                gamma_field = (_acc / _ng) * mask0
-                gamma_z = avg_c(eps, gamma_field, axis=1)
-                print(f"[research] intermittency γ(z) from {_ng} planesK frame(s).")
+                _num = np.sum(_sumsq * _mom, axis=1)
+                _den = _ng * np.sum(_mom, axis=1)
+                omega_rms_z = np.sqrt(np.divide(_num, _den, out=np.zeros_like(_num),
+                                                where=_den > 0))
+                e_omega = float(omega_rms_z[bl_top_j])            # rms vorticity at δ
+                omega0  = omega_thresh_factor * e_omega           # ω₀ = e_ω
+                # pass 2 — γ(x,z) = time-avg H(|ω'| − ω₀);  γ(z) = horizontal avg
+                _acc = np.zeros((ny, nx)); _n2 = 0
+                for _src in _frames:
+                    try:
+                        _raw, _hp = _read_omega(_src)
+                    except (ValueError, OSError):
+                        continue
+                    _acc += (np.abs(_hp) > omega0).astype(float); _n2 += 1
+                gamma_field = (_acc / _n2) * _mom
+                _gden = np.sum(_mom, axis=1)
+                gamma_z = np.divide(np.sum(gamma_field, axis=1), _gden,
+                                    out=np.zeros_like(_gden), where=_gden > 0)
+                print(f"[research] intermittency from {_n2} {_src_kind} frame(s); "
+                      f"ω₀ = {omega_thresh_factor:g}·ω_rms(δ) = {omega0:.4g}, "
+                      f"max γ = {float(np.nanmax(gamma_z)):.2f}.")
     # ══════════════════════════════════════════════════════════════════════════
 
     # ── Coupling: global surface veer (computed HERE, before the pickle) ─────
@@ -1848,6 +1915,9 @@ if (1 == postprocess):
         ('gamma at crest | BL top',
             (f"{_g_crest:.3f} | {_g_bltop:.3f}" if gamma_z is not None
              else 'skipped (set compute_intermittency=1)'), 's'),
+        ('omega0 = e_omega = omega_rms(delta)',
+            (f"{omega0:.4g}  (max gamma {float(np.nanmax(gamma_z)):.2f})"
+             if gamma_z is not None else 'n/a'), 's'),
         ('section', 'Goal 7 — wave diagnostics'),
         ('Peak |wave momentum flux|',            _wmom_pk,                  '.5e'),
         ('Peak |wave buoyancy flux|',            _wbuo_pk,                  '.5e'),
@@ -2044,7 +2114,7 @@ if (1 == plotRes):
     # sponge window; sign(m) (with the Hilbert-fixed k>0) gives the phase-line tilt.
     # [PLOT 26b] Wavenumber_m_DispV / _DispU / _compare
     def _plot_wavenumber(mfld, savename, title):
-        _lim = int(min(limity, sponge_j))
+        _lim = int(min(sponge_j, ny - 1))
         _z   = y_in[:_lim]
         _w   = (mfld[:_lim, :] * l_in) * mask0[:_lim, :]     # inner-unit, fluid only
         _vmax = float(np.nanpercentile(np.abs(_w), 98))      # robust to node spikes
@@ -2071,7 +2141,7 @@ if (1 == plotRes):
                      r'Vertical wavenumber $m(x,z)$ from $\widetilde{U}_y$' + _wave_note)
 
     # [PLOT 26c] explicit up/down energy-propagation map  sign(k·m) from DispVelV
-    _limc = int(min(limity, sponge_j))
+    _limc = int(min(sponge_j, ny - 1))
     _kmsign = np.sign(km_dispV[:_limc, :]) * mask0[:_limc, :]
     fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
     _cf = ax.contourf(x_in, y_in[:_limc], _kmsign,
@@ -2507,44 +2577,44 @@ if (1 == plotRes):
     plt.savefig(os.path.join(fig_dir, 'LogLaw.png'), dpi=300)
     plt.show()
     
-    # %%###########################################################################
-    # zoomed
-    # [PLOT 35] Velocity Profile 
-    plt.figure(figsize=(8,6))
-    plt.plot(y_in[(eps_hgt[0]-1):limity]-y_in[(eps_hgt[0]-1)] ,u_plus[(eps_hgt[0]-1):limity,0], label='top', color='blue', linestyle='-')
-    plt.plot(y_in[(eps_hgt[eps_lf]-1):limity]-y_in[eps_hgt[eps_lf]] ,u_plus[(eps_hgt[eps_lf]-1):limity,eps_lf], label='Flank left', color='saddlebrown', linestyle='-')
-    plt.plot(y_in[eps_hgt[512]:limity]-y_in[eps_hgt[512]]     ,u_plus[(eps_hgt[512]):limity,512], label='Bottom', color='red', linestyle='-')
-    plt.plot(y_in[(eps_hgt[eps_rf]-1):limity]-y_in[(eps_hgt[eps_rf]-1)] ,u_plus[(eps_hgt[eps_rf]-1):limity,eps_rf], label='Flank right', color='magenta', linestyle='-')
+    # # %%###########################################################################
+    # # zoomed
+    # # [PLOT 35] Velocity Profile 
+    # plt.figure(figsize=(8,6))
+    # plt.plot(y_in[(eps_hgt[0]-1):limity]-y_in[(eps_hgt[0]-1)] ,u_plus[(eps_hgt[0]-1):limity,0], label='top', color='blue', linestyle='-')
+    # plt.plot(y_in[(eps_hgt[eps_lf]-1):limity]-y_in[eps_hgt[eps_lf]] ,u_plus[(eps_hgt[eps_lf]-1):limity,eps_lf], label='Flank left', color='saddlebrown', linestyle='-')
+    # plt.plot(y_in[eps_hgt[512]:limity]-y_in[eps_hgt[512]]     ,u_plus[(eps_hgt[512]):limity,512], label='Bottom', color='red', linestyle='-')
+    # plt.plot(y_in[(eps_hgt[eps_rf]-1):limity]-y_in[(eps_hgt[eps_rf]-1)] ,u_plus[(eps_hgt[eps_rf]-1):limity,eps_rf], label='Flank right', color='magenta', linestyle='-')
     
-    plt.plot(y_in[(eps_hgt[0]-1):limity]-y_in[(eps_hgt[0]-1)],  w_plus[(eps_hgt[0]-1):limity,0], label='top', color='blue', linestyle='--')
-    plt.plot(y_in[(eps_hgt[eps_lf]-1):limity]-y_in[(eps_hgt[eps_lf]-1)],w_plus[(eps_hgt[eps_lf]-1):limity,eps_lf], label='Flank left', color='saddlebrown', linestyle='--')
-    plt.plot(y_in[eps_hgt[512]:limity]-y_in[eps_hgt[512]],w_plus[eps_hgt[512]:limity,512], label='Bottom', color='red', linestyle='--')
-    plt.plot(y_in[(eps_hgt[eps_rf]-1):limity]-y_in[(eps_hgt[eps_rf]-1)],w_plus[(eps_hgt[eps_rf]-1):limity,eps_rf], label='Flank right', color='magenta', linestyle='--')
+    # plt.plot(y_in[(eps_hgt[0]-1):limity]-y_in[(eps_hgt[0]-1)],  w_plus[(eps_hgt[0]-1):limity,0], label='top', color='blue', linestyle='--')
+    # plt.plot(y_in[(eps_hgt[eps_lf]-1):limity]-y_in[(eps_hgt[eps_lf]-1)],w_plus[(eps_hgt[eps_lf]-1):limity,eps_lf], label='Flank left', color='saddlebrown', linestyle='--')
+    # plt.plot(y_in[eps_hgt[512]:limity]-y_in[eps_hgt[512]],w_plus[eps_hgt[512]:limity,512], label='Bottom', color='red', linestyle='--')
+    # plt.plot(y_in[(eps_hgt[eps_rf]-1):limity]-y_in[(eps_hgt[eps_rf]-1)],w_plus[(eps_hgt[eps_rf]-1):limity,eps_rf], label='Flank right', color='magenta', linestyle='--')
     
-    # Valley curves are surface-relative (shifted) and there is no smooth curve
-    # here, so only the crest line h is marked (absolute-z+ layer markers omitted).
-    mark_h(y_in[h_idx], 'v')
-    plt.axvline(x=(Re_tau), color='black', linestyle='--', linewidth=1)
-    plt.text((Re_tau), 0.5, r'$\delta$', rotation=90, verticalalignment='center', horizontalalignment='right')
+    # # Valley curves are surface-relative (shifted) and there is no smooth curve
+    # # here, so only the crest line h is marked (absolute-z+ layer markers omitted).
+    # mark_h(y_in[h_idx], 'v')
+    # plt.axvline(x=(Re_tau), color='black', linestyle='--', linewidth=1)
+    # plt.text((Re_tau), 0.5, r'$\delta$', rotation=90, verticalalignment='center', horizontalalignment='right')
     
-    custom_labels = ['Valley top', 'Left flank', 'Valley bottom', 'Right flank', r'$\langle \bar{u} \rangle$', r'$\langle \bar{v} \rangle$']
-    color_handles = [
-    Line2D([0], [0], color='blue', lw=4, label='Blue'),
-    Line2D([0], [0], color='saddlebrown', lw=4, label='SaddleBrown'),
-    Line2D([0], [0], color='red', lw=4, label='Red'),
-    Line2D([0], [0], color='magenta', lw=4, label='Magenta')]
-    style_handles = [
-    Line2D([0], [0], color='black', linestyle='-', lw=2, label='(-)'),
-    Line2D([0], [0], color='black', linestyle='--', lw=2, label='(--)')]
-    custom_handles = color_handles + style_handles
-    plt.title('Velocity Profile ')
-    plt.ylabel(r'$\langle \bar{u}_i \rangle ^+$')
-    plt.xlabel(r'$z^{+}$')
-    plt.xscale("log")
-    plt.legend(custom_handles, custom_labels, loc='upper left')
-    plt.grid(True)
-    plt.savefig(os.path.join(fig_dir, 'Zoomed_LogLaw.png'), dpi=300)
-    plt.show()
+    # custom_labels = ['Valley top', 'Left flank', 'Valley bottom', 'Right flank', r'$\langle \bar{u} \rangle$', r'$\langle \bar{v} \rangle$']
+    # color_handles = [
+    # Line2D([0], [0], color='blue', lw=4, label='Blue'),
+    # Line2D([0], [0], color='saddlebrown', lw=4, label='SaddleBrown'),
+    # Line2D([0], [0], color='red', lw=4, label='Red'),
+    # Line2D([0], [0], color='magenta', lw=4, label='Magenta')]
+    # style_handles = [
+    # Line2D([0], [0], color='black', linestyle='-', lw=2, label='(-)'),
+    # Line2D([0], [0], color='black', linestyle='--', lw=2, label='(--)')]
+    # custom_handles = color_handles + style_handles
+    # plt.title('Velocity Profile ')
+    # plt.ylabel(r'$\langle \bar{u}_i \rangle ^+$')
+    # plt.xlabel(r'$z^{+}$')
+    # plt.xscale("log")
+    # plt.legend(custom_handles, custom_labels, loc='upper left')
+    # plt.grid(True)
+    # plt.savefig(os.path.join(fig_dir, 'Zoomed_LogLaw.png'), dpi=300)
+    # plt.show()
     
     # %%###########################################################################
     # Monin Obukhov log layer — smooth-case comparison omitted (not available in PhAvg.py)
@@ -3261,7 +3331,7 @@ if (1 == plotRes):
     axRb.set_xlabel(r"wall-normal buoyancy flux $\langle w'\theta'\rangle$"); axRb.set_ylabel(r'$z^+$')
     axRb.set_title('Buoyancy flux split' + ('' if _strat else '  (neutral $\\approx$ 0)'))
     axRb.legend(fontsize=8); axRb.grid(True, ls='--', lw=0.5)
-    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_flux_split.png'), dpi=300); plt.close(figR)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_flux_split.png'), dpi=300); plt.show()
 
     # ── [R2] Dispersive flux share — momentum & buoyancy (Goal 4) ──────────────
     figR, axR = plt.subplots(figsize=(7, 6), dpi=300)
@@ -3269,9 +3339,9 @@ if (1 == plotRes):
     axR.plot(disp_share_buoy[:limity], _zr, 'r--', lw=1.5, label='buoyancy')
     axR.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8, label='crest $h$')
     axR.set_xlim(0, 1); axR.set_xlabel('dispersive share  |disp| / (|disp|+|turb|)')
-    axR.set_ylabel(r'$z^+$'); axR.set_title('Dispersive flux share (Goal 4)')
+    axR.set_ylabel(r'$z^+$'); axR.set_title('Dispersive flux share')
     axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
-    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_dispersive_share.png'), dpi=300); plt.close(figR)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_dispersive_share.png'), dpi=300); plt.show()
 
     # ── [R3] Local similarity φ_m, φ_h vs z+ at 3 stations vs MOST (Goal 5) ─────
     figR, (axPm, axPh) = plt.subplots(1, 2, figsize=(12, 6), dpi=300)
@@ -3283,7 +3353,7 @@ if (1 == plotRes):
             axPh.plot(phi_h_st[nm], zcp, _cols[nm] + '-', lw=1.3, label=nm)
     axPm.axvline(1.0, color='k', ls=':', lw=0.8, label='MOST neutral ($\\phi_m{=}1$)')
     axPm.set_xlabel(r'$\phi_m$'); axPm.set_ylabel(r'$z^+$ (from local surface)')
-    axPm.set_title('φ_m by station (Goal 5)'); axPm.legend(fontsize=8); axPm.grid(True, ls='--', lw=0.5)
+    axPm.set_title('φ_m by station'); axPm.legend(fontsize=8); axPm.grid(True, ls='--', lw=0.5)
     if _strat:
         axPh.axvline(Pr_t, color='k', ls=':', lw=0.8, label=r'MOST neutral ($\phi_h{=}Pr_t$)')
         axPh.legend(fontsize=8)
@@ -3291,8 +3361,8 @@ if (1 == plotRes):
         axPh.text(0.5, 0.5, 'neutral run:\nφ_h undefined', ha='center', va='center',
                   transform=axPh.transAxes, fontsize=11)
     axPh.set_xlabel(r'$\phi_h$'); axPh.set_ylabel(r'$z^+$ (from local surface)')
-    axPh.set_title('φ_h by station (Goal 5)'); axPh.grid(True, ls='--', lw=0.5)
-    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_similarity_phi.png'), dpi=300); plt.close(figR)
+    axPh.set_title('φ_h by station'); axPh.grid(True, ls='--', lw=0.5)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_similarity_phi.png'), dpi=300); plt.show()
 
     # ── [R4] Wave fluxes + sponge reflection guard (Goal 7) ────────────────────
     _top = int(min(sponge_j + 10, ny))
@@ -3303,10 +3373,10 @@ if (1 == plotRes):
     axR.axhline(y_in[bl_top_j], color='g', ls='-.', lw=0.9, label=r'BL top $z^+{=}%.0f$' % y_in[bl_top_j])
     axR.axhline(y_in[sponge_j], color='m', ls=':',  lw=1.1, label=r'sponge $z^+{=}%.0f$' % y_in[sponge_j])
     axR.set_xlabel('wall-normal wave flux'); axR.set_ylabel(r'$z^+$')
-    axR.set_title('Wave fluxes + sponge guard (Goal 7) — reflection OK: %s'
+    axR.set_title('Wave fluxes + sponge guard — reflection OK: %s'
                   % ('yes' if reflection_ok else 'NO'))
     axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
-    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_wave_flux.png'), dpi=300); plt.close(figR)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_wave_flux.png'), dpi=300); plt.show()
 
     # ── [R5] Stability axis — this run's Ri_B vs Ansorge bins (Goal 1) ─────────
     figR, axR = plt.subplots(figsize=(8, 3.2), dpi=300)
@@ -3316,18 +3386,81 @@ if (1 == plotRes):
     axR.axvspan(Ri_B_bins[1],  _hi,          color='red',    alpha=0.12, label='strong')
     axR.axvline(Ri_B, color='k', lw=2.0, label=f'this run  $Ri_B$={Ri_B:.2e}')
     axR.set_xlim(0, _hi); axR.set_yticks([]); axR.set_xlabel(r'$Ri_B = B_0\,\delta_{neu}/G^2$')
-    axR.set_title('Stability axis (Goal 1) — class: %s' % stab_class)
+    axR.set_title('Stability axis — class: %s' % stab_class)
     axR.legend(fontsize=8, loc='upper right', ncol=2)
-    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_stability_axis.png'), dpi=300); plt.close(figR)
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_stability_axis.png'), dpi=300); plt.show()
 
-    # ── [R6] Intermittency γ(z) (Goal 6; only if computed) ─────────────────────
+    # ── [R6] Intermittency (Goal 6) — Ansorge & Mellado (2016) ─────────────────
+    # (a) γ(z) profile (eq 4.1) — now spans 0→1 with the physical ω₀=e_ω cut;
+    # (b) 2-D local intermittency γ(x,z); (c) instantaneous |ω| field (their fig 2).
     if gamma_z is not None:
+        _ztop = y_in[limity - 1]
+
+        # (a) γ(z) profile.
         figR, axR = plt.subplots(figsize=(6, 7), dpi=300)
         axR.plot(gamma_z[:limity], _zr, 'k-', lw=1.5)
         axR.axhline(y_in[hill_hgt], color='b', ls=':', lw=0.8, label='crest $h$')
+        axR.axhline(y_in[bl_top_j], color='g', ls='--', lw=0.8,
+                    label=r'$\delta$ (BL edge, $\omega_0=e_\omega$)')
         axR.set_xlim(0, 1.02); axR.set_xlabel(r'intermittency $\gamma$'); axR.set_ylabel(r'$z^+$')
-        axR.set_title('Intermittency γ(z) (Goal 6)'); axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
-        plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_intermittency_gamma.png'), dpi=300); plt.close(figR)
+        axR.set_title('Intermittency γ(z)'); axR.legend(fontsize=8); axR.grid(True, ls='--', lw=0.5)
+        plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_intermittency_gamma.png'), dpi=300); plt.show()
+
+        # (b) 2-D local intermittency γ(x,z) = ⟨H(|ω'|−ω₀)⟩_t ; cyan line = γ=0.5
+        #     turbulent/non-turbulent interface (γ→1 turbulent core, →0 quiescent).
+        #     With few independent time frames (e.g. a single planesK/flow snapshot,
+        #     N=1) the time-average alone is exactly binary — H() only takes 0/1, so
+        #     contourf has no cells to color in between and the colorbar's middle
+        #     range goes unused. A short spatial box-filter (periodic in x, masked
+        #     in y so solid/near-wall zeros don't bleed into fluid cells) turns the
+        #     local turbulent AREA fraction into a graded field spanning the full
+        #     colorbar — display only; the raw gamma_field/gamma_z used for the
+        #     pickle and the Goal 6 table are untouched. The γ=0.5 border is drawn
+        #     from the RAW (unsmoothed) field, i.e. the actual instantaneous
+        #     turbulent/non-turbulent interface, not the smoothed display field.
+        if gamma_field is not None:
+            _knl = 9   # smoothing footprint in grid cells (~a few Δx/Δz); display only
+            _num_s = uniform_filter(gamma_field * _mom, size=(_knl, _knl),
+                                     mode=('nearest', 'wrap'))
+            _den_s = uniform_filter(_mom, size=(_knl, _knl), mode=('nearest', 'wrap'))
+            gamma_field_disp = np.divide(_num_s, _den_s, out=np.zeros_like(_num_s),
+                                          where=_den_s > 0)
+
+            figG, axG = plt.subplots(figsize=(9, 4.5), dpi=300)
+            _cf = axG.contourf(x_in, y_in[:limity], gamma_field_disp[:limity, :],
+                               levels=np.linspace(0.0, 1.0, 21), cmap='hot_r')
+            axG.contour(x_in, y_in[:limity], gamma_field[:limity, :],
+                        levels=[0.5], colors='cyan', linewidths=1.4)
+            plt.colorbar(_cf, ax=axG, label=r'intermittency $\gamma$ (box-smoothed, $N=$'
+                                            f'{_n2} frame(s))')
+            axG.fill(x_oro_in, y_oro_in, color='grey', zorder=3)
+            _turb_proxy = mlines.Line2D([], [], color='cyan', lw=1.4,
+                                         label=r'turbulent region border ($\gamma=0.5$, raw)')
+            axG.legend(handles=[_turb_proxy], loc='upper right', fontsize=8, framealpha=0.85)
+            axG.set_xlabel(r'$x^+$'); axG.set_ylabel(r'$z^+$'); axG.set_ylim(0, _ztop)
+            axG.set_title(r'Local intermittency $\gamma(x,z)$ — cyan: $\gamma=0.5$')
+            plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_intermittency_gamma2D.png'), dpi=300); plt.show()
+
+        # (c) instantaneous spanwise-vorticity magnitude (paper fig 2): raw | high-
+        #     pass.  The high-pass panel strips mean shear/background so turbulent
+        #     patches stand out; the raw panel is background-dominated (their point).
+        if omega_inst_hp is not None:
+            _sc = nu / u_star**2
+            figO, axO = plt.subplots(1, 2, figsize=(14, 4.5), dpi=300, sharey=True)
+            for _ax, _fld, _ttl in ((axO[0], omega_inst_raw, r'raw $|\omega_z|$'),
+                                    (axO[1], omega_inst_hp, r"high-pass $|\omega'_z|$")):
+                _m = np.abs(_fld[:limity, :]) * _sc
+                _vmax = float(np.nanpercentile(_m[_m > 0], 99)) if np.any(_m > 0) else 1.0
+                _cf = _ax.contourf(x_in, y_in[:limity], _m,
+                                   levels=np.linspace(0.0, _vmax, 40), cmap='magma', extend='max')
+                plt.colorbar(_cf, ax=_ax, label=r'$|\omega|\,\nu/u_*^2$')
+                _ax.fill(x_oro_in, y_oro_in, color='grey', zorder=3)
+                _ax.axhline(y_in[bl_top_j], color='cyan', ls='--', lw=0.8)
+                _ax.set_xlabel(r'$x^+$'); _ax.set_title(_ttl); _ax.set_ylim(0, _ztop)
+            axO[0].set_ylabel(r'$z^+$')
+            figO.suptitle('Instantaneous spanwise vorticity magnitude '
+                          '(cf. Ansorge & Mellado 2016, fig. 2)')
+            plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_intermittency_omega_field.png'), dpi=300); plt.show()
 
     # %%###########################################################################
     # animate: read_plane / read_all_planes are defined in functions.py and imported
@@ -3721,7 +3854,7 @@ if plot_spectra == 1:
             figS.tight_layout()
             _outS = os.path.join(fig_dir, 'Spectra_Euu_kx.png')
             figS.savefig(_outS, dpi=300)
-            plt.close(figS)
+            plt.show()
             print(f'[spectra] saved {_outS}')
 
             # ---- Figure 2: three velocity components at one representative height ----
@@ -3747,7 +3880,7 @@ if plot_spectra == 1:
             figC.tight_layout()
             _outC = os.path.join(fig_dir, 'Spectra_components.png')
             figC.savefig(_outC, dpi=300)
-            plt.close(figC)
+            plt.show()
             print(f'[spectra] saved {_outC}')
 
     # %%

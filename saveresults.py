@@ -193,7 +193,7 @@ var_names = [
     'phi_m_st', 'phi_h_st', 'zeta_st', 'phi_m_dep', 'phi_h_dep',
 
     # Goal 6 — intermittency (None unless compute_intermittency=1)
-    'gamma_z', 'gamma_field',
+    'gamma_z', 'gamma_field', 'omega_rms_z', 'e_omega', 'omega0',
 
     # Goal 7 — wave diagnostics + sponge guard
     'wave_mom_flux', 'wave_buoy_flux', 'sponge_j', 'bl_top_j', 'reflection_ok', 'Ly',
