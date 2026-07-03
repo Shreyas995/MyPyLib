@@ -73,6 +73,7 @@ a high-memory queue.
 """
 
 import os
+import re
 import sys
 import glob
 import argparse
@@ -103,6 +104,40 @@ def read_header(path):
     """tlab stream-binary header. Returns byte offset to the field data."""
     with open(path, 'rb') as f:
         return int(np.fromfile(f, I32, 1)[0])
+
+
+def read_field_header(path):
+    """Full tlab stream-binary header: (offset, nx, ny, nz, nt)."""
+    with open(path, 'rb') as f:
+        offset = int(np.fromfile(f, I32, 1)[0])
+        dims = np.fromfile(f, I32, 3)
+        nt = np.fromfile(f, I32, 1)
+    if dims.size < 3 or nt.size < 1:
+        raise ValueError("truncated header")
+    return offset, int(dims[0]), int(dims[1]), int(dims[2]), int(nt[0])
+
+
+def valid_field(path, nx, ny, nz):
+    """(ok, reason). A real 3-D field file: header dims == grid AND file size
+    is EXACTLY offset + nx·ny·nz·8 bytes.  Rejects boundary-condition planes
+    (flow.bcs.*), truncated/partial writes, and anything else the glob caught
+    whose seek offset would otherwise be garbage."""
+    try:
+        offset, hnx, hny, hnz, _ = read_field_header(path)
+    except Exception as e:                                # noqa: BLE001 (report, don't raise)
+        return False, f"unreadable header ({e})"
+    if offset <= 0:
+        return False, f"bad header offset {offset}"
+    if (hnx, hny, hnz) != (nx, ny, nz):
+        return False, f"header dims {hnx}x{hny}x{hnz} != grid {nx}x{ny}x{nz}"
+    try:
+        actual = os.path.getsize(path)
+    except OSError as e:
+        return False, str(e)
+    expect = offset + nx * ny * nz * 8
+    if actual != expect:
+        return False, f"size {actual}B != expected {expect}B (truncated/not a 3-D field)"
+    return True, ""
 
 
 def read_full_field(path, nx, ny, nz, dtype_out=np.float32):
@@ -181,32 +216,70 @@ def _safe_divide(num, den):
 # ─────────────────────────────────────────────────────────────────────────────
 # Compute γ(x,y,z) [+ γ_b, conditional buoyancy stats] over the given snapshots
 # ─────────────────────────────────────────────────────────────────────────────
-def component_quads(args, workdir):
+_FLOW_ITER_RE = re.compile(r'^flow\.(\d+)\.1$')          # ONLY flow.<iteration>.1
+
+
+def component_quads(args, workdir, nx, ny, nz):
     """List of (u, v, w, scalar_or_None) file quads; each = one snapshot.
-    scalar_or_None is scal.<tag>.1 matched to flow.<tag>.1 by <tag>; a
-    snapshot missing its scalar file still contributes to gamma (velocity),
-    just not to gamma_b / the conditional buoyancy statistics."""
+
+    The glob 'flow.*.1' also catches non-field files (e.g. the boundary-
+    condition planes flow.bcs.jmax.*.1, whose header offset is garbage and
+    crashes the seek).  We therefore accept a velocity file ONLY when its name
+    is exactly flow.<digits>.1 AND all three components pass valid_field()
+    (header dims == grid, size exactly consistent).  scalar_or_None is
+    scal.<tag>.1 matched to flow.<tag>.1 by the SAME numeric <tag>; a snapshot
+    missing/failing its scalar file still contributes to gamma (velocity), just
+    not to gamma_b / the conditional buoyancy statistics."""
     if args.u:
         if not (args.v and args.w):
             sys.exit("ERROR: --u requires --v and --w (all three components).")
         return [(args.u, args.v, args.w, args.scalar)]
     quads = []
     for uf in sorted(glob.glob(os.path.join(workdir, 'flow.*.1'))):
-        vf, wf = uf[:-1] + '2', uf[:-1] + '3'
-        if not (os.path.exists(vf) and os.path.exists(wf)):
+        base = os.path.basename(uf)
+        m = _FLOW_ITER_RE.match(base)
+        if not m:                                        # e.g. flow.bcs.jmax.*.1
+            print(f"  [skip] {base} — not a flow.<iteration>.1 field file.")
             continue
-        tag = os.path.basename(uf)[len('flow.'):]        # '<tag>.1'
-        sf = os.path.join(os.path.dirname(uf), 'scal.' + tag)
-        quads.append((uf, vf, wf, sf if os.path.exists(sf) else None))
+        vf, wf = uf[:-1] + '2', uf[:-1] + '3'
+        bad = False
+        for comp in (uf, vf, wf):
+            if not os.path.exists(comp):
+                print(f"  [skip] {base} — missing {os.path.basename(comp)}.")
+                bad = True; break
+            ok, why = valid_field(comp, nx, ny, nz)
+            if not ok:
+                print(f"  [skip] {os.path.basename(comp)} — {why}.")
+                bad = True; break
+        if bad:
+            continue
+        tag = m.group(1)                                 # numeric iteration
+        sf = os.path.join(os.path.dirname(uf), f'scal.{tag}.1')
+        if os.path.exists(sf):
+            ok, why = valid_field(sf, nx, ny, nz)
+            if not ok:
+                print(f"  [skip scalar] scal.{tag}.1 — {why}.")
+                sf = None
+        else:
+            sf = None
+        quads.append((uf, vf, wf, sf))
     return quads
 
 
 def compute_all(args, workdir, x, y, z, mask_er):
-    """Returns (fields: dict[name]->3-D array, meta: dict, j_delta)."""
+    """Returns (fields: dict[name]->3-D array, meta: dict, j_delta).
+
+    A snapshot is DROPPED from every average (not silently counted as fully
+    turbulent) if it is unreadable or its |ω'| / b' comes out non-finite — the
+    signature of a corrupt or diverged restart/checkpoint dump (e.g. a file
+    written at an irregular iteration right before a CFL blow-up: its garbage
+    velocities overflow float32, become inf, and inf > ω₀ would otherwise be
+    counted as turbulent).  The BL-edge index δ and the thresholds ω₀/b₀ are
+    fixed from the FIRST CLEAN snapshot, never a corrupt one."""
     nx, ny, nz = x.size, y.size, z.size
-    quads = component_quads(args, workdir)
+    quads = component_quads(args, workdir, nx, ny, nz)
     if not quads:
-        sys.exit("ERROR: no flow.*.1/2/3 velocity triplet found — nothing to do.")
+        sys.exit("ERROR: no valid flow.<iteration>.1/2/3 velocity triplet found — nothing to do.")
     n_scalar = sum(1 for q in quads if q[3] is not None)
     do_scalar = (not args.skip_scalar) and n_scalar > 0
     print(f"  snapshots to average: {len(quads)}  (with matching scal.*: "
@@ -217,10 +290,12 @@ def compute_all(args, workdir, x, y, z, mask_er):
 
     gamma3d = np.zeros((ny, nx, nz), dtype=np.float32)
     omega0 = None
+    n_used = 0
 
     if do_scalar:
         gamma3d_b    = np.zeros((ny, nx, nz), dtype=np.float32)
         omega0_b     = None
+        n_used_b     = 0
         sum_b_turb   = np.zeros((ny, nx, nz), dtype=np.float64)
         sum_b2_turb  = np.zeros((ny, nx, nz), dtype=np.float64)
         cnt_turb     = np.zeros((ny, nx, nz), dtype=np.float64)
@@ -230,17 +305,31 @@ def compute_all(args, workdir, x, y, z, mask_er):
 
     for s, (uf, vf, wf, sf) in enumerate(quads):
         print(f"  [{s + 1}/{len(quads)}] {os.path.basename(uf)} …", flush=True)
-        u = read_full_field(uf, nx, ny, nz)
-        v = read_full_field(vf, nx, ny, nz)
-        w = read_full_field(wf, nx, ny, nz)
+        try:
+            u = read_full_field(uf, nx, ny, nz)
+            v = read_full_field(vf, nx, ny, nz)
+            w = read_full_field(wf, nx, ny, nz)
+        except (OSError, ValueError) as e:
+            print(f"      [skip] unreadable velocity field: {e}")
+            continue
 
-        if s == 0 and j_delta is None:                   # δ₉₅ from the mean wind
+        j_delta_cand = j_delta
+        if j_delta is None:                               # δ₉₅ from the mean wind
             Umag = np.sqrt(u.mean(axis=(1, 2)) ** 2 + w.mean(axis=(1, 2)) ** 2)
-            j_delta = int(np.argmax(Umag >= 0.95 * Umag.max()))
-            print(f"      δ (95% wind) at j={j_delta}, z={float(y[j_delta]):.4g}")
+            j_delta_cand = int(np.argmax(Umag >= 0.95 * Umag.max()))
 
         omega = omega_highpass(u, v, w, x, y, z)          # u,v,w → fluctuations
         del u, v, w
+
+        if not np.isfinite(omega).all():                  # corrupt / diverged snapshot
+            nbad = int((~np.isfinite(omega)).sum())
+            print(f"      [skip] non-finite |ω'| at {nbad} point(s) — corrupt/diverged field.")
+            del omega
+            continue
+
+        if j_delta is None:                               # commit δ from this clean snapshot
+            j_delta = j_delta_cand
+            print(f"      δ (95% wind) at j={j_delta}, z={float(y[j_delta]):.4g}")
 
         if omega0 is None:                                # ω₀ = e_ω = ω_rms(δ)
             e_omega = _rms_at_row(omega[j_delta, :, :], mask_er, j_delta, nz)
@@ -250,11 +339,22 @@ def compute_all(args, workdir, x, y, z, mask_er):
 
         H_inst = omega > omega0                           # this snapshot's turbulent mask
         gamma3d += H_inst
+        n_used += 1
         del omega
 
         if do_scalar and sf is not None:
-            b = read_full_field(sf, nx, ny, nz)
+            try:
+                b = read_full_field(sf, nx, ny, nz)
+            except (OSError, ValueError) as e:
+                print(f"      [skip scalar] unreadable scalar field: {e}")
+                del H_inst
+                continue
             bp = b - b.mean(axis=2, keepdims=True)         # high-pass, same z-mean convention
+
+            if not np.isfinite(bp).all():
+                print("      [skip scalar] non-finite b' — corrupt/diverged scalar field.")
+                del b, bp, H_inst
+                continue
 
             if omega0_b is None:                           # b₀ = e_b = b_rms(δ)
                 e_b = _rms_at_row(np.abs(bp[j_delta, :, :]), mask_er, j_delta, nz)
@@ -270,24 +370,33 @@ def compute_all(args, workdir, x, y, z, mask_er):
             sum_b_quiet  += np.where(~H_inst, b, 0.0)
             sum_b2_quiet += np.where(~H_inst, bp * bp, 0.0)
             cnt_quiet    += ~H_inst
+            n_used_b     += 1
             del b, bp
 
         del H_inst
 
-    gamma3d /= len(quads)
+    if n_used == 0:
+        sys.exit("ERROR: every snapshot was skipped (unreadable or non-finite) — no γ produced.")
+    if n_used < len(quads):
+        print(f"  [note] used {n_used}/{len(quads)} snapshots for γ "
+              f"({len(quads) - n_used} skipped as unreadable/non-finite).")
+
+    gamma3d /= n_used
     fields = {'gamma': gamma3d}
     meta = {'omega0': omega0, 'factor': args.factor, 'j_delta': j_delta,
-            'n_snapshots': len(quads)}
+            'n_snapshots': len(quads), 'n_used': n_used}
 
-    if do_scalar:
-        gamma3d_b /= n_scalar
+    if do_scalar and n_used_b > 0:
+        gamma3d_b /= n_used_b
         fields['gamma_b']      = gamma3d_b
         fields['mean_b_turb']  = _safe_divide(sum_b_turb,  cnt_turb ).astype(np.float32)
         fields['mean_b_quiet'] = _safe_divide(sum_b_quiet, cnt_quiet).astype(np.float32)
         fields['var_b_turb']   = _safe_divide(sum_b2_turb, cnt_turb ).astype(np.float32)
         fields['var_b_quiet']  = _safe_divide(sum_b2_quiet,cnt_quiet).astype(np.float32)
         meta.update({'omega0_b': omega0_b, 'factor_b': args.factor_b,
-                     'n_scalar_snapshots': n_scalar})
+                     'n_scalar_snapshots': n_scalar, 'n_used_b': n_used_b})
+    elif do_scalar:
+        print("  [note] scalar path enabled but every scalar snapshot was skipped.")
 
     return fields, meta, j_delta
 

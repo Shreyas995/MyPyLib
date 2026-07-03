@@ -1499,9 +1499,13 @@ if (1 == postprocess):
                 """Return (raw ω_z, high-pass ω'_z) for one frame; each (ny,nx)."""
                 _u, _v = _load_uv(_src)                    # idx0=u, idx1=v (wall-normal)
                 _raw = cd.ddx(_v) - cd.ddy(_u, method=DY_METHOD)
-                _dn  = np.maximum(np.sum(mask0, axis=1, keepdims=True), 1.0)
-                _up  = _u - np.sum(_u * mask0, axis=1, keepdims=True) / _dn   # fluid-mean fluct.
-                _vp  = _v - np.sum(_v * mask0, axis=1, keepdims=True) / _dn
+                # Plain row mean (NOT the fluid-only/intrinsic avg_c-style average):
+                # at rows where the fluid width collapses (e.g. near the terrain),
+                # dividing by a near-zero fluid-cell count made the row mean noisy/
+                # unstable, which showed up as a spurious horizontal band in the
+                # high-pass field once ddy differenced across that row.
+                _up  = _u - np.mean(_u, axis=1, keepdims=True)   # horizontal-mean fluct.
+                _vp  = _v - np.mean(_v, axis=1, keepdims=True)
                 _hp  = cd.ddx(_vp) - cd.ddy(_up, method=DY_METHOD)
                 return _raw, _hp
 
