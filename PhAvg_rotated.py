@@ -2002,6 +2002,27 @@ if (1 == plotRes):
              y_s_p[_is_logend], _is_logend))
 
     # %% ###########################################################################
+    # ── UNIT CONVENTION (settled with the user) ──────────────────────────────────
+    # Every plot in this file is non-dimensional; nothing carries physical units.
+    #   • CONTOUR / 2-D maps  → INNER units  (x_in = x/l_in, y_in = y/l_in; z+ axes).
+    #   • LINE profiles        → paired: a ZOOMED near-wall view in INNER units and a
+    #     ZOOMED-OUT full-depth view in OUTER units.
+    # OUTER scaling (Ekman, f = 1 ⇒ δ = u*/f = u_star, δ⁺ = Re_tau = u*²/ν):
+    #   wall-normal  z/δ  = y_in / Re_tau           (valley)
+    #   velocity     /G   = / G_mag                 (geostrophic magnitude ≈ 1)
+    #   stress       /G²  = / G_mag**2
+    #   advection    ·δ/G² = · u_star / G_mag**2    (u*³/ν → inner; G²/δ → outer)
+    # Reference cases carry their own u* (ustr_s1, ustr_r1) and, with f = 1, their own
+    # δ⁺ = u*²/ν, so their outer wall-normal coordinate is y_*_p / Re_tau_*.
+    z_out    = y_in / Re_tau                     # z/δ  — outer wall-normal (valley)
+    G_out    = G_mag                             # outer velocity scale (≈ geostrophic)
+    Re_tau_s = ustr_s1**2 / nu                   # smooth reference δ⁺ (= δ_s marker used below)
+    z_out_s  = y_s_p / Re_tau_s
+    Re_tau_r = ustr_r1**2 / nu_rough             # rough r1 reference δ⁺
+    z_out_r  = y_r_p / Re_tau_r
+    adv_in   = u_star**3 / nu                    # inner advection scale (u*³/ν)
+    adv_out  = G_mag**2 / u_star                 # outer advection scale (G²/δ, δ = u_star)
+
     # All plots use inner-scaled coordinates (x_in = x/l_in, y_in = y/l_in) unless noted.
     # Orography outline (x_oro_in, y_oro_in) is overlaid on 2-D colour maps.
     # Phase Average
@@ -2101,12 +2122,16 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Vorticity contour map
-    # [PLOT 26] Dispersion velocity vorticity in XZ plane
+    # [PLOT 26] Dispersion velocity vorticity in XZ plane — INNER units:
+    # axes x/l_in, z/l_in (z+); vorticity scaled by the viscous time ν/u*²
+    # (same inner scaling as the near-wall vorticity map below).
     plt.figure(figsize=(8,6))
-    plt.contourf(x, y[:limity], disp_vortz[:limity,:], levels=50, cmap='RdBu_r')  # transpose to match x-y orientation
-    plt.colorbar(label='Vorticity (ωz)')
-    plt.xlabel('X (streamwise)')
-    plt.ylabel('Z (vertical)')
+    plt.contourf(x_in, y_in[:limity], disp_vortz[:limity,:]*nu/u_star**2,
+                 levels=50, cmap='RdBu_r')
+    plt.fill(x_oro_in, y_oro_in, facecolor='black')          # IBM solid
+    plt.colorbar(label=r'$\widetilde{\omega}_z\,\nu/u_*^2$')
+    plt.xlabel(r'$x^+$')
+    plt.ylabel(r'$z^+$')
     plt.title('Dispersion velocity vorticity in XZ plane')
     # plt.savefig(savename, dpi=300)
     plt.show()
@@ -2186,12 +2211,20 @@ if (1 == plotRes):
     # %%###########################################################################
     # Turning angle
     # [PLOT 28] Rotation angle
+    # inst_alpha = w_plus_rot/u_plus_rot is a TANGENT ratio, not an angle: scaling
+    # it by 180/π mis-treats a tangent as radians AND diverges to ±thousands of
+    # degrees wherever u_plus_rot crosses zero (the strongly-stratified Fr=0.0015
+    # run reverses near the surface).  Plot the BOUNDED veer angle arctan2(w,u) in
+    # degrees (∈[-180,180]) — consistent with the arctan2 veer values above (7a)
+    # and results.py's _veer_deg.  References use arctan (bounded ±90) of their
+    # tangent ratios rather than the small-angle *(180/π) approximation.
+    alpha_deg = np.degrees(np.arctan2(w_plus_rot, u_plus_rot))   # bounded veer (deg)
     plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(y_inner[1:], (inst_alpha[1:]*(180/np.pi)), label='valley', color='blue', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p[1:], -alpha_s[1:]*(180/np.pi), label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_rough, y_r_p[1:], -alpha_r[1:]*(180/np.pi), label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
-    mark_layers(y_inner, inst_alpha*(180/np.pi), _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers, y_s_p, -alpha_s*(180/np.pi), _LYR_SMO, filled=False)
+    plt.plot(y_inner[1:], alpha_deg[1:], label='valley', color='blue', linestyle='-')
+    ref_plot(plot_ref_smooth, y_s_p[1:], -np.degrees(np.arctan(alpha_s[1:])), label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_rough, y_r_p[1:], -np.degrees(np.arctan(alpha_r[1:])), label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
+    mark_layers(y_inner, alpha_deg, _LYR_ORO, filled=True)
+    ref_mark(plot_ref_smooth, mark_layers, y_s_p, -np.degrees(np.arctan(alpha_s)), _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title('Rotation angle')
     plt.ylabel(r'$\alpha (\degree)$')
@@ -2201,7 +2234,22 @@ if (1 == plotRes):
     add_marker_legend()
     plt.grid(True)
     plt.show()
-    
+
+    # [PLOT 28b] Rotation angle — ZOOMED-OUT (full depth) in OUTER units (z/δ, linear).
+    # Outer-unit counterpart of [PLOT 28]; collapses the Ekman veer over the whole layer.
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.plot(z_out[1:], alpha_deg[1:], label='valley', color='blue', linestyle='-')
+    ref_plot(plot_ref_smooth, z_out_s[1:], -np.degrees(np.arctan(alpha_s[1:])), label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_rough, z_out_r[1:], -np.degrees(np.arctan(alpha_r[1:])), label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
+    mark_h(z_out[h_idx], 'v')
+    plt.title('Rotation angle (outer units)')
+    plt.ylabel(r'$\alpha (\degree)$')
+    plt.xlabel(r'$z/\delta$')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'Rotation_angle_outer.png'), dpi=300)
+    plt.show()
+
     # %%###########################################################################
     # ── Fig-4 convention assembly (single sign convention shared with plot_fig4_budget) ──
     # In the ROTATED frame the geostrophic wind is g ∥ x = (Gx,Gz) = (1,0) for ALL three
@@ -2231,28 +2279,30 @@ if (1 == plotRes):
 
     # %%###########################################################################
     # Shear Stress XY  (Fig-4 convention: Coriolis +C, Viscous +V, Reynolds −⟨flux⟩, Total C+V+R)
-    # [PLOT 29] Shear stress $\tau_{zx}$
+    # [PLOT 29] Shear stress τ_zx — ZOOMED-OUT (full depth) in OUTER units:
+    # wall-normal z/δ, stress /G² (each reference in its own δ, G ≈ 1).  The
+    # near-wall INNER-unit counterpart is [PLOT 30] below.
     plt.figure(figsize=(10, 6))
-    plt.plot(y_inner[:], Czx_o[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], Vzx_o[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], Rzx_o[:], label='Rey Stress', color='orange', linestyle='-')
-    plt.plot(y_inner[:], dudt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], Tzx_o[:], label='Total', color='black', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p, Czx_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Vzx_s, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Rzx_s, color='orange', linestyle=SMOOTH_LS)
-    # rough r1 (Re=1000) overlay — Method-2 terms, own inner units (y_r_p)
-    ref_plot(plot_ref_rough, y_r_p, Czx_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Vzx_r, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Rzx_r, color='orange', linestyle=ROUGH_LS)
-    mark_layers_multi(y_inner, [Czx_o, Vzx_o, Rzx_o,
-                                dudt, Tzx_o], _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czx_s, Vzx_s,
+    plt.plot(z_out[:], Czx_o[:]/G_mag**2, label='Coriolis', color='blue', linestyle='-')
+    plt.plot(z_out[:], Vzx_o[:]/G_mag**2, label='Viscous', color='red', linestyle='-')
+    plt.plot(z_out[:], Rzx_o[:]/G_mag**2, label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(z_out[:], dudt/G_mag**2, label='Temporal', color='saddlebrown', linestyle='-')
+    plt.plot(z_out[:], Tzx_o[:]/G_mag**2, label='Total', color='black', linestyle='-')
+    ref_plot(plot_ref_smooth, z_out_s, Czx_s, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Vzx_s, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Rzx_s, color='orange', linestyle=SMOOTH_LS)
+    # rough r1 (Re=1000) overlay — Method-2 terms, own outer units (z_out_r)
+    ref_plot(plot_ref_rough, z_out_r, Czx_r, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Vzx_r, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Rzx_r, color='orange', linestyle=ROUGH_LS)
+    mark_layers_multi(z_out, [Czx_o/G_mag**2, Vzx_o/G_mag**2, Rzx_o/G_mag**2,
+                              dudt/G_mag**2, Tzx_o/G_mag**2], _LYR_ORO, filled=True)
+    ref_mark(plot_ref_smooth, mark_layers_multi, z_out_s, [Czx_s, Vzx_s,
                               Rzx_s], _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zx}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
+    mark_h(z_out[h_idx], 'v')
+    plt.title(r'Shear stress $\tau_{zx}$ (outer units)')
+    plt.xlabel(r'$z/\delta$')
+    plt.ylabel(r'${\langle \bar{\tau} \rangle}_{zx}/G^2$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',       linestyle='-',  label='Coriolis'),
         mlines.Line2D([], [], color='red',        linestyle='-',  label='Viscous'),
@@ -2317,29 +2367,30 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Shear Stress ZY  (Fig-4 convention: Coriolis +C, Viscous +V, Reynolds −⟨flux⟩, Total C+V+R)
-    # [PLOT 31] Shear stress $\tau_{zy}$
+    # [PLOT 31] Shear stress τ_zy — ZOOMED-OUT (full depth) in OUTER units:
+    # wall-normal z/δ, stress /G².  Near-wall INNER-unit counterpart is [PLOT 32].
     plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(y_inner[:], Czy_o[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], Vzy_o[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], Rzy_o[:], label='Rey Stress', color='orange', linestyle='-')
-    plt.plot(y_inner[:], dwdt, label='Temporal', color='saddlebrown', linestyle='-')
-    plt.plot(y_inner[:], Tzy_o[:], label='Total', color='black', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p, Czy_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Vzy_s, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Rzy_s, color='orange', linestyle=SMOOTH_LS)
-    # rough r1 (Re=1000) overlay — Method-2 terms, own inner units (y_r_p)
-    ref_plot(plot_ref_rough, y_r_p, Czy_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Vzy_r, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Rzy_r, color='orange', linestyle=ROUGH_LS)
-    mark_layers_multi(y_inner, [Czy_o, Vzy_o,
-                                Rzy_o, dwdt, Tzy_o],
+    plt.plot(z_out[:], Czy_o[:]/G_mag**2, label='Coriolis', color='blue', linestyle='-')
+    plt.plot(z_out[:], Vzy_o[:]/G_mag**2, label='Viscous', color='red', linestyle='-')
+    plt.plot(z_out[:], Rzy_o[:]/G_mag**2, label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(z_out[:], dwdt/G_mag**2, label='Temporal', color='saddlebrown', linestyle='-')
+    plt.plot(z_out[:], Tzy_o[:]/G_mag**2, label='Total', color='black', linestyle='-')
+    ref_plot(plot_ref_smooth, z_out_s, Czy_s, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Vzy_s, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Rzy_s, color='orange', linestyle=SMOOTH_LS)
+    # rough r1 (Re=1000) overlay — Method-2 terms, own outer units (z_out_r)
+    ref_plot(plot_ref_rough, z_out_r, Czy_r, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Vzy_r, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Rzy_r, color='orange', linestyle=ROUGH_LS)
+    mark_layers_multi(z_out, [Czy_o/G_mag**2, Vzy_o/G_mag**2,
+                              Rzy_o/G_mag**2, dwdt/G_mag**2, Tzy_o/G_mag**2],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czy_s, Vzy_s,
+    ref_mark(plot_ref_smooth, mark_layers_multi, z_out_s, [Czy_s, Vzy_s,
                               Rzy_s], _LYR_SMO, filled=False)
-    mark_h(y_in[h_idx], 'v')
-    plt.title(r'Shear stress $\tau_{zy}$')
-    plt.xlabel(r'$z^{+}$')
-    plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
+    mark_h(z_out[h_idx], 'v')
+    plt.title(r'Shear stress $\tau_{zy}$ (outer units)')
+    plt.xlabel(r'$z/\delta$')
+    plt.ylabel(r'${\langle \bar{\tau} \rangle}_{zy}/G^2$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
         mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
@@ -2440,13 +2491,13 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Friction Velocity Profile
-    # [PLOT 33] Friction Velocity
+    # [PLOT 33] Friction Velocity — OUTER units: u*/G vs z/δ (full depth).
     plt.figure(figsize=(8, 8), dpi=300)
-    plt.plot(u_star2[:], y_in[:], label='u_{star}', color='blue', linestyle='-')
-    mark_h(y_in[h_idx], 'h')
+    plt.plot(u_star2[:]/G_mag, z_out[:], label=r'$u_*/G$', color='blue', linestyle='-')
+    mark_h(z_out[h_idx], 'h')
     plt.title('Friction Velocity')
-    plt.ylabel(r'$z^+$')
-    plt.xlabel(r'$u_{*}$')
+    plt.ylabel(r'$z/\delta$')
+    plt.xlabel(r'$u_{*}/G$')
     plt.legend()
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Friction velocity.png'), dpi=300)
@@ -2456,12 +2507,12 @@ if (1 == plotRes):
     # Friction Velocity — comparison of the two Coriolis-integral approaches
     # [PLOT 33b] Friction Velocity (Coriolis integral: mean→integrate vs integrate→cavg)
     plt.figure(figsize=(8, 8), dpi=300)
-    plt.plot(u_star2[:],   y_in[:], label=r'mean$\to$integrate (old)', color='blue', linestyle='-')
-    plt.plot(u_star2_c[:], y_in[:], label=r'integrate$\to$cavg (new)', color='red',  linestyle='--')
-    mark_h(y_in[h_idx], 'h')
+    plt.plot(u_star2[:]/G_mag,   z_out[:], label=r'mean$\to$integrate (old)', color='blue', linestyle='-')
+    plt.plot(u_star2_c[:]/G_mag, z_out[:], label=r'integrate$\to$cavg (new)', color='red',  linestyle='--')
+    mark_h(z_out[h_idx], 'h')
     plt.title('Friction Velocity — Coriolis-integral approaches')
-    plt.ylabel(r'$z^+$')
-    plt.xlabel(r'$u_{*}$')
+    plt.ylabel(r'$z/\delta$')
+    plt.xlabel(r'$u_{*}/G$')
     plt.legend()
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Friction velocity comparison.png'), dpi=300)
@@ -2470,28 +2521,28 @@ if (1 == plotRes):
     # %%###########################################################################
     # Friction Velocity — Method-2 for all reference cases (orographic / smooth / rough r1)
     # [PLOT 33c] Friction Velocity (Method-2: orographic vs smooth vs rough)
-    # Each case in its own inner scaling; the dotted vertical lines mark the
+    # Each case in OUTER units (u*/G vs z/δ); the dotted vertical lines mark the
     # constant-flux plateau values.  Smooth/rough shown per the config switches.
     plt.figure(figsize=(8, 8), dpi=300)
-    plt.plot(ustr_M2_o[:], y_in[:],
+    plt.plot(ustr_M2_o[:]/G_mag, z_out[:],
              label=f'orographic Re=500 (plateau {ustr_M2_plateau_o:.4f})',
              color='blue', linestyle='-')
-    ref_plot(plot_ref_smooth, ustr_M2_s, y_s_p,
+    ref_plot(plot_ref_smooth, ustr_M2_s, z_out_s,
              label=f'smooth Re=500 M2 (plateau {ustr_M2_plateau_s:.4f}, stored {ustr_s1:.4f})',
              color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     # Roughness reference not needed here — commented out.
-    # ref_plot(plot_ref_rough, ustr_M2_r, y_r_p,
+    # ref_plot(plot_ref_rough, ustr_M2_r, z_out_r,
     #          label=f'rough r1 Re=1000 (plateau {ustr_r1:.4f})',
     #          color=ROUGH_COLOR, linestyle=ROUGH_LS)
-    plt.axvline(ustr_M2_plateau_o, color='blue', linestyle=':', linewidth=1)
+    plt.axvline(ustr_M2_plateau_o/G_mag, color='blue', linestyle=':', linewidth=1)
     if plot_ref_smooth:
-        plt.axvline(ustr_s1, color=SMOOTH_COLOR, linestyle=':', linewidth=1)  # stored smooth u* (~0.0618)
+        plt.axvline(ustr_s1, color=SMOOTH_COLOR, linestyle=':', linewidth=1)  # stored smooth u* (G_s ≈ 1)
     # if plot_ref_rough:
     #     plt.axvline(ustr_r1, color=ROUGH_COLOR, linestyle=':', linewidth=1)
-    mark_h(y_in[h_idx], 'h')
+    mark_h(z_out[h_idx], 'h')
     plt.title('Friction Velocity — Method 2 (all cases)')
-    plt.ylabel(r'$z^+$')
-    plt.xlabel(r'$u_{*}$')
+    plt.ylabel(r'$z/\delta$')
+    plt.xlabel(r'$u_{*}/G$')
     plt.legend(fontsize=8)
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Friction velocity all-cases.png'), dpi=300)
@@ -2580,7 +2631,27 @@ if (1 == plotRes):
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'LogLaw.png'), dpi=300)
     plt.show()
-    
+
+    # [PLOT 34b] Velocity Profile — ZOOMED-OUT (full depth) in OUTER units:
+    # global intrinsic mean u/G, v/G vs z/δ (linear).  Outer-unit counterpart of the
+    # inner-unit [PLOT 34]; collapses the wake / free-stream region.  References are
+    # already stored /G (loader), so they are plotted directly against their own z/δ.
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.plot(z_out, u_plus_rot/G_mag, color='red',  linestyle='-', label='Streamwise (valley)')
+    plt.plot(z_out, w_plus_rot/G_mag, color='blue', linestyle='-', label='Spanwise (valley)')
+    ref_plot(plot_ref_smooth, z_out_s, GblU_s,  color=SMOOTH_COLOR, linestyle=SMOOTH_LS, label='Streamwise (smooth)')
+    ref_plot(plot_ref_smooth, z_out_s, -GblW_s, color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.5, label='Spanwise (smooth)')
+    ref_plot(plot_ref_rough, z_out_r, GblU_r,   color=ROUGH_COLOR, linestyle=ROUGH_LS, label='Streamwise (rough r1)')
+    ref_plot(plot_ref_rough, z_out_r, -GblW_r,  color=ROUGH_COLOR, linestyle=ROUGH_LS, alpha=0.5, label='Spanwise (rough r1)')
+    mark_h(z_out[h_idx], 'v')
+    plt.title('Velocity Profile (outer units)')
+    plt.ylabel(r'$\langle \bar{u}_i \rangle / G$')
+    plt.xlabel(r'$z/\delta$')
+    plt.legend(fontsize=7)
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'Velocity_Profile_outer.png'), dpi=300)
+    plt.show()
+
     # # %%###########################################################################
     # # zoomed
     # # [PLOT 35] Velocity Profile 
@@ -2875,7 +2946,22 @@ if (1 == plotRes):
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'TKE_profile.png'), dpi=300)
     plt.show()
-    
+
+    # [PLOT 38b] TKE profile — ZOOMED-OUT (full depth) in OUTER units: TKE/G² vs z/δ.
+    # Outer-unit counterpart of the inner-unit [PLOT 38] (each case /its own G², G ≈ 1).
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.plot(z_out, avg_c(eps, TKE, axis=1)/G_mag**2, label='valley', color='blue', linestyle='-')
+    ref_plot(plot_ref_smooth, z_out_s, np.mean(TKE_s, axis=1)/G_mag**2, label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_rough, z_out_r, np.mean(TKE_r, axis=1)/G_mag**2, label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
+    mark_h(z_out[h_idx], 'v')
+    plt.title('TKE profile (outer units)')
+    plt.xlabel(r'$z/\delta$')
+    plt.ylabel(r'$TKE/G^2$')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(fig_dir, 'TKE_profile_outer.png'), dpi=300)
+    plt.show()
+
     # %%###########################################################################
     # TKE distribution (streamwise variation of y-averaged TKE)
     # [PLOT 39] TKE distribution
@@ -2896,17 +2982,18 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Streamwise convective momentum
-    # [PLOT 40] Advection 
+    # [PLOT 40] Advection — ZOOMED-OUT (full depth) in OUTER units:
+    # advection /(G²/δ) vs z/δ.  Near-wall INNER-unit counterpart is [PLOT 41].
     plt.figure(figsize=(6, 5))
-    plt.plot(conv_top[:450],    y_in[:450], label='Valley top', color="yellow")
-    plt.plot(conv_lf[:450],     y_in[:450], label='Left flank', color="red")
-    plt.plot(conv_bottom[:450], y_in[:450], label='Valley bottom', color="black")
-    plt.plot(conv_rf[:450],     y_in[:450], label='Right flank', color="blue")
+    plt.plot(conv_top[:450]/adv_out,    z_out[:450], label='Valley top', color="yellow")
+    plt.plot(conv_lf[:450]/adv_out,     z_out[:450], label='Left flank', color="red")
+    plt.plot(conv_bottom[:450]/adv_out, z_out[:450], label='Valley bottom', color="black")
+    plt.plot(conv_rf[:450]/adv_out,     z_out[:450], label='Right flank', color="blue")
     for _cv in (conv_top, conv_lf, conv_bottom, conv_rf):    # oro layers on every flank curve
-        mark_layers(_cv, y_in, _LYR_ORO, filled=True)
-    mark_h(y_in[h_idx], 'h')
-    plt.xlabel(r'$u_{j} \frac{\partial u_i}{\partial x_j}$')
-    plt.ylabel('$z^{+}$')
+        mark_layers(_cv/adv_out, z_out, _LYR_ORO, filled=True)
+    mark_h(z_out[h_idx], 'h')
+    plt.xlabel(r'$u_{j}\,\partial u_i/\partial x_j \;/\;(G^2/\delta)$')
+    plt.ylabel(r'$z/\delta$')
     plt.title("Advection ")
     plt.legend()
     add_marker_legend(smooth=False)
@@ -2919,17 +3006,18 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Streamwise convective momentum zoomed
-    # [PLOT 41] Advection 
+    # [PLOT 41] Advection — ZOOMED near-wall in INNER units:
+    # advection /(u*³/ν) vs z⁺.
     plt.figure(figsize=(6, 5))
-    plt.plot(conv_top[:200],    y_in[:200], label='Valley top', color="yellow")
-    plt.plot(conv_lf[:200],     y_in[:200], label='Left flank', color="red")
-    plt.plot(conv_bottom[:200], y_in[:200], label='Valley bottom', color="black")
-    plt.plot(conv_rf[:200],     y_in[:200], label='Right flank', color="blue")
+    plt.plot(conv_top[:200]/adv_in,    y_in[:200], label='Valley top', color="yellow")
+    plt.plot(conv_lf[:200]/adv_in,     y_in[:200], label='Left flank', color="red")
+    plt.plot(conv_bottom[:200]/adv_in, y_in[:200], label='Valley bottom', color="black")
+    plt.plot(conv_rf[:200]/adv_in,     y_in[:200], label='Right flank', color="blue")
     for _cv in (conv_top, conv_lf, conv_bottom, conv_rf):    # oro layers on every flank curve
-        mark_layers(_cv, y_in, _LYR_ORO, filled=True)
+        mark_layers(_cv/adv_in, y_in, _LYR_ORO, filled=True)
     mark_h(y_in[h_idx], 'h')
-    plt.xlabel(r'$u_{j} \frac{\partial u_i}{\partial x_j}$')
-    plt.ylabel('$z^{+}$')
+    plt.xlabel(r'$u_{j}\,\partial u_i/\partial x_j \;/\;(u_*^3/\nu)$')
+    plt.ylabel(r'$z^{+}$')
     plt.title("Advection ")
     plt.legend()
     add_marker_legend(smooth=False)
@@ -3079,6 +3167,189 @@ if (1 == plotRes):
     ax.grid(True, which='both')
     plt.tight_layout()
     plt.savefig(cwd + '/fig/grad_P_ratio_surface.png', dpi=300)
+    plt.show()
+
+    # %%###########################################################################
+    # Plot: ADVERSE PRESSURE GRADIENT near the IBM body — zoomed to z+ <= 200.
+    # [PLOT 52] Mean-pressure gradients $\partial\langle\bar p\rangle/\partial x$,
+    #           $\partial\langle\bar p\rangle/\partial z$ near IBM (z+ <= 200)
+    #
+    # The adverse pressure gradient IS the streamwise pressure gradient dP/dx:
+    #   dP/dx > 0  -> adverse   (pressure rising downstream, flow decelerating)
+    #   dP/dx < 0  -> favorable (pressure falling downstream, flow accelerating)
+    # It is datum-independent and identical to d(DispP)/dx (the x-mean removed by
+    # the dispersive split depends only on z), so this single field already gives
+    # the "relative pressure" view the dispersive plot (PLOT 10) shows -- PLUS the
+    # adverse/favorable sign, which a pressure *field* cannot convey directly.
+    # Companion panel: the wall-normal gradient dP/dz+ (= engineering dP/dy). The
+    # spanwise gradient dP/dy (met.) is identically 0 in this spanwise+phase-
+    # averaged 2-D field, so it is not plotted. Both normalised to wall units
+    # (nu/u*^3); diverging colormap; each panel on its own symmetric scale.
+    # Consistent IBM-solid overlay for every research plot below.  Shade EXACTLY
+    # the eps==1 region (this run's own eps) — NOT the analytic cosine polygon
+    # x_oro/y_oro, which can miss the true staircase boundary by a cell.  One
+    # colour (_IBM_COLOR) is used everywhere so the solid reads the same in all
+    # figures.  _mask_solid blanks the solid to NaN so masked-to-0 derivatives
+    # do not (a) set the colour scale or (b) draw a spurious 0-isoline hugging
+    # the body.
+    _IBM_COLOR = 'black'
+
+    def _ibm_overlay(_ax, _xa, _ya, _eps_c):
+        if _eps_c is not None and np.nanmax(_eps_c) >= 0.5:
+            _ax.contourf(_xa, _ya, _eps_c, levels=[0.5, 1.5],
+                         colors=[_IBM_COLOR], zorder=5)
+
+    def _mask_solid(_fld, _eps_c):
+        return np.where(_eps_c > 0.5, np.nan, _fld)
+
+    def _robust_vmax(_fld, _pct=98.0):
+        _v = np.nanpercentile(np.abs(_fld), _pct)
+        return _v if np.isfinite(_v) and _v > 0 else 1.0
+
+    _zP_lim = 200
+    _jP_lim = max(int(np.argmin(np.abs(y_inner - _zP_lim))), 2)
+    _sc_gradP = nu / u_star**3
+    _eps_zoom = eps[:_jP_lim, :]                          # this run's eps (solid=1)
+
+    # Blank the solid so the interior masked-to-0 cells neither wash out the
+    # colour scale nor render as a false zero band.
+    _apg  = _mask_solid(dP_dx[:_jP_lim, :] * _sc_gradP, _eps_zoom)   # streamwise = APG
+    _wng  = _mask_solid(dP_dy[:_jP_lim, :] * _sc_gradP, _eps_zoom)   # wall-normal (dP/dz+)
+    # Robust symmetric scale (98th pct of |·|) so a few interface spikes do not
+    # flatten the field — the earlier nanmax scaling washed the structure out.
+    _vmax_apg = _robust_vmax(_apg)
+    _vmax_wng = _robust_vmax(_wng)
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), dpi=300)
+    for _ax, _fld, _vm, _ttl, _cl in (
+            (axes[0], _apg, _vmax_apg,
+             r'Adverse pressure gradient $\partial\langle\bar p\rangle/\partial x$'
+             r'  (red: adverse, blue: favorable)',
+             r'$(\partial\langle\bar p\rangle/\partial x)\,\nu/u_*^3$'),
+            (axes[1], _wng, _vmax_wng,
+             r'Wall-normal pressure gradient $\partial\langle\bar p\rangle/\partial z$',
+             r'$(\partial\langle\bar p\rangle/\partial z)\,\nu/u_*^3$')):
+        _cf = _ax.contourf(x_in, y_in[:_jP_lim], _fld,
+                           levels=np.linspace(-_vm, _vm, 101),
+                           cmap='RdBu_r', extend='both')
+        plt.colorbar(_cf, ax=_ax, label=_cl)
+        _ax.contour(x_in, y_in[:_jP_lim], _fld, levels=[0.0],
+                    colors='k', linewidths=0.3, linestyles=':')   # ∂p/∂· = 0 isoline
+        _ibm_overlay(_ax, x_in, y_in[:_jP_lim], _eps_zoom)
+        for _xi, _ls in ((eps_lf, '--'), (eps_bottom, '-'), (eps_rf, '-.')):
+            _ax.axvline(x=x_in[_xi], color='0.4', lw=0.6, ls=_ls, alpha=0.4)
+        _ax.set_xlabel(r'$x^+$')
+        _ax.set_ylabel(r'$z^+$')
+        _ax.set_ylim(0, _zP_lim)
+        _ax.set_title(_ttl, fontsize=9)
+    plt.tight_layout()
+    plt.savefig(cwd + '/fig/gradP_APG_near_IBM.png', dpi=300)
+    plt.show()
+
+    # %%###########################################################################
+    # FLOW SEPARATION — wall-normal gradient of the tangential velocity.
+    # Separation occurs where the near-wall streamwise shear vanishes and reverses:
+    #   ∂⟨u⟩/∂z = 0  (z = wall-normal; met. label, engineering ∂u/∂y).  The point
+    # where the WALL value (first fluid cell) goes +→- (downstream) is the
+    # separation point; -→+ is reattachment; the interval in between (wall shear
+    # < 0) is the reversed-flow / recirculation region.  tau_wx = ν(∂u/∂z)|_wall/u*²
+    # and tau_wz = ν(∂v/∂z)|_wall/u*² (spanwise; eng. ∂w/∂y) were built above.
+    # This is the kinematic counterpart of the adverse-pressure-gradient plot:
+    # the APG (dP/dx > 0) is what drives the near-wall flow to separate here.
+    #
+    # Separation / reattachment x⁺ from sign changes of the wall streamwise shear.
+    _txw = tau_wx
+    _sign_chg = np.where(_txw[:-1] * _txw[1:] < 0)[0]      # i where sign flips i→i+1
+
+    def _zero_x(_i):                                        # linear zero-crossing x⁺
+        _d = _txw[_i + 1] - _txw[_i]
+        _f = 0.0 if _d == 0 else -_txw[_i] / _d
+        return x_in[_i] + _f * (x_in[_i + 1] - x_in[_i])
+
+    _sep_x = [_zero_x(_i) for _i in _sign_chg if _txw[_i] > 0.0]   # +→- separation
+    _rea_x = [_zero_x(_i) for _i in _sign_chg if _txw[_i] < 0.0]   # -→+ reattachment
+    print(f"  Flow separation: {len(_sep_x)} separation, {len(_rea_x)} reattachment "
+          f"point(s) on the IBM surface")
+    if _sep_x:
+        print(f"    separation   x⁺: {', '.join('%.0f' % _v for _v in _sep_x)}")
+    if _rea_x:
+        print(f"    reattachment x⁺: {', '.join('%.0f' % _v for _v in _rea_x)}")
+
+    # ── [PLOT 53] 2-D wall-normal velocity gradients near IBM (z+ <= 200) ──────
+    # Left: ∂⟨u⟩/∂z (streamwise shear; blue = reversed = separated).  Right:
+    # ∂⟨v⟩/∂z (spanwise shear; eng. ∂w/∂y).  Bold black line = the ∂/∂z = 0
+    # isoline; where it meets the wall is the separation/reattachment point.
+    _zS_lim  = 200
+    _jS_lim  = max(int(np.argmin(np.abs(y_inner - _zS_lim))), 2)
+    _sc_shear = nu / u_star**2                              # ∂u/∂z → ∂u⁺/∂z⁺
+    _eps_zoomS = eps[:_jS_lim, :]                           # this run's eps (solid=1)
+
+    # Blank the solid to NaN: du_dy/dw_dy are masked to 0 inside the body, so
+    # WITHOUT this the ∂/∂z = 0 isoline would trace the solid boundary (the
+    # "reversal line overlapping the IBM").  Now the 0-isoline appears only where
+    # the shear truly reverses in the fluid.
+    _dudz = _mask_solid(du_dy[:_jS_lim, :] * _sc_shear, _eps_zoomS)   # ∂⟨u⟩/∂z (met.)
+    _dvdz = _mask_solid(dw_dy[:_jS_lim, :] * _sc_shear, _eps_zoomS)   # ∂⟨v⟩/∂z (eng. ∂w/∂y)
+    # Robust symmetric scale (92nd pct of |·|) so reversed pockets are not washed
+    # out by the large attached near-wall shear.
+    _vmax_u = _robust_vmax(_dudz, 92.0)
+    _vmax_v = _robust_vmax(_dvdz, 92.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), dpi=300)
+    for _ax, _fld, _vm, _ttl, _cl in (
+            (axes[0], _dudz, _vmax_u,
+             r'Streamwise shear $\partial\langle u\rangle/\partial z$'
+             r'  (blue: reversed $\to$ separated)',
+             r'$(\partial\langle u\rangle/\partial z)\,\nu/u_*^2$'),
+            (axes[1], _dvdz, _vmax_v,
+             r'Spanwise shear $\partial\langle v\rangle/\partial z$',
+             r'$(\partial\langle v\rangle/\partial z)\,\nu/u_*^2$')):
+        _cf = _ax.contourf(x_in, y_in[:_jS_lim], _fld,
+                           levels=np.linspace(-_vm, _vm, 101),
+                           cmap='RdBu_r', extend='both')
+        plt.colorbar(_cf, ax=_ax, label=_cl)
+        _ax.contour(x_in, y_in[:_jS_lim], _fld, levels=[0.0],
+                    colors='k', linewidths=0.3, linestyles=':')   # ∂/∂z = 0 isoline
+        _ibm_overlay(_ax, x_in, y_in[:_jS_lim], _eps_zoomS)
+        for _xv in _sep_x:
+            _ax.axvline(x=_xv, color='lime',    lw=1.2, ls='--', zorder=6)
+        for _xv in _rea_x:
+            _ax.axvline(x=_xv, color='magenta', lw=1.2, ls=':',  zorder=6)
+        _ax.set_xlabel(r'$x^+$')
+        _ax.set_ylabel(r'$z^+$')
+        _ax.set_ylim(0, _zS_lim)
+        _ax.set_title(_ttl, fontsize=9)
+    axes[0].plot([], [], color='lime',    ls='--', label='separation')
+    axes[0].plot([], [], color='magenta', ls=':',  label='reattachment')
+    axes[0].legend(fontsize=7, loc='upper right')
+    plt.tight_layout()
+    plt.savefig(cwd + '/fig/separation_shear_near_IBM.png', dpi=300)
+    plt.show()
+
+    # ── [PLOT 54] Surface skin friction & separation points along the IBM ─────
+    # The definitive separation-point identifier: wall value of the tangential
+    # shear vs x⁺.  Zero-crossing of the streamwise component = separation (+→-)
+    # or reattachment (-→+); shaded band = reversed-flow (recirculation) region.
+    fig, ax = plt.subplots(figsize=(11, 4), dpi=300)
+    ax.plot(x_in, tau_wx, color='blue', lw=1.5,
+            label=r'$\partial\langle u\rangle/\partial z|_{\rm wall}\;\nu/u_*^2$ (streamwise)')
+    ax.plot(x_in, tau_wz, color='red',  lw=1.2,
+            label=r'$\partial\langle v\rangle/\partial z|_{\rm wall}\;\nu/u_*^2$ (spanwise)')
+    ax.axhline(0, color='grey', lw=0.8, ls=':')
+    ax.fill_between(x_in, tau_wx, 0, where=(tau_wx < 0),
+                    color='grey', alpha=0.25, label='reversed flow (separated)')
+    for _xv in _sep_x:
+        ax.axvline(x=_xv, color='lime',    lw=1.2, ls='--')
+    for _xv in _rea_x:
+        ax.axvline(x=_xv, color='magenta', lw=1.2, ls=':')
+    ax.axvline(x=x_in[eps_bottom], color='k', lw=0.6, ls='-', alpha=0.3, label='valley bottom')
+    ax.set_xlabel(r'$x^+$')
+    ax.set_ylabel(r'wall shear $/u_*^2$')
+    ax.set_title(r'Surface skin friction & separation points along IBM')
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True)
+    plt.tight_layout()
+    plt.savefig(cwd + '/fig/separation_skin_friction.png', dpi=300)
     plt.show()
 
     # %%###########################################################################

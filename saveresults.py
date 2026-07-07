@@ -80,6 +80,10 @@ var_names = [
     # -------------------------------------------------------------------------
     'DispVelU', 'DispVelV', 'DispVelW',
 
+    # Dispersive (relative) pressure: p̃ = ⟨p̄⟩(x,z) − ⟨p̄⟩(z)   (2D)
+    # Datum-independent pressure deviation (windward-high / leeward-low dipole).
+    'DispP',
+
     # -------------------------------------------------------------------------
     # Full phase-averaged stress tensor  (2D)
     # -------------------------------------------------------------------------
@@ -101,6 +105,13 @@ var_names = [
 
     # Spatial derivatives of dispersive velocity  (2D)
     'dud_dy', 'dud_dx', 'dvd_dy', 'dvd_dx', 'dwd_dy', 'dwd_dx',
+
+    # Mean-pressure gradients  (2D, masked by mask_intr)
+    #   dP_dx : streamwise gradient ∂⟨p̄⟩/∂x = the ADVERSE pressure gradient
+    #           (> 0 adverse/decelerating, < 0 favorable). Datum-independent and
+    #           identical to ∂(DispP)/∂x. dP_dz (spanwise) is 0 in this 2-D field.
+    #   dP_dy : wall-normal gradient ∂⟨p̄⟩/∂y (= ∂p/∂z⁺ meteorological).
+    'dP_dx', 'dP_dy',
 
     # -------------------------------------------------------------------------
     # Time derivatives (zero-filled when not loaded from binary; kept for future use)

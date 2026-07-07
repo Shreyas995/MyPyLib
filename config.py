@@ -78,8 +78,8 @@ n_anchor     = 4               # anchor points for ghost-cell interpolation
 smooth_width = 5               # smoothing half-width at the IBM interface (cells)
 
 # ── 8. Log-law fit window ─────────────────────────────────────────────────────
-loglaw_zmin  =  60.0           # lower bound of log-law fit region (wall units z⁺)
-loglaw_zmax  = 200.0           # upper bound
+loglaw_zmin  =  30.0           # lower bound of log-law fit region (wall units z⁺)
+loglaw_zmax  = 100.0           # upper bound (log law holds z⁺∈[30,100] for this flow)
 kappa_bounds = (0.40, 0.44)   # acceptable range for the fitted von Kármán constant
 
 # ── 9. Paths ──────────────────────────────────────────────────────────────────
