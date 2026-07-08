@@ -188,6 +188,14 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
     rU = (s1.variables['rU'][:]).T
     rV = (s1.variables['rV'][:]).T
     rW = (s1.variables['rW'][:]).T
+    # Mean pressure profile (present in these avg files; used only as a smooth /
+    # reference 2-D panel in results.py).  Guarded: a file without rP returns None.
+    rP = (s1.variables['rP'][:]).T if 'rP' in s1.variables else None
+    # Mean scalar ⟨s⟩ — the direct solution of the Boussinesq scalar transport eq
+    # (tlab `rs`, avg_scal_xz.f90 `rS`); the smooth-case analog of AvgScal.  NB: the
+    # buoyancy ⟨b⟩ (tlab `rB`) is a DERIVED quantity (Gravity_Buoyancy ÷ froude);
+    # this returns the raw scalar.  ≡0 in the neutral (ri00.00) reference; guarded.
+    rs = (s1.variables['rs'][:]).T if 'rs' in s1.variables else None
     # ── Geostrophic unit vector (g_x, g_z) from the SCALAR surface friction angle ──
     # FrictionAngle is stored in DEGREES (smooth file).  The rough file stores none,
     # so the surface shear-stress turning angle is taken from the near-wall velocity
@@ -241,7 +249,8 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
         'sy': sy, 'nys': nys, 'U': U, 'V': V, 'W': W,
         'su': su, 'sw': sw, 'alpha': alpha, 'ustr_stored': ustr_stored,
         'alpha_str': alpha_str, 'y': y, 'y_p': y_p,
-        'rU': rU, 'rV': rV, 'rW': rW, 'G_x': G_x, 'G_z': G_z, 'G': G,
+        'rU': rU, 'rV': rV, 'rW': rW, 'rP': rP, 'rs': rs,
+        'G_x': G_x, 'G_z': G_z, 'G': G,
         'U_p': U_p, 'W_p': W_p, 'GblU': GblU, 'GblW': GblW,
         'Rxx': Rxx, 'Rxy': Rxy, 'Ryy': Ryy, 'Ryz': Ryz, 'Rzz': Rzz,
         'TKE': TKE, 'case_v': case_v,
@@ -268,7 +277,8 @@ def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
         'sy': d['sy'], 'nys': d['nys'], 'U_s': d['U'], 'V_s': d['V'], 'W_s': d['W'],
         'su': d['su'], 'sw': d['sw'], 'alpha_s': d['alpha'], 'ustr_s1': d['ustr_stored'],
         'alpha_str_s': d['alpha_str'], 'y_s': d['y'], 'y_s_p': d['y_p'],
-        'rU_s': d['rU'], 'rV_s': d['rV'], 'rW_s': d['rW'],
+        'rU_s': d['rU'], 'rV_s': d['rV'], 'rW_s': d['rW'], 'rP_s': d['rP'],
+        'rs_s': d['rs'],
         'G_x_s': d['G_x'], 'G_z_s': d['G_z'], 'G_s': d['G'],
         'U_s_p': d['U_p'], 'W_s_p': d['W_p'], 'GblU_s': d['GblU'], 'GblW_s': d['GblW'],
         'Rxx_s': d['Rxx'], 'Rxy_s': d['Rxy'], 'Ryy_s': d['Ryy'], 'Ryz_s': d['Ryz'],
