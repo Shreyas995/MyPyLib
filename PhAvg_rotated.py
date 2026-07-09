@@ -272,7 +272,7 @@ if (1 == cal_Avg):
     # Triple decomposition of the Reynolds stress tensor (Raupach & Shaw 1982):
     # <u_i u_j> = <u_i><u_j>  (mean×mean, _g)
     #           + ũ_i ũ_j      (dispersive×dispersive, _t for tilda)
-    #           + <u_i' u_j'>  (turbulent, _d for double-prime, computed later)
+    #           + <u_i'' u_j''>  (turbulent, _d for double-prime, computed later)
     uu_t = DispVel[:,:,0]*DispVel[:,:,0]        # t here is tilda not turbulent
     uv_t = DispVel[:,:,0]*DispVel[:,:,1]
     uw_t = DispVel[:,:,0]*DispVel[:,:,2]
@@ -518,8 +518,9 @@ if (1 == postprocess):
     # derivative/budget pipeline below operates on the rotated fields unchanged.
     #   proper rotation R(alpha):  u' = u·cosα − w·sinα,  w' = u·sinα + w·cosα
     # Rotated as VECTORS (one R contraction): mean U,W and their _i/_j interpolations;
-    # dispersive U,W; and the wall-normal momentum-flux pair (rey_uv=⟨u'v'⟩,
-    # rey_vw=⟨v'w'⟩).  The latter have ONE index on the rotation axis v (R_v·=δ), so
+    # dispersive U,W; and the wall-normal momentum-flux pair (rey_uv=⟨u''v''⟩,
+    # rey_vw=⟨v''w''⟩; TURBULENT, not the full Reynolds stress).  The latter have ONE
+    # index on the rotation axis v (R_v·=δ), so
     # the single _rotate_pair already IS the full tensor transform R_im R_jn τ_mn.
     # Rotated as a rank-2 TENSOR (two R contractions): the in-plane stresses
     # rey_uu/uw/ww — both indices live in the rotated u–w plane, so they take the
@@ -551,6 +552,30 @@ if (1 == postprocess):
         _cs*(rey_uu - rey_ww) + (_c2 - _s2)*rey_uw,
         _s2*rey_uu + 2.0*_cs*rey_uw + _c2*rey_ww,
     )
+    # ══════════════════════════════════════════════════════════════════════════
+    # STRESS-TENSOR NOMENCLATURE (triple decomposition, Raupach & Shaw 1982)
+    #   u_i = ⟪u_i⟫(y)  +  ũ_i(x,y)  +  u''_i          (mean + dispersive + turbulent)
+    #   Total  ⟨u_i u_j⟩ = ⟪u_i⟫⟪u_j⟫(+cross) + ũ_iũ_j + ⟨u''_i u''_j⟩
+    #   Reynolds ⟨u'_i u'_j⟩ (deviation from the mean only) = ũ_iũ_j + ⟨u''_i u''_j⟩
+    #                                                       = DISPERSIVE + TURBULENT
+    # `rey_*` (loaded from uu_d.npy) is the TURBULENT part ⟨u''_i u''_j⟩ ONLY — it is
+    # NOT the full Reynolds stress.  Build the dispersive stress ũ_iũ_j (ROTATED frame:
+    # from the already-rotated dispersive velocities; the UU_disp..WW_disp loaded from
+    # uu_t.npy above are UNROTATED, so overwrite them here) and the true Reynolds
+    # stress reyn_* = turbulent + dispersive.
+    UU_disp = DispVelU * DispVelU            # ũũ  (streamwise–streamwise)
+    UV_disp = DispVelU * DispVelV            # ũṽ  (streamwise–wall-normal) → τ_yx
+    UW_disp = DispVelU * DispVelW            # ũw̃  (streamwise–spanwise)
+    VV_disp = DispVelV * DispVelV            # ṽṽ  (wall-normal–wall-normal)
+    VW_disp = DispVelV * DispVelW            # ṽw̃  (wall-normal–spanwise)  → τ_yz
+    WW_disp = DispVelW * DispVelW            # w̃w̃  (spanwise–spanwise)
+    reyn_uu = rey_uu + UU_disp               # ⟨u'u'⟩ = turbulent + dispersive
+    reyn_uv = rey_uv + UV_disp               # ⟨u'v'⟩
+    reyn_uw = rey_uw + UW_disp               # ⟨u'w'⟩
+    reyn_vv = rey_vv + VV_disp               # ⟨v'v'⟩
+    reyn_vw = rey_vw + VW_disp               # ⟨v'w'⟩
+    reyn_ww = rey_ww + WW_disp               # ⟨w'w'⟩
+    # ══════════════════════════════════════════════════════════════════════════
     # geostrophic vector in the rotated frame: aligned with x → spanwise comp = 0
     Gx, Gz = float(np.hypot(Gx, Gz)), 0.0
     print(f"[ROTATED] fields rotated by alpha={alpha:.4f} rad "
@@ -613,24 +638,30 @@ if (1 == postprocess):
     corr_yx = (AvgPhW - Gz)*mask0
     I_corr_yx = vIntegral(np.mean(corr_yx, axis=1), ny, y)
     visc_yx = (1/Re_lambda) * (avg_c(eps, du_dy, axis=1))
-    turb_yx = (avg_c(eps, rey_uv, axis=1))
-    # Reynolds stresses given by 'rey_uv'
-    # Tau_yz(z) = - Temporal - Coriolis + Viscous - Reynolds
-    total_tau_yx = - I_corr_yx + visc_yx - turb_yx
+    # Momentum flux = full Reynolds stress ⟨u'v'⟩ = TURBULENT ⟨u''v''⟩ + DISPERSIVE ũṽ.
+    # Kept as two separate contributions (turb_yx + disp_yx) so each is plotted on its
+    # own; their sum is the Reynolds flux that enters the balance (was turb_yx alone).
+    turb_yx = (avg_c(eps, rey_uv, axis=1))              # turbulent ⟨u''v''⟩(z)
+    disp_yx = (avg_c(eps, UV_disp, axis=1))             # dispersive ũṽ(z)
+    rey_flux_yx = turb_yx + disp_yx                     # full Reynolds ⟨u'v'⟩(z)
+    # Tau_zx(z) = - Coriolis + Viscous - Reynolds(turb + disp)   (Temporal ≈ 0, steady)
+    total_tau_yx = - I_corr_yx + visc_yx - turb_yx - disp_yx
 
     # $f \int_0^z \epsilon_{2 1 3}\left(\langle\bar{u}\rangle_k-g_u\right) \mathrm{d} z + \frac{1}{\operatorname{Re} e_{\Lambda}} \frac{\partial\langle\bar{v}\rangle}{\partial z}-\left\langle\overline{v^{\prime} w^{\prime}}\right\rangle $
     corr_yz = (AvgPhU - Gx)*mask0
     I_corr_yz = vIntegral(np.mean(corr_yz, axis=1), ny, y) # Coriolis is positive
     visc_yz = (1/Re_lambda) * (avg_c(eps, dw_dy, axis=1))
-    turb_yz = avg_c(eps, rey_vw, axis=1)
-    # Reynolds stresses given by 'rey_vw'
-    # Tau_yz(z) = - Temporal + Coriolis + Viscous - Reynolds
+    # Momentum flux = full Reynolds stress ⟨v'w'⟩ = TURBULENT ⟨v''w''⟩ + DISPERSIVE ṽw̃.
+    turb_yz = avg_c(eps, rey_vw, axis=1)                # turbulent ⟨v''w''⟩(z)
+    disp_yz = avg_c(eps, VW_disp, axis=1)               # dispersive ṽw̃(z)
+    rey_flux_yz = turb_yz + disp_yz                     # full Reynolds ⟨v'w'⟩(z)
     # ROTATED-FRAME / Fig-4 convention: Reynolds enters with a MINUS sign,
-    #   Ty = C_zy + V_zy + R_zy   with   C_zy = -I_corr_yz,  V_zy = visc_yz,  R_zy = -turb_yz.
+    #   Ty = C_zy + V_zy + R_zy   with   C_zy = -I_corr_yz,  V_zy = visc_yz,
+    #   R_zy = -(turb_yz + disp_yz).
     # This matches the validated loader (functions.py: tau_yz = -I_corr_yz + visc_yz - Ryz)
     # and plot_fig4_budget.  The unrotated PhAvg.py keeps the old +turb_yz plotting
     # convention; here we correct it so u_star2 below is paper-consistent.
-    total_tau_yz = -I_corr_yz + visc_yz - turb_yz
+    total_tau_yz = -I_corr_yz + visc_yz - turb_yz - disp_yz
     # tau_disp_yz retained as an alias of the (now Fig-4-consistent) total for the τ_zy plots.
     tau_disp_yz = total_tau_yz
 
@@ -682,8 +713,9 @@ if (1 == postprocess):
     # integral, THEN intrinsic fluid-only average) in place of I_corr_* (x-mean
     # THEN integral).  Compared in the Friction-Velocity comparison plot; inner
     # scaling (u_star) above is unchanged and still uses the original u_star2.
-    total_tau_yx_c = -I_corr_yx_c + visc_yx - turb_yx
-    total_tau_yz_c = -I_corr_yz_c + visc_yz + turb_yz
+    # Full Reynolds flux (turb + disp) and the Fig-4 τ_zy sign, matching total_tau_* above.
+    total_tau_yx_c = -I_corr_yx_c + visc_yx - turb_yx - disp_yx
+    total_tau_yz_c = -I_corr_yz_c + visc_yz - turb_yz - disp_yz
     u_star2_c = ((total_tau_yx_c**2 + total_tau_yz_c**2)**0.5)**0.5
     u_star_c  = np.mean(u_star2_c)
 
@@ -716,7 +748,7 @@ if (1 == postprocess):
     # Equation: Temporal + MeanAdv + TurbAdv = Viscous + Coriolis
     mom_temporal  = dudt                                                         # ∂ū/∂t (≈ 0, steady)
     mom_mean_adv  = avg_c(eps, AvgPhU * du_dx + AvgPhV * du_dy, axis=1)         # ū ∂ū/∂x + v̄ ∂ū/∂y
-    mom_turb_adv  = avg_c(eps, dreyuu_dx + dreyuv_dy, axis=1)                   # ∂(u'u')/∂x + ∂(u'v')/∂y
+    mom_turb_adv  = avg_c(eps, dreyuu_dx + dreyuv_dy, axis=1)                   # ∂(u''u'')/∂x + ∂(u''v'')/∂y (turbulent)
     mom_visc      = (1/Re_lambda) * avg_c(eps, d2u_dx2 + d2u_dy2, axis=1)       # (1/Re)(∂²ū/∂x² + ∂²ū/∂y²)
     mom_coriolis  = -avg_c(eps, corr_yx, axis=1)                                 # -(w̄ − Gz)
 
@@ -737,6 +769,14 @@ if (1 == postprocess):
     _avgU_1d = avg_c(eps, AvgPhU, axis=1)
     _avgW_1d = avg_c(eps, AvgPhW, axis=1)
     u_plus_rot = _avgU_1d
+    # SIGN-FLIPPED FOR DISPLAY: w_plus_rot = -⟨W_rot⟩.  The PHYSICAL rotated
+    # spanwise mean is NEGATIVE near the wall (Ekman veer left of G with f>0;
+    # the smooth reference rW is negative too — same chirality, verified against
+    # AvgPhW.npy + Re500 avg_all.nc).  The negation only puts the hodograph /
+    # spanwise profile in the positive quadrant; every reference overlay applies
+    # the same flip to the smooth/rough curves (-sw, -GblW_s, -arctan(alpha_s)).
+    # NB: this flipped sign is what gets PICKLED (w_plus_rot, inst_alpha); the
+    # pickled 2-D AvgPhW and the fluxes rey_vw / VW_disp keep the physical sign.
     w_plus_rot = -_avgW_1d
     
     # Turning angle
@@ -1383,7 +1423,7 @@ if (1 == postprocess):
     # ──────────────────────────────────────────────────────────────────────────
     # GOAL 4 — Double-average + split fluxes (momentum & buoyancy); disp. share
     # ──────────────────────────────────────────────────────────────────────────
-    rey_uv_x  = avg_c(eps, rey_uv,  axis=1)                 # turbulent ⟨u'v'⟩(z)  (v = wall-normal)
+    rey_uv_x  = avg_c(eps, rey_uv,  axis=1)                 # turbulent ⟨u''v''⟩(z)  (v = wall-normal)
     UV_disp_x = avg_c(eps, UV_disp, axis=1)                 # dispersive ũṽ(z)
     disp_share_mom  = np.abs(UV_disp_x) / (np.abs(UV_disp_x) + np.abs(rey_uv_x) + _FLUX_EPS)
     disp_share_buoy = np.abs(Bflux_disp) / (np.abs(Bflux_disp) + np.abs(Bflux_temp) + _FLUX_EPS)
@@ -1442,7 +1482,7 @@ if (1 == postprocess):
                   if int(Re) != 750 else "Re_D=750 active")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # GOAL 6 — Intermittency from instantaneous planesK (Ansorge & Mellado 2016)
+    # GOAL 6 — Intermittency (Ansorge & Mellado 2016)
     # ──────────────────────────────────────────────────────────────────────────
     # γ(z) ≡ ⟨H(|ω'| − ω₀)⟩  (eq 4.1): horizontal average of the Heaviside
     # indicator on the fluctuation-vorticity magnitude.  Two choices are dictated
@@ -1454,15 +1494,26 @@ if (1 == postprocess):
     #   • the vorticity is taken from the high-pass (here Reynolds-fluctuation,
     #     the paper's documented "second filter") field, so mean shear / large-
     #     scale background do not mask the small-scale turbulent activity.
-    # Only ω_z (out-of-plane) exists in a single streamwise–wall-normal planesK
-    # slice; it is the shear-carrying component there.  The IBM interface ring is
-    # excluded (eroded mask _mom) so its spike sets neither the threshold nor the
-    # field.  Instantaneous ω_z (raw + high-pass) and the 2-D field γ(x,z) are
-    # stored for the Fig-2-style contours (plotted in the plotRes block).
+    # Primary source: planesK.* (or flow.*.1/2) IN THIS DIRECTORY — real
+    # instantaneous frames, time-averaged here exactly as the paper defines γ,
+    # with NO spatial averaging in any direction. Only when no such raw frames
+    # are available locally does this fall back to a RAW K-plane (fixed
+    # spanwise index) `<prefix>_slice_z####.npz` written by
+    # MyPyLib/Intermittency.py on the cluster — deliberately NOT the
+    # spanwise-mean `<prefix>_xy.npz`, which time+space-averages away the real
+    # patchy turbulent/quiescent structure this diagnostic exists to show.
     gamma_z = None;  gamma_field = None;  omega_rms_z = None
     e_omega = None;  omega0 = None;  omega_inst_raw = None;  omega_inst_hp = None
     if (1 == compute_intermittency):
         import glob as _glob
+        import ast as _ast
+
+        # interior-fluid mask: drop solid AND the fluid ring touching solid
+        _mb  = mask0.astype(bool)
+        _mom = _mb & np.roll(_mb, 1, 1) & np.roll(_mb, -1, 1)   # x-neighbours (periodic)
+        _mom[1:, :] &= _mb[:-1, :]; _mom[:-1, :] &= _mb[1:, :]  # y-neighbours
+        _mom = _mom.astype(float)
+
         _NK, _NV, _KP = 1, 5, 0        # N_KPLANES, NVARS, KPLANE_IDX (see animation block)
         # Frame sources: planesK.* if present, otherwise z-plane 1 of the 3-D
         # velocity component files flow.*.1 (u) / flow.*.2 (v) — fall back to the
@@ -1477,15 +1528,8 @@ if (1 == postprocess):
                 if os.path.exists(_vf):
                     _frames.append(('flow', _uf, _vf))
             _src_kind = 'flow.*.1/2 (z-plane 1)'
-        if (len(_frames) == 0):
-            print("[research] intermittency: no planesK.* or flow.*.[12] — γ skipped.")
-        else:
-            # interior-fluid mask: drop solid AND the fluid ring touching solid
-            _mb  = mask0.astype(bool)
-            _mom = _mb & np.roll(_mb, 1, 1) & np.roll(_mb, -1, 1)   # x-neighbours (periodic)
-            _mom[1:, :] &= _mb[:-1, :]; _mom[:-1, :] &= _mb[1:, :]  # y-neighbours
-            _mom = _mom.astype(float)
 
+        if _frames:
             def _load_uv(_src):
                 """(u, v) as (ny,nx): a planesK frame, or z-plane 1 of flow.*."""
                 if _src[0] == 'pk':
@@ -1542,6 +1586,44 @@ if (1 == postprocess):
                 print(f"[research] intermittency from {_n2} {_src_kind} frame(s); "
                       f"ω₀ = {omega_thresh_factor:g}·ω_rms(δ) = {omega0:.4g}, "
                       f"max γ = {float(np.nanmax(gamma_z)):.2f}.")
+        else:
+            # No raw instantaneous data locally — fall back to a RAW K-plane
+            # (fixed spanwise index) written by Intermittency.py on the cluster.
+            # Deliberately NOT the spanwise-mean *_xy.npz: averaging over the
+            # full spanwise extent is exactly the destructive reduction this
+            # diagnostic exists to avoid. Multiple *_slice_z*.npz (different
+            # spanwise locations) are NOT averaged together either, for the
+            # same reason — the first one found is used as-is.
+            _kplanes = sorted(_glob.glob(cwd + '*_slice_z*.npz'))
+            if not _kplanes:
+                print("[research] intermittency: no planesK.*, flow.*.[12], or "
+                      "*_slice_z*.npz — γ skipped.")
+            else:
+                _npz_path = _kplanes[0]
+                _d = np.load(_npz_path, allow_pickle=True)
+                if 'gamma' not in _d.files or tuple(_d['gamma'].shape) != (ny, nx):
+                    print(f"[research] intermittency: {os.path.basename(_npz_path)} "
+                          f"gamma missing/shape mismatch — γ skipped.")
+                else:
+                    try:
+                        _meta = _ast.literal_eval(str(_d['meta']))
+                    except (ValueError, SyntaxError):
+                        _meta = {}
+                    gamma_field = np.nan_to_num(_d['gamma'], nan=0.0) * _mom
+                    _gden = np.sum(_mom, axis=1)
+                    gamma_z = np.divide(np.sum(gamma_field, axis=1), _gden,
+                                        out=np.zeros_like(_gden), where=_gden > 0)
+                    _o = _meta.get('omega0')
+                    omega0 = float(_o) if _o is not None else float('nan')
+                    _n2 = _meta.get('n_used', _meta.get('n_snapshots', '?'))
+                    if len(_kplanes) > 1:
+                        print(f"[research] {len(_kplanes)} *_slice_z*.npz found; "
+                              f"using {os.path.basename(_npz_path)} only (one "
+                              f"spanwise location — not averaged across planes).")
+                    print(f"[research] intermittency from {os.path.basename(_npz_path)} "
+                          f"(Intermittency.py K-plane, cluster, {_n2} snapshot(s) "
+                          f"time-averaged); ω₀ = {omega0:.4g}, "
+                          f"max γ = {float(np.nanmax(gamma_z)):.2f}.")
     # ══════════════════════════════════════════════════════════════════════════
 
     # ── Coupling: global surface veer (computed HERE, before the pickle) ─────
@@ -2099,19 +2181,39 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], TKE[:limity,:], '', 'TKE', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'TKE' + '.png', x_oro_in, y_oro_in, 1000)
     
     # %%###########################################################################
-    # Reynolds stresses
-    # [PLOT 20] Ruu
-    plot2D_div(x, y[:limity], rey_uu[:limity,:], '', 'Reynolds stress (Ruu)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruu' + '.png', x_oro, y_oro, 1000)
-    # [PLOT 21] Ruw
-    plot2D_div(x, y[:limity], rey_uv[:limity,:], '', 'Reynolds stress (Ruw)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruw' + '.png', x_oro, y_oro, 1000)
-    # [PLOT 22] Ruv
-    plot2D_div(x, y[:limity], rey_uw[:limity,:], '', 'Reynolds stress (Ruv)', r'$x$',r'$z$', cwd + '/fig/' + 'Ruv' + '.png', x_oro, y_oro, 1000)
-    # [PLOT 23] Rww
-    plot2D_div(x, y[:limity], rey_vv[:limity,:], '', 'Reynolds stress (Rww)', r'$x$',r'$z$', cwd + '/fig/' + 'Rww' + '.png', x_oro, y_oro, 1000)
-    # [PLOT 24] Rwv
-    plot2D_div(x, y[:limity], rey_vw[:limity,:], '', 'Reynolds stress (Rwv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rwv' + '.png', x_oro, y_oro, 1000)
-    # [PLOT 25] Rvv
-    plot2D_div(x, y[:limity], rey_ww[:limity,:], '', 'Reynolds stress (Rvv)', r'$x$',r'$z$', cwd + '/fig/' + 'Rvv' + '.png', x_oro, y_oro, 1000)
+    # Stress-tensor 2D maps — the FOUR families, 6 independent components each
+    # (symmetric tensor).  [PLOTS 20-25 were the single mislabeled "Reynolds" set.]
+    #   Total      ⟨u_i u_j⟩       (raw second moment / momentum flux)
+    #   Reynolds   ⟨u'_i u'_j⟩     = dispersive + turbulent  (deviation from the mean)
+    #   Turbulent  ⟨u''_i u''_j⟩   = rey_*  (deviation from the phase/coherent average)
+    #   Dispersive ũ_i ũ_j        = *_disp (coherent/form-induced)
+    # Total is the exact identity ⟨u_i u_j⟩ = ⟨u_i⟩⟨u_j⟩ + ⟨u''_i u''_j⟩, reconstructed
+    # from the rotated phase-mean product and the turbulent stress.  Meteorological
+    # display labels swap v↔w (u=streamwise, w=wall-normal, v=spanwise), matching the
+    # rest of this file.  Output: fig/<Family>_R<meteo>.png  (24 PNGs).
+    _mean_prod = {'uu': AvgPhU*AvgPhU, 'uv': AvgPhU*AvgPhV, 'uw': AvgPhU*AvgPhW,
+                  'vv': AvgPhV*AvgPhV, 'vw': AvgPhV*AvgPhW, 'ww': AvgPhW*AvgPhW}
+    _turb_f = {'uu': rey_uu, 'uv': rey_uv, 'uw': rey_uw,
+               'vv': rey_vv, 'vw': rey_vw, 'ww': rey_ww}
+    _disp_f = {'uu': UU_disp, 'uv': UV_disp, 'uw': UW_disp,
+               'vv': VV_disp, 'vw': VW_disp, 'ww': WW_disp}
+    _reyn_f = {'uu': reyn_uu, 'uv': reyn_uv, 'uw': reyn_uw,
+               'vv': reyn_vv, 'vw': reyn_vw, 'ww': reyn_ww}
+    _tot_f  = {_k: _mean_prod[_k] + _turb_f[_k] for _k in _turb_f}
+    _meteo  = {'uu': 'uu', 'uv': 'uw', 'uw': 'uv', 'vv': 'ww', 'vw': 'wv', 'ww': 'vv'}
+    _stress_families = [
+        ('Total',      _tot_f,  r'Total momentum $\langle %s%s\rangle$'),
+        ('Reynolds',   _reyn_f, r"Reynolds stress $\langle %s'%s'\rangle$"),
+        ('Turbulent',  _turb_f, r"Turbulent stress $\langle %s''%s''\rangle$"),
+        ('Dispersive', _disp_f, r'Dispersive stress $\widetilde{%s}\widetilde{%s}$'),
+    ]
+    for _fname, _fld, _tfmt in _stress_families:
+        for _ek in ('uu', 'uv', 'uw', 'vv', 'vw', 'ww'):
+            _ml = _meteo[_ek]
+            _title = _tfmt % (_ml[0], _ml[1])
+            _fn = '%s_R%s.png' % (_fname, _ml)
+            plot2D_div(x_in, y_in[:limity], _fld[_ek][:limity, :], '', _title,
+                       r'$x^+$', r'$z^+$', cwd + '/fig/' + _fn, x_oro_in, y_oro_in, 1000)
     
     # %%###########################################################################
     # Vorticity
@@ -2194,7 +2296,7 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
     plt.plot(u_plus_rot, w_plus_rot, label='valley', color='blue', linestyle='-')
     ref_plot(plot_ref_smooth, su, -sw, label='smooth', color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_rough, su_r, -sw_r, label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
+    # ref_plot(plot_ref_rough, su_r, -sw_r, label='rough r1', color=ROUGH_COLOR, linestyle=ROUGH_LS)
     # z+ is not an axis here, so layer levels + crest h are placed ON the (u,w)
     # curve via their indices (oro filled, smooth hollow; 'X' = crest h@94).
     mark_layers(u_plus_rot, w_plus_rot, _LYR_ORO, filled=True)
@@ -2263,9 +2365,14 @@ if (1 == plotRes):
     #   τ_zx:  C_zx=∫(g2−v), V_zx=ν du/dz, R_zx=−Rxy ;  τ_zy:  C_zy=∫(g1−u), V_zy=ν dv/dz, R_zy=−Ryz
     # This is the SAME convention validated against Kostelecky & Ansorge (2024) fig. 4
     # (plots 33a–d).  u* = (T_zx_plateau² + T_zy_plateau²)^¼ is rotation-invariant.
-    # orographic (rotated; 1-D intrinsic profiles already)
-    Czx_o = -I_corr_yx; Vzx_o = visc_yx; Rzx_o = -turb_yx; Tzx_o = total_tau_yx
-    Czy_o = -I_corr_yz; Vzy_o = visc_yz; Rzy_o = -turb_yz; Tzy_o = total_tau_yz
+    # orographic (rotated; 1-D intrinsic profiles already).  The Reynolds flux −⟨flux⟩
+    # is split into a TURBULENT curve (Rzx=−turb_yx) and a DISPERSIVE curve
+    # (Dzx=−disp_yx); together C + V + R_turb + D_disp = T (Total now includes disp).
+    Czx_o = -I_corr_yx; Vzx_o = visc_yx; Rzx_o = -turb_yx; Dzx_o = -disp_yx; Tzx_o = total_tau_yx
+    Czy_o = -I_corr_yz; Vzy_o = visc_yz; Rzy_o = -turb_yz; Dzy_o = -disp_yz; Tzy_o = total_tau_yz
+    # Reynolds contribution (valley/orographic) = turbulent + dispersive = -(turb+disp).
+    RYzx_o = Rzx_o + Dzx_o          # = -rey_flux_yx  (the full Reynolds shear term)
+    RYzy_o = Rzy_o + Dzy_o          # = -rey_flux_yz
     # smooth reference (loader; collapse the (ny,nt)/(ny,1) arrays to 1-D profiles)
     Czx_s = -I_corr_yx_s; Vzx_s = np.mean(visc_yx_s, axis=1); Rzx_s = -np.mean(Rxy_s, axis=1)
     Tzx_s = Czx_s + Vzx_s + Rzx_s
@@ -2284,19 +2391,23 @@ if (1 == plotRes):
     # near-wall INNER-unit counterpart is [PLOT 30] below.
     plt.figure(figsize=(10, 6))
     plt.plot(z_out[:], Czx_o[:]/G_mag**2, label='Coriolis', color='blue', linestyle='-')
-    plt.plot(z_out[:], Vzx_o[:]/G_mag**2, label='Viscous', color='red', linestyle='-')
-    plt.plot(z_out[:], Rzx_o[:]/G_mag**2, label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(z_out[:], Vzx_o[:]/G_mag**2, label='Viscous', color='orange', linestyle='-')
+    plt.plot(z_out[:], Rzx_o[:]/G_mag**2, label='Turbulent', color='magenta', linestyle='-')
+    plt.plot(z_out[:], Dzx_o[:]/G_mag**2, label='Dispersive', color='cyan', linestyle='-')
+    plt.plot(z_out[:], RYzx_o[:]/G_mag**2, label='Reynolds', color='gold', linestyle='-')
     plt.plot(z_out[:], dudt/G_mag**2, label='Temporal', color='saddlebrown', linestyle='-')
     plt.plot(z_out[:], Tzx_o[:]/G_mag**2, label='Total', color='black', linestyle='-')
+    # Reynolds (= turbulent + dispersive) in gold: valley (solid, RYzx_o above) +
+    # references (dashed/dotted, below).
     ref_plot(plot_ref_smooth, z_out_s, Czx_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, z_out_s, Vzx_s, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, z_out_s, Rzx_s, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Vzx_s, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Rzx_s, color='gold', linestyle=SMOOTH_LS)
     # rough r1 (Re=1000) overlay — Method-2 terms, own outer units (z_out_r)
     ref_plot(plot_ref_rough, z_out_r, Czx_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, z_out_r, Vzx_r, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, z_out_r, Rzx_r, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Vzx_r, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Rzx_r, color='gold', linestyle=ROUGH_LS)
     mark_layers_multi(z_out, [Czx_o/G_mag**2, Vzx_o/G_mag**2, Rzx_o/G_mag**2,
-                              dudt/G_mag**2, Tzx_o/G_mag**2], _LYR_ORO, filled=True)
+                              Dzx_o/G_mag**2, dudt/G_mag**2, Tzx_o/G_mag**2], _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, z_out_s, [Czx_s, Vzx_s,
                               Rzx_s], _LYR_SMO, filled=False)
     mark_h(z_out[h_idx], 'v')
@@ -2305,14 +2416,14 @@ if (1 == plotRes):
     plt.ylabel(r'${\langle \bar{\tau} \rangle}_{zx}/G^2$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',       linestyle='-',  label='Coriolis'),
-        mlines.Line2D([], [], color='red',        linestyle='-',  label='Viscous'),
-        mlines.Line2D([], [], color='orange',     linestyle='-',  label='Rey Stress'),
+        mlines.Line2D([], [], color='orange',     linestyle='-',  label='Viscous'),
+        mlines.Line2D([], [], color='gold',     linestyle='-',  label='Reynolds'),
+        mlines.Line2D([], [], color='cyan',       linestyle='-',  label='Dispersive'),
+        mlines.Line2D([], [], color='magenta',    linestyle='-',  label='Turbulent'),
         mlines.Line2D([], [], color='saddlebrown',linestyle='-',  label='Temporal'),
         mlines.Line2D([], [], color='black',      linestyle='-',  label='Total'),
-        mlines.Line2D([], [], color='black',      linestyle='-',  label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR, linestyle=SMOOTH_LS, label='Smooth'),
     ])
-    add_marker_legend()
+    add_marker_legend(case_lines=True, shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Shear Stress XY.png'), dpi=300)
     plt.show()
@@ -2324,22 +2435,24 @@ if (1 == plotRes):
     
     # Valley case (solid lines)
     plt.plot(y_inner[:limity], Czx_o[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], Vzx_o[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], Rzx_o[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], Vzx_o[:limity]/u_star**2, color='orange', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], Rzx_o[:limity]/u_star**2, color='magenta', linestyle='-', label='Turbulent')
+    plt.plot(y_inner[:limity], Dzx_o[:limity]/u_star**2, color='cyan', linestyle='-', label='Dispersive')
+    plt.plot(y_inner[:limity], RYzx_o[:limity]/u_star**2, color='gold', linestyle='-', label='Reynolds')
     plt.plot(y_inner[:limity], dudt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
     plt.plot(y_inner[:limity], Tzx_o[:limity]/u_star**2, color='black', linestyle='-', label='Total')
-    # Smooth case (dashed)
+    # Smooth case (dashed); Reynolds (gold) = turbulent + dispersive — valley solid + refs dashed
     ref_plot(plot_ref_smooth, y_s_p, Czx_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Vzx_s/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Rzx_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzx_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzx_s/ustr_s1**2, color='gold', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
     # rough r1 — own inner units (ustr_r1)
     ref_plot(plot_ref_rough, y_r_p, Czx_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Vzx_r/ustr_r1**2, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Rzx_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzx_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzx_r/ustr_r1**2, color='gold', linestyle=ROUGH_LS)
 
     mark_layers_multi(y_inner, [Czx_o/u_star**2, Vzx_o/u_star**2,
-                                Rzx_o/u_star**2, dudt/u_star**2,
+                                Rzx_o/u_star**2, Dzx_o/u_star**2, dudt/u_star**2,
                                 Tzx_o/u_star**2],
                       _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czx_s/ustr_s1**2, Vzx_s/ustr_s1**2,
@@ -2351,14 +2464,14 @@ if (1 == plotRes):
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zx}$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='gold',      linestyle='-',       label='Reynolds'),
+        mlines.Line2D([], [], color='cyan',        linestyle='-',       label='Dispersive'),
+        mlines.Line2D([], [], color='magenta',     linestyle='-',       label='Turbulent'),
         mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
         mlines.Line2D([], [], color='black',       linestyle='-',       label='Total'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
     ])
-    add_marker_legend()
+    add_marker_legend(case_lines=True, shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.1, 1.0)
@@ -2371,19 +2484,22 @@ if (1 == plotRes):
     # wall-normal z/δ, stress /G².  Near-wall INNER-unit counterpart is [PLOT 32].
     plt.figure(figsize=(8, 6), dpi=300)
     plt.plot(z_out[:], Czy_o[:]/G_mag**2, label='Coriolis', color='blue', linestyle='-')
-    plt.plot(z_out[:], Vzy_o[:]/G_mag**2, label='Viscous', color='red', linestyle='-')
-    plt.plot(z_out[:], Rzy_o[:]/G_mag**2, label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(z_out[:], Vzy_o[:]/G_mag**2, label='Viscous', color='orange', linestyle='-')
+    plt.plot(z_out[:], Rzy_o[:]/G_mag**2, label='Turbulent', color='magenta', linestyle='-')
+    plt.plot(z_out[:], Dzy_o[:]/G_mag**2, label='Dispersive', color='cyan', linestyle='-')
+    plt.plot(z_out[:], RYzy_o[:]/G_mag**2, label='Reynolds', color='gold', linestyle='-')
     plt.plot(z_out[:], dwdt/G_mag**2, label='Temporal', color='saddlebrown', linestyle='-')
     plt.plot(z_out[:], Tzy_o[:]/G_mag**2, label='Total', color='black', linestyle='-')
+    # Reynolds (= turbulent + dispersive) in gold: valley (solid, RYzy_o above) + references (dashed).
     ref_plot(plot_ref_smooth, z_out_s, Czy_s, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, z_out_s, Vzy_s, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, z_out_s, Rzy_s, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Vzy_s, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, z_out_s, Rzy_s, color='gold', linestyle=SMOOTH_LS)
     # rough r1 (Re=1000) overlay — Method-2 terms, own outer units (z_out_r)
     ref_plot(plot_ref_rough, z_out_r, Czy_r, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, z_out_r, Vzy_r, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, z_out_r, Rzy_r, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Vzy_r, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, z_out_r, Rzy_r, color='gold', linestyle=ROUGH_LS)
     mark_layers_multi(z_out, [Czy_o/G_mag**2, Vzy_o/G_mag**2,
-                              Rzy_o/G_mag**2, dwdt/G_mag**2, Tzy_o/G_mag**2],
+                              Rzy_o/G_mag**2, Dzy_o/G_mag**2, dwdt/G_mag**2, Tzy_o/G_mag**2],
                       _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, z_out_s, [Czy_s, Vzy_s,
                               Rzy_s], _LYR_SMO, filled=False)
@@ -2393,13 +2509,14 @@ if (1 == plotRes):
     plt.ylabel(r'${\langle \bar{\tau} \rangle}_{zy}/G^2$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='gold',      linestyle='-',       label='Reynolds'),
+        mlines.Line2D([], [], color='cyan',        linestyle='-',       label='Dispersive'),
+        mlines.Line2D([], [], color='magenta',     linestyle='-',       label='Turbulent'),
         mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Total / Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
+        mlines.Line2D([], [], color='black',       linestyle='-',       label='Total'),
     ])
-    add_marker_legend()
+    add_marker_legend(case_lines=True, shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
     plt.grid(True)
     plt.savefig(os.path.join(fig_dir, 'Shear Stress ZY.png'), dpi=300)
     plt.show()
@@ -2411,22 +2528,24 @@ if (1 == plotRes):
 
     # Valley case (solid lines)
     plt.plot(y_inner[:limity], Czy_o[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], Vzy_o[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], Rzy_o[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    plt.plot(y_inner[:limity], Vzy_o[:limity]/u_star**2, color='orange', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], Rzy_o[:limity]/u_star**2, color='magenta', linestyle='-', label='Turbulent')
+    plt.plot(y_inner[:limity], Dzy_o[:limity]/u_star**2, color='cyan', linestyle='-', label='Dispersive')
+    plt.plot(y_inner[:limity], RYzy_o[:limity]/u_star**2, color='gold', linestyle='-', label='Reynolds')
     plt.plot(y_inner[:limity], dwdt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
     plt.plot(y_inner[:limity], Tzy_o[:limity]/u_star**2, color='black', linestyle='-', label='Total')
-    # Smooth case (dashed)
+    # Smooth case (dashed); Reynolds (gold) = turbulent + dispersive — valley solid + refs dashed
     ref_plot(plot_ref_smooth, y_s_p, Czy_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Vzy_s/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, Rzy_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Vzy_s/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, Rzy_s/ustr_s1**2, color='gold', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
     # rough r1 — own inner units (ustr_r1)
     ref_plot(plot_ref_rough, y_r_p, Czy_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Vzy_r/ustr_r1**2, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, Rzy_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Vzy_r/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, Rzy_r/ustr_r1**2, color='gold', linestyle=ROUGH_LS)
 
     mark_layers_multi(y_inner, [Czy_o/u_star**2, Vzy_o/u_star**2,
-                                Rzy_o/u_star**2, dwdt/u_star**2,
+                                Rzy_o/u_star**2, Dzy_o/u_star**2, dwdt/u_star**2,
                                 Tzy_o/u_star**2],
                       _LYR_ORO, filled=True)
     ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [Czy_s/ustr_s1**2, Vzy_s/ustr_s1**2,
@@ -2438,14 +2557,14 @@ if (1 == plotRes):
     plt.ylabel(r'${{\langle \bar{\tau} \rangle}^+}_{zy}$')
     plt.legend(handles=[
         mlines.Line2D([], [], color='blue',        linestyle='-',       label='Coriolis'),
-        mlines.Line2D([], [], color='red',         linestyle='-',       label='Viscous'),
-        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Rey Stress'),
+        mlines.Line2D([], [], color='orange',      linestyle='-',       label='Viscous'),
+        mlines.Line2D([], [], color='gold',      linestyle='-',       label='Reynolds'),
+        mlines.Line2D([], [], color='cyan',        linestyle='-',       label='Dispersive'),
+        mlines.Line2D([], [], color='magenta',     linestyle='-',       label='Turbulent'),
         mlines.Line2D([], [], color='saddlebrown', linestyle='-',       label='Temporal'),
         mlines.Line2D([], [], color='black',       linestyle='-',       label='Total'),
-        mlines.Line2D([], [], color='black',       linestyle='-',       label='Valley'),
-        mlines.Line2D([], [], color=SMOOTH_COLOR,  linestyle=SMOOTH_LS, label='Smooth'),
     ])
-    add_marker_legend()
+    add_marker_legend(case_lines=True, shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
     plt.grid(True)
     plt.xlim(0, 200)
     plt.ylim(-0.5, 1)
@@ -3594,7 +3713,7 @@ if (1 == plotRes):
 
     # ── [R1] Turbulent vs dispersive flux split — momentum & buoyancy (Goal 4) ─
     figR, (axRm, axRb) = plt.subplots(1, 2, figsize=(12, 6), dpi=300)
-    axRm.plot(rey_uv_x[:limity],  _zr, 'b-',  lw=1.5, label=r"turbulent $\langle u'v'\rangle$")
+    axRm.plot(rey_uv_x[:limity],  _zr, 'b-',  lw=1.5, label=r"turbulent $\langle u''v''\rangle$")
     axRm.plot(UV_disp_x[:limity], _zr, 'r--', lw=1.5, label=r'dispersive $\tilde u\tilde v$')
     axRm.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8, label='crest $h$')
     axRm.set_xlabel('wall-normal momentum flux'); axRm.set_ylabel(r'$z^+$')

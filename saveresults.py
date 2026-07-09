@@ -95,7 +95,10 @@ var_names = [
     # Triple decomposition — dispersive × dispersive contribution  (2D)
     'UU_disp', 'UV_disp', 'UW_disp', 'VV_disp', 'VW_disp', 'WW_disp',
 
-    # Turbulent (Reynolds) stresses — residual after decomposition  (2D)
+    # TURBULENT stresses ⟨u''_i u''_j⟩ — the residual after removing the mean and
+    # dispersive parts.  NOTE: this is NOT the full Reynolds stress; the Reynolds
+    # stress ⟨u'_i u'_j⟩ = dispersive (*_disp) + turbulent (rey_*).  The `rey_`
+    # prefix is retained for backward compatibility.  (2D)
     'rey_uu', 'rey_uv', 'rey_uw', 'rey_vv', 'rey_vw', 'rey_ww',
 
     # -------------------------------------------------------------------------
@@ -164,6 +167,10 @@ var_names = [
     # Scaled/normalised velocities and turning angle
     # -------------------------------------------------------------------------
     'u_plus', 'v_plus', 'w_plus',
+    # NB: w_plus_rot (and inst_alpha = w_plus_rot/u_plus_rot) carry a DISPLAY
+    # sign flip, w_plus_rot = -⟨W_rot⟩ (PhAvg[_rotated].py "Horizontal wind").
+    # The physical rotated spanwise mean is negative near the wall, matching the
+    # smooth reference rW; AvgPhW / rey_vw / VW_disp keep the physical sign.
     'u_plus_rot', 'w_plus_rot', 'uh_pl1D',
     'inst_alpha',
 

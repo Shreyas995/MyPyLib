@@ -32,9 +32,16 @@ Usage
     python3 buckingham_pi.py --static        # headless: print table + save fig PNG
     python3 buckingham_pi.py --G 10 --lat 45 --Fr 0.01 --static
     python3 buckingham_pi.py --anchors G,nu --G 10 --nu 1.5e-5 --static
+    python3 buckingham_pi.py --data-dir /path/to/case    # where the .npy live
 
 Reads only config.py + this run's local .npy (y, AvgPhU, AvgScal, eps_save) --
-no cluster data required.  All def's are grouped at the top (repo convention).
+no cluster data required.  The case directory is auto-located (cwd, then the
+script/symlink dir, then the repo root) or given explicitly with --data-dir;
+when none is found the profile panels show a notice instead of staying blank.
+If no GUI window can be opened the tool falls back to --static automatically
+(probed in a subprocess: Qt aborts the whole process when no display is
+usable, which a Python except cannot catch).  All def's are grouped at the
+top (repo convention).
 """
 import os
 import sys
@@ -238,18 +245,51 @@ def compute_mapping(gflnu, Fr):
 # ---------------------------------------------------------------------------
 # Load this run's actual profiles (code units) via intrinsic x-average
 # ---------------------------------------------------------------------------
-def load_profiles(base='.'):
+_REQUIRED_NPY = ('y.npy', 'eps_save.npy')
+
+
+def _find_data_dir(explicit=None):
+    """Locate the case directory holding this run's .npy files.
+
+    Search order: --data-dir (if given), cwd, the script/symlink dir (repo
+    convention: a symlinked script lives IN its case dir), then the repo root
+    above the real MyPyLib location.  Returns (dir_or_None, searched_dirs).
+    Fixes the launch-dir dependence that left the profile panels blank when
+    the tool was started from anywhere but a case directory."""
+    here = os.path.dirname(os.path.abspath(__file__))            # symlink dir
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    cands = ([explicit] if explicit else []) + [os.getcwd(), here, root]
+    searched = []
+    for d in cands:
+        d = os.path.abspath(d)
+        if d in searched:
+            continue
+        searched.append(d)
+        if all(os.path.exists(os.path.join(d, f)) for f in _REQUIRED_NPY):
+            return d, searched
+    return None, searched
+
+
+def load_profiles(base=None):
     """x-average AvgPhU / AvgScal to 1-D profiles vs y (code units).
 
-    Returns dict {y, U, b} or None-valued entries if files are missing.
-    Solid cells are zeroed with mask0 = 1-eps before avg_c (fluid-only average),
+    base=None auto-locates the case dir (see _find_data_dir).  Returns dict
+    {y, U, b, dir, searched}; entries stay None for absent files.  Solid
+    cells are zeroed with mask0 = 1-eps before avg_c (fluid-only average),
     exactly as flow_params.py does."""
-    out = {'y': None, 'U': None, 'b': None}
+    base, searched = _find_data_dir(base)
+    out = {'y': None, 'U': None, 'b': None, 'dir': base, 'searched': searched}
+    if base is None:
+        print('  [load_profiles] no %s found in any of: %s'
+              % (' + '.join(_REQUIRED_NPY), ', '.join(searched)))
+        print('  [load_profiles] profile panels will show a notice; '
+              'run from a case dir or pass --data-dir')
+        return out
+    print('  [load_profiles] reading profiles from %s' % base)
     try:
-        y = np.load(os.path.join(base, 'y.npy'))
         eps = np.load(os.path.join(base, 'eps_save.npy'))
         mask0 = 1.0 - eps
-        out['y'] = y
+        out['y'] = np.load(os.path.join(base, 'y.npy'))
         upath = os.path.join(base, 'AvgPhU.npy')
         if os.path.exists(upath):
             out['U'] = avg_c(eps, np.load(upath) * mask0, axis=1)
@@ -259,6 +299,15 @@ def load_profiles(base='.'):
     except Exception as exc:                       # pragma: no cover
         print('  [load_profiles] could not read local profiles: %s' % exc)
     return out
+
+
+def _no_profile_msg(prof):
+    """Explanatory text for an empty profile panel (never leave it blank)."""
+    if prof.get('dir') is None:
+        return ('no local .npy profiles found\nsearched:\n%s\n'
+                'run from a case dir or use --data-dir'
+                % '\n'.join(prof.get('searched', [])))
+    return 'AvgPhU.npy / AvgScal.npy absent in\n%s' % prof['dir']
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +335,7 @@ def _fmt_val(v, unit):
     return s
 
 
-def format_table(rows, gflnu=None, Fr=None):
+def format_table(rows):
     """Render the mapping rows as a printable text block."""
     lines = []
     for label, val, unit in rows:
@@ -395,7 +444,8 @@ def draw_earth_bands(sliders):
 # ---------------------------------------------------------------------------
 # Static / headless run: print the table and save a dashboard PNG
 # ---------------------------------------------------------------------------
-def run_static(anchors, values, Fr, savepath='fig/buckingham_dashboard.png'):
+def run_static(anchors, values, Fr, savepath='fig/buckingham_dashboard.png',
+               data_dir=None):
     known = {k: values[k] for k in anchors}
     gflnu = solve_gflnu(known)
     rows = compute_mapping(gflnu, Fr)
@@ -404,7 +454,7 @@ def run_static(anchors, values, Fr, savepath='fig/buckingham_dashboard.png'):
     print('\n' + '=' * 72)
     print(' Real-world mapping   anchors = %s,  Fr = %s' % (anchors, _fmt_fr(Fr)))
     print('=' * 72)
-    print(format_table(rows, gflnu, Fr))
+    print(format_table(rows))
 
     verdict, _ = earth_status_lines(gflnu, Fr)
     print('\n' + '-' * 72)
@@ -413,7 +463,7 @@ def run_static(anchors, values, Fr, savepath='fig/buckingham_dashboard.png'):
     for ln in verdict.split('\n'):
         print('  ' + ln)
 
-    prof = load_profiles()
+    prof = load_profiles(data_dir)
     _save_dashboard(rows, gflnu, Fr, prof, savepath)
     return gflnu, rows
 
@@ -444,7 +494,7 @@ def _save_dashboard(rows, gflnu, Fr, prof, savepath):
 
     fig = plt.figure(figsize=(13, 7))
     ax_txt = fig.add_axes([0.02, 0.02, 0.46, 0.96]); ax_txt.axis('off')
-    ax_txt.text(0.0, 1.0, format_table(rows, gflnu, Fr),
+    ax_txt.text(0.0, 1.0, format_table(rows),
                 family='monospace', fontsize=8, va='top', ha='left')
 
     dp = _dimensional_profiles(prof, gflnu, Fr)
@@ -452,6 +502,9 @@ def _save_dashboard(rows, gflnu, Fr, prof, savepath):
     axT = fig.add_axes([0.55, 0.10, 0.42, 0.37])
     if dp is not None and dp['U'] is not None:
         axU.plot(dp['U'], dp['z'], 'b-')
+    else:
+        axU.text(.5, .5, _no_profile_msg(prof), ha='center', va='center',
+                 transform=axU.transAxes, fontsize=8, color='0.35')
     axU.set_xlabel('mean wind U [m/s]'); axU.set_ylabel('z [m]')
     axU.set_title('mean wind  U(z)   (Fr = %s)' % _fmt_fr(Fr))
     axU.grid(alpha=.3)
@@ -459,8 +512,10 @@ def _save_dashboard(rows, gflnu, Fr, prof, savepath):
         axT.plot(dp['Th'], dp['z'], 'r-')
         axT.set_title('buoyancy scalar as temperature  dTheta(z)')
     else:
-        axT.text(.5, .5, 'no buoyancy (Fr = inf)\nor scalar file absent',
-                 ha='center', va='center', transform=axT.transAxes)
+        axT.text(.5, .5, 'no buoyancy (Fr = inf)\nor scalar file absent'
+                 if dp is not None else _no_profile_msg(prof),
+                 ha='center', va='center', transform=axT.transAxes,
+                 fontsize=8, color='0.35')
         axT.set_title('temperature perturbation')
     axT.set_xlabel('dTheta [K]'); axT.set_ylabel('z [m]'); axT.grid(alpha=.3)
 
@@ -473,12 +528,12 @@ def _save_dashboard(rows, gflnu, Fr, prof, savepath):
 # ---------------------------------------------------------------------------
 # Interactive run: 4 sliders (G, latitude, log10 L0, log10 nu) + anchor radios
 # ---------------------------------------------------------------------------
-def run_interactive(values, Fr0):
+def run_interactive(values, Fr0, anchors=('G', 'f'), data_dir=None):
     import matplotlib.pyplot as plt
     from matplotlib.widgets import Slider, RadioButtons, Button
 
-    prof = load_profiles()
-    state = {'anchors': ('G', 'f'), 'Fr': Fr0, 'updating': False}
+    prof = load_profiles(data_dir)
+    state = {'anchors': tuple(anchors), 'Fr': Fr0, 'updating': False}
 
     fig = plt.figure(figsize=(14, 8))
     fig.suptitle('tlab Ekman DNS  ->  real-world dimensional mapping '
@@ -494,33 +549,43 @@ def run_interactive(values, Fr0):
         0.0, 0.5, '', family='monospace', fontsize=7.5, va='center', ha='left',
         bbox=dict(boxstyle='round,pad=0.4', fc='white', ec='0.6'))
 
-    axU = fig.add_axes([0.55, 0.58, 0.40, 0.34])
-    axT = fig.add_axes([0.55, 0.14, 0.40, 0.34])
+    # profile panels: right column, x >= 0.56.  ALL controls stay left of
+    # x = 0.55 -- the old layout drew the Fr radio box and the reset button
+    # on top of the temperature axes.
+    axU = fig.add_axes([0.585, 0.57, 0.385, 0.35])
+    axT = fig.add_axes([0.585, 0.09, 0.385, 0.35])
     lineU, = axU.plot([], [], 'b-'); axU.set_xlabel('U [m/s]'); axU.set_ylabel('z [m]')
     axU.set_title('mean wind U(z)'); axU.grid(alpha=.3)
     lineT, = axT.plot([], [], 'r-'); axT.set_xlabel('dTheta [K]'); axT.set_ylabel('z [m]')
     axT.set_title('buoyancy scalar as temperature'); axT.grid(alpha=.3)
+    # a panel is never silently blank: these carry the reason when empty
+    msgU = axU.text(.5, .5, '', ha='center', va='center',
+                    transform=axU.transAxes, fontsize=8, color='0.35')
+    msgT = axT.text(.5, .5, '', ha='center', va='center',
+                    transform=axT.transAxes, fontsize=8, color='0.35')
 
-    # sliders: raw slider value == physical for G/lat, log10 for L0/nu
-    sax_G   = fig.add_axes([0.08, 0.22, 0.33, 0.03])
-    sax_lat = fig.add_axes([0.08, 0.17, 0.33, 0.03])
-    sax_L0  = fig.add_axes([0.08, 0.12, 0.33, 0.03])
-    sax_nu  = fig.add_axes([0.08, 0.07, 0.33, 0.03])
-    s_G   = Slider(sax_G,   'G [m/s]',      0.5, 40.0, valinit=values['G'])
-    s_lat = Slider(sax_lat, 'latitude [deg]', 5.0, 89.0,
+    # sliders: raw slider value == physical for G/lat, log10 for L0/nu; the
+    # value text right of each slider always shows the PHYSICAL number
+    sax_G   = fig.add_axes([0.075, 0.225, 0.25, 0.03])
+    sax_lat = fig.add_axes([0.075, 0.175, 0.25, 0.03])
+    sax_L0  = fig.add_axes([0.075, 0.125, 0.25, 0.03])
+    sax_nu  = fig.add_axes([0.075, 0.075, 0.25, 0.03])
+    s_G   = Slider(sax_G,   'G [m/s]',   0.5, 40.0, valinit=values['G'])
+    s_lat = Slider(sax_lat, 'lat [deg]', 5.0, 89.0,
                    valinit=lat_from_f(values['f']))
-    s_L0  = Slider(sax_L0,  'log10 L0 [m]',  -2.0, 5.5,
+    s_L0  = Slider(sax_L0,  'L0 [m]',    -2.0, 5.5,
                    valinit=np.log10(values['L0']))
-    s_nu  = Slider(sax_nu,  'log10 nu [m2/s]', -6.0, 2.0,
+    s_nu  = Slider(sax_nu,  'nu [m2/s]', -6.0, 2.0,
                    valinit=np.log10(values['nu']))
     sliders = {'G': s_G, 'f': s_lat, 'L0': s_L0, 'nu': s_nu}
 
     # shade each slider's Earth-feasible band (green) vs off-Earth (red); soft
     # guides only — the sliders themselves are never limited.
     draw_earth_bands(sliders)
-    fig.text(0.03, 0.018,
-             'slider shading: green = Earth atmosphere,  red = off-Earth '
-             '(rotating-tank lab / another planet).  nu dotted marks: air, water.',
+    fig.text(0.02, 0.018,
+             'L0/nu sliders move in log10 steps (value shown is physical).  '
+             'shading: green = Earth atmosphere, red = off-Earth '
+             '(rotating-tank lab / another planet).  nu dots: air, water.',
              fontsize=7.5, color='0.35')
 
     def slider_phys(key):
@@ -534,21 +599,31 @@ def run_interactive(values, Fr0):
             return 10.0**s_nu.val
 
     def set_slider_phys(key, val):
-        if key == 'G':
-            s_G.set_val(val)
-        elif key == 'f':
-            s_lat.set_val(lat_from_f(val))
-        elif key == 'L0':
-            s_L0.set_val(np.log10(val))
-        elif key == 'nu':
-            s_nu.set_val(np.log10(val))
+        """Push a derived value onto its (display-only) slider, clamped to the
+        track so the bar never draws outside its axes; the value text shows
+        the exact physical number regardless (set in refresh)."""
+        s = sliders[key]
+        raw = {'G': lambda v: v, 'f': lat_from_f,
+               'L0': np.log10, 'nu': np.log10}[key](val)
+        s.set_val(float(np.clip(raw, s.valmin, s.valmax)))
 
-    # anchor-pair + Fr selectors
-    rax_pair = fig.add_axes([0.46, 0.05, 0.08, 0.22]); rax_pair.set_title('anchors', fontsize=8)
-    rb_pair = RadioButtons(rax_pair, ['%s,%s' % p for p in ANCHOR_PAIRS])
-    rax_fr = fig.add_axes([0.90, 0.05, 0.08, 0.16]); rax_fr.set_title('Fr', fontsize=8)
-    rb_fr = RadioButtons(rax_fr, ['inf', '1', '0.1', '0.01'])
-    bax = fig.add_axes([0.90, 0.24, 0.08, 0.04]); btn = Button(bax, 'reset')
+    # anchor-pair + Fr selectors + reset, grouped in the bottom-centre strip
+    # (left of the profile panels).  Initial selection honours the CLI.
+    rax_pair = fig.add_axes([0.40, 0.045, 0.065, 0.21])
+    rax_pair.set_title('anchors', fontsize=8)
+    rb_pair = RadioButtons(rax_pair, ['%s,%s' % p for p in ANCHOR_PAIRS],
+                           active=ANCHOR_PAIRS.index(state['anchors']))
+    fr_labels = ['inf' if not np.isfinite(v) else '%g' % v for v in FR_LADDER]
+    if np.isfinite(Fr0) and not any(lbl != 'inf' and np.isclose(float(lbl), Fr0)
+                                    for lbl in fr_labels):
+        fr_labels.append('%g' % Fr0)               # off-ladder --Fr still shown
+    fr_active = next(i for i, lbl in enumerate(fr_labels)
+                     if (lbl == 'inf') == (not np.isfinite(Fr0))
+                     and (lbl == 'inf' or np.isclose(float(lbl), Fr0)))
+    rax_fr = fig.add_axes([0.475, 0.04, 0.05, 0.16])
+    rax_fr.set_title('Fr', fontsize=8)
+    rb_fr = RadioButtons(rax_fr, fr_labels, active=fr_active)
+    bax = fig.add_axes([0.475, 0.225, 0.05, 0.035]); btn = Button(bax, 'reset')
 
     def refresh(_=None):
         if state['updating']:
@@ -563,18 +638,30 @@ def run_interactive(values, Fr0):
                     set_slider_phys(k, gflnu[k])
             for k in ANCHOR_KEYS:               # grey the derived sliders, colour the active ones
                 sliders[k].poly.set_color('tab:blue' if k in a else '0.7')
+            # value texts: exact physical numbers (not raw log10 positions)
+            s_G.valtext.set_text('%.3g' % gflnu['G'])
+            s_lat.valtext.set_text('%.1f' % lat_from_f(gflnu['f']))
+            s_L0.valtext.set_text('%.3g' % gflnu['L0'])
+            s_nu.valtext.set_text('%.3g' % gflnu['nu'])
             rows = compute_mapping(gflnu, state['Fr'])
-            txt.set_text(format_table(rows, gflnu, state['Fr']))
+            txt.set_text(format_table(rows))
             verdict, colour = earth_status_lines(gflnu, state['Fr'])
             status_txt.set_text(verdict)
             status_txt.get_bbox_patch().set_facecolor(colour)
             dp = _dimensional_profiles(prof, gflnu, state['Fr'])
             if dp is not None and dp['U'] is not None:
+                msgU.set_text('')
                 lineU.set_data(dp['U'], dp['z']); axU.relim(); axU.autoscale_view()
+            else:
+                lineU.set_data([], [])
+                msgU.set_text(_no_profile_msg(prof))
             if dp is not None and dp['Th'] is not None:
+                msgT.set_text('')
                 lineT.set_data(dp['Th'], dp['z']); axT.relim(); axT.autoscale_view()
             else:
                 lineT.set_data([], [])
+                msgT.set_text('no buoyancy (Fr = inf)\nor AvgScal.npy absent'
+                              if dp is not None else _no_profile_msg(prof))
             fig.canvas.draw_idle()
         finally:
             state['updating'] = False
@@ -604,6 +691,31 @@ def run_interactive(values, Fr0):
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+NON_INTERACTIVE_BACKENDS = ('agg', 'pdf', 'ps', 'svg', 'template')
+
+# run in a throwaway child interpreter: opens (and closes) one figure window.
+# Exit 1 = headless backend; SIGABRT = Qt found no usable platform plugin.
+_GUI_PROBE = ("import sys\n"
+              "import matplotlib.pyplot as plt\n"
+              "if plt.get_backend().lower() in %r:\n"
+              "    sys.exit(1)\n"
+              "plt.figure(); plt.close('all')\n" % (NON_INTERACTIVE_BACKENDS,))
+
+
+def _gui_preflight():
+    """Can a GUI window actually be created?  Qt aborts the *process* when no
+    platform plugin initialises (SIGABRT is not a catchable Python exception),
+    so probe in a subprocess and read its exit status instead."""
+    import subprocess
+    try:
+        return subprocess.run(
+            [sys.executable, '-c', _GUI_PROBE], timeout=60,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
 def _parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -618,6 +730,9 @@ def _parse_args(argv):
     p.add_argument('--nu',  type=float, default=None, help='kinematic viscosity [m^2/s]')
     p.add_argument('--Fr',  default=str(config.Fr),
                    help='Froude number: inf | 1 | 0.1 | 0.01 (default from config.py)')
+    p.add_argument('--data-dir', default=None,
+                   help='case directory holding y.npy/eps_save.npy/AvgPh*.npy '
+                        '(default: auto-search cwd, script dir, repo root)')
     return p.parse_args(argv)
 
 
@@ -626,38 +741,55 @@ def main(argv=None):
     Fr = np.inf if str(args.Fr).lower() in ('inf', 'np.inf', 'infty') else float(args.Fr)
 
     f_val = args.f if args.f is not None else f_from_lat(args.lat)
-    values = {'G': args.G, 'f': f_val}
+    cli_vals = {'G': args.G, 'f': f_val}
     if args.L0 is not None:
-        values['L0'] = args.L0
+        cli_vals['L0'] = args.L0
     if args.nu is not None:
-        values['nu'] = args.nu
+        cli_vals['nu'] = args.nu
 
-    # choose the anchor pair
+    # choose the anchor pair, canonicalised to its ANCHOR_PAIRS ordering (so
+    # "nu,G" works and the GUI radio can preselect it)
     if args.anchors:
-        anchors = tuple(a.strip() for a in args.anchors.split(','))
-        if len(anchors) != 2 or any(a not in ANCHOR_KEYS for a in anchors):
-            sys.exit('--anchors must be two of %s' % (ANCHOR_KEYS,))
+        pick = set(a.strip() for a in args.anchors.split(','))
+        anchors = next((p for p in ANCHOR_PAIRS if set(p) == pick), None)
+        if anchors is None:
+            sys.exit('--anchors must be two distinct keys of %s' % (ANCHOR_KEYS,))
     else:
         anchors = ('G', 'f')
 
-    # complete `values` so every anchor key has a starting value (for the sliders)
-    seed = solve_gflnu({k: values[k] for k in anchors})
-    values = {**seed, **values}
+    # complete `values`: fill L0/nu from the (G,f) closure so an --anchors
+    # pair naming them never KeyErrors when --L0/--nu were not given, let any
+    # CLI-given numbers override, then re-solve from the CHOSEN anchors so
+    # all four are mutually consistent with that pair.
+    values = {**solve_gflnu({'G': cli_vals['G'], 'f': cli_vals['f']}), **cli_vals}
+    values = solve_gflnu({k: values[k] for k in anchors})
 
     if args.static:
-        run_static(anchors, values, Fr)
+        run_static(anchors, values, Fr, data_dir=args.data_dir)
         return
 
-    # interactive: fall back to static if no usable GUI backend
+    # interactive; fall back to static when no GUI can open.  The backend-name
+    # check catches headless matplotlib; the subprocess preflight catches the
+    # harsher case where a GUI backend is selected but Qt cannot initialise
+    # any platform plugin and would SIGABRT the whole process (uncatchable).
+    import matplotlib
+    backend = matplotlib.get_backend().lower()
+    if backend in NON_INTERACTIVE_BACKENDS:
+        print('  [interactive unavailable: non-interactive backend %r]'
+              '  -> falling back to --static\n' % backend)
+        run_static(anchors, values, Fr, data_dir=args.data_dir)
+        return
+    if not _gui_preflight():
+        print('  [interactive unavailable: backend %r cannot open a window '
+              'here (no usable display / Qt platform plugin)]'
+              '  -> falling back to --static\n' % backend)
+        run_static(anchors, values, Fr, data_dir=args.data_dir)
+        return
     try:
-        import matplotlib
-        backend = matplotlib.get_backend().lower()
-        if backend in ('agg', 'pdf', 'ps', 'svg', 'template'):
-            raise RuntimeError('non-interactive backend %r' % backend)
-        run_interactive(values, Fr)
+        run_interactive(values, Fr, anchors=anchors, data_dir=args.data_dir)
     except Exception as exc:
-        print('  [interactive unavailable: %s]  -> falling back to --static\n' % exc)
-        run_static(anchors, values, Fr)
+        print('  [interactive failed: %s]  -> falling back to --static\n' % exc)
+        run_static(anchors, values, Fr, data_dir=args.data_dir)
 
 
 if __name__ == '__main__':

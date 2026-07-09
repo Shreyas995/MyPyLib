@@ -44,16 +44,24 @@ mode, so this runs where the cluster python lacks it.  All field files are
 opened strictly read-only ('rb'); nothing in this script ever writes back to
 flow.*/scal.* — only new *.npy/*.npz output files are created.
 
-WORKFLOW — never download the whole field, only the chosen 2-D plane(s):
+WORKFLOW — never download the whole field, only the chosen 2-D plane(s). The
+spanwise-mean <prefix>_xy.npz is ALWAYS written (quick-look / cross-case use,
+e.g. results.py's Ri_B collapse view) but it is a time+space AVERAGE: spanwise-
+averaging washes out the real patchy turbulent/quiescent structure. For a
+single run's spatial detail (what PhAvg_rotated.py's local plots want), request
+RAW K/I/J-index planes instead -- no averaging in that direction, so the
+plane's other two dimensions keep their real structure:
     # 1. on the cluster: compute γ (+ γ_b + conditional stats, automatically,
     #    if scal.<tag>.1 is present alongside each flow.<tag>.1/2/3), save,
-    #    and write ONE requested plane:
-    python3 Intermittency.py --workdir /path/to/case --save-full --slice z --index 0
+    #    and write RAW planes at the given K (spanwise/z), I (streamwise/x),
+    #    J (wall-normal/y) indices -- any/all of the three, comma-separated:
+    python3 Intermittency.py --workdir /path/to/case --save-full \\
+            --planesK 0,10,20 --planesI 100,500 --planesJ 5,40
     # 2. copy back the small  *_xy.npz / *_slice_*.npz  (a few MB), then LOCALLY:
-    python3 Intermittency.py --plot intermittency_xy.npz
+    python3 Intermittency.py --plot intermittency_slice_z0010.npz
     # extra planes later, no recompute (slices the saved 3-D velocity γ only):
     python3 Intermittency.py --workdir . --from-full intermittency_gamma3d.npy \\
-            --slice y --index 40
+            --planesJ 40
     # skip the scalar path even if scal.* is present (velocity γ only, faster):
     python3 Intermittency.py --workdir . --skip-scalar
 
@@ -505,6 +513,13 @@ def plot_npz(npz_path, out_png=None, field=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def _parse_idx_list(s):
+    """'10,15,20' -> [10, 15, 20]; None/'' -> []."""
+    if not s:
+        return []
+    return [int(v) for v in s.split(',') if v.strip() != '']
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -525,10 +540,16 @@ def main():
                     help='b0 = factor_b * e_b, the buoyancy threshold (own scale; default 1)')
     ap.add_argument('--delta', type=float, default=None,
                     help='BL-edge height (y units) for e_omega/e_b; default = auto delta_95')
-    ap.add_argument('--slice', default=None, choices=['x', 'y', 'z'],
-                    help='write this plane for download')
-    ap.add_argument('--index', type=int, default=0,
-                    help='plane index (0-based; negative wraps from the end)')
+    ap.add_argument('--planesK', default=None,
+                    help='comma-separated z-index (K, spanwise) planes to write RAW '
+                         '(no averaging), e.g. "0,10,20" -- each an (x, y-wall-normal) '
+                         'plane, the same orientation as a raw planesK.<iter> file')
+    ap.add_argument('--planesI', default=None,
+                    help='comma-separated x-index (I, streamwise) planes to write RAW '
+                         '-- each a (z-spanwise, y-wall-normal) plane')
+    ap.add_argument('--planesJ', default=None,
+                    help='comma-separated y-index (J, wall-normal) planes to write RAW '
+                         '-- each an (x, z-spanwise) plane')
     ap.add_argument('--save-full', action='store_true',
                     help='also save the whole 3-D field(s) (big; stays on cluster)')
     ap.add_argument('--from-full', default=None,
@@ -567,20 +588,36 @@ def main():
                 np.save(fp, f3d)
                 print(f"  wrote {fp}  ({f3d.nbytes / 1e9:.2f} GB, stays on cluster)")
 
-    # ---- always: spanwise-averaged plane(s) — the small valley intermittency
+    # ---- always: spanwise-averaged plane(s) — quick-look / cross-case use
+    # (e.g. results.py's Ri_B collapse view reads this). This is a time+space
+    # AVERAGE, not a substitute for the RAW per-plane output below — spanwise-
+    # averaging washes out real patchy turbulent/quiescent structure.
     planes = spanwise_mean_fields(fields3d, mask_er)
     fp = os.path.join(workdir, f'{args.out_prefix}_xy.npz')
     write_plane_npz(fp, planes, x, y, 'x', 'z (wall-normal)',
                     {**meta, 'reduction': 'spanwise-mean'})
 
-    # ---- requested plane ------------------------------------------------------
-    if args.slice:
+    # ---- requested RAW planes (no averaging in the slicing direction) --------
+    # Each is still the time-average over snapshots (eq 4.1 IS a time average —
+    # that part is physical, not a flaw) at ONE fixed K/I/J index; unlike the
+    # spanwise mean above, the plane's other two dimensions are untouched, so
+    # real spatial structure survives. Same naming as the old single
+    # --slice/--index (<prefix>_slice_<axis><idx>.npz) so existing consumers
+    # (results.py) keep working unchanged — just loop over as many indices
+    # as requested, across all three directions.
+    _requests = ([('z', i) for i in _parse_idx_list(args.planesK)] +
+                 [('x', i) for i in _parse_idx_list(args.planesI)] +
+                 [('y', i) for i in _parse_idx_list(args.planesJ)])
+    if not _requests:
+        print("  [note] no --planesK/--planesI/--planesJ given — only the "
+              "spanwise-mean plane was written.")
+    for _direction, _index in _requests:
         planes, ax_h, ax_v, hl, vl, idx = extract_slice_fields(
-            fields3d, args.slice, args.index, x, y, z, mask_er)
+            fields3d, _direction, _index, x, y, z, mask_er)
         out = os.path.join(workdir,
-                           f'{args.out_prefix}_slice_{args.slice}{idx:04d}.npz')
+                           f'{args.out_prefix}_slice_{_direction}{idx:04d}.npz')
         write_plane_npz(out, planes, ax_h, ax_v, hl, vl,
-                        {**meta, 'slice': f'{args.slice}={idx}'})
+                        {**meta, 'slice': f'{_direction}={idx}'})
 
 
 if __name__ == '__main__':

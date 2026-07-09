@@ -667,6 +667,12 @@ if (1 == postprocess):
     _avgU_1d = avg_c(eps, AvgPhU, axis=1)
     _avgW_1d = avg_c(eps, AvgPhW, axis=1)
     u_plus_rot = _avgU_1d * alphacos - _avgW_1d * alphasin
+    # Proper rotation R(alpha) into the geostrophic-aligned frame, then a
+    # DISPLAY sign flip: w_plus_rot = -(rotated spanwise).  The physical rotated
+    # spanwise mean is NEGATIVE near the wall (Ekman veer left of G, same sign
+    # as the smooth reference rW); the negation only plots the spiral in the
+    # positive quadrant.  Pickled as-is (w_plus_rot, inst_alpha) — see the note
+    # in saveresults.py and the FRAME ROTATION block of PhAvg_rotated.py.
     w_plus_rot = -(_avgU_1d * alphasin + _avgW_1d * alphacos)
     
     # Turning angle

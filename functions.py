@@ -1573,7 +1573,9 @@ def layer_legend_handles(symbols=('o', 's', '^', 'D'), oro=True, smooth=True,
     return h
 
 
-def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5):
+def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5,
+                      case_lines=False, shade_case=False,
+                      smooth_ls='--', smooth_color='grey'):
     """Add a separate, fine-print legend explaining the layer markers BELOW the
     x-axis label (outside the data area), without disturbing the plot's existing
     (line) legend.
@@ -1588,21 +1590,60 @@ def add_marker_legend(ax=None, oro=True, smooth=True, fontsize=6, markersize=5):
     default).  Call it AFTER the main legend has been created on the same axes.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     a = ax if ax is not None else plt.gca()
     main = a.get_legend()                 # main (line) legend already on the axes
-    handles = layer_legend_handles(oro=oro, smooth=smooth, markersize=markersize)
-    # Reserve whitespace beneath the axes so the footnote sits below the x-axis
-    # label and is still inside the figure canvas for a default (no bbox_inches)
-    # savefig — most callers save without bbox_inches='tight'.
-    a.figure.subplots_adjust(bottom=0.24)
-    leg = a.legend(handles=handles, loc='upper center',
-                   bbox_to_anchor=(0.5, -0.18), ncol=min(4, len(handles)),
-                   fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
-                   frameon=True, framealpha=0.7, facecolor='white',
-                   edgecolor='none')
+
+    # CASE / style keys: filled ● = valley, hollow ○ = smooth, plus (optional,
+    # case_lines) the line-style keys Valley (solid) and Smooth (dashed) that
+    # otherwise clutter the main line legend.
+    case_h = []
+    if oro:
+        case_h.append(Line2D([0], [0], ls='none', marker='o', color='black',
+                             markerfacecolor='black', markeredgecolor='black',
+                             markersize=markersize, label='valley (filled)'))
+    if smooth:
+        case_h.append(Line2D([0], [0], ls='none', marker='o', color='black',
+                             markerfacecolor='none', markeredgecolor='black',
+                             markersize=markersize, label='smooth (hollow)'))
+    if case_lines:
+        case_h.append(Line2D([0], [0], color='black', ls='-', label='Valley'))
+        case_h.append(Line2D([0], [0], color=smooth_color, ls=smooth_ls, label='Smooth'))
+
+    if not shade_case:
+        # ── Original single-legend footnote (default behaviour, unchanged) ──
+        handles = layer_legend_handles(oro=oro, smooth=smooth, markersize=markersize)
+        if case_lines:
+            handles = handles + case_h[-2:]        # append only the two line keys
+        a.figure.subplots_adjust(bottom=0.24)
+        leg = a.legend(handles=handles, loc='upper center',
+                       bbox_to_anchor=(0.5, -0.18), ncol=min(4, len(handles)),
+                       fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
+                       frameon=True, framealpha=0.7, facecolor='white',
+                       edgecolor='none')
+        if main is not None:
+            a.add_artist(main)            # restore the main legend a.legend() displaced
+        return leg
+
+    # ── Split footnote: layer-SHAPE markers (unshaded, top) and CASE/style
+    # markers (SHADED grey box, bottom) so the two marker kinds read as distinct
+    # groups.  The shaded box groups valley/smooth fill + the Valley/Smooth lines.
+    shape_h = layer_legend_handles(oro=False, smooth=False, markersize=markersize)
+    a.figure.subplots_adjust(bottom=0.30)
+    leg_shape = a.legend(handles=shape_h, loc='upper center',
+                         bbox_to_anchor=(0.5, -0.15), ncol=min(4, len(shape_h)),
+                         fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
+                         frameon=True, framealpha=0.7, facecolor='white',
+                         edgecolor='none')
+    a.add_artist(leg_shape)
+    leg_case = a.legend(handles=case_h, loc='upper center',
+                        bbox_to_anchor=(0.5, -0.29), ncol=min(4, len(case_h)),
+                        fontsize=fontsize, handletextpad=0.3, columnspacing=0.9,
+                        frameon=True, framealpha=0.9, facecolor='0.85',
+                        edgecolor='0.4')
     if main is not None:
-        a.add_artist(main)                # restore the main legend a.legend() displaced
-    return leg
+        a.add_artist(main)                # restore the main line legend
+    return leg_case
 
 
 def streamfunction_2d(U, V, x, y, mask=None):
