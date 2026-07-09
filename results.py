@@ -701,13 +701,37 @@ def _smooth_field_2d(field_key):
     #                           stratified flat-wall .nc is available.
     #   DispVel* -> Disp_*_s  : temporal-deviation proxy (see the smooth-load block);
     #                           the flat wall has no true spatial dispersive field.
+    # ── Stress families on the flat wall ────────────────────────────────────
+    # The .nc stores ONLY the single-point Reynolds stresses ⟨u'_i u'_j⟩
+    # (Rxx/Rxy/Rxz/Ryy/Ryz/Rzz) — it carries NO triple decomposition.  A flat
+    # wall is x-homogeneous, so the dispersive stress ũ_iũ_j ≡ 0 and hence the
+    # turbulent part ⟨u''_i u''_j⟩ is not an independent quantity there.
+    # Therefore:
+    #   reyn_*  (Reynolds stress)   -> R** directly           [smooth panel OK]
+    #   tot_*   (total momentum)    -> ⟨u_i⟩⟨u_j⟩ + R**       [smooth panel OK]
+    #                                  (same form as the orographic case, whose
+    #                                   turbulent part equals R** on a flat wall)
+    #   rey_*   (turbulent stress)  -> NOT DEFINED here       [no smooth panel]
+    #   *_disp  (dispersive stress) -> identically 0          [no smooth panel]
+    # Engineering index -> .nc axis: u=x (streamwise), v=y (wall-normal),
+    # w=z (spanwise); means rU_s / rV_s / rW_s respectively.
+    _R  = {'uu': Rxx_s, 'uv': Rxy_s, 'uw': Rxz_s,
+           'vv': Ryy_s, 'vw': Ryz_s, 'ww': Rzz_s}
+    _M  = {'u': rU_s, 'v': rV_s, 'w': rW_s}
+    if field_key.startswith('reyn_'):
+        return _R.get(field_key[5:])
+    if field_key.startswith('tot_'):
+        _ek = field_key[4:]
+        _r, _a, _b = _R.get(_ek), _M.get(_ek[:1]), _M.get(_ek[1:2])
+        if _r is None or _a is None or _b is None:
+            return None
+        return _a * _b + _r                     # ⟨u_i⟩⟨u_j⟩ + ⟨u'_i u'_j⟩
+
     return {
         'AvgPhU': rU_s, 'AvgPhV': rV_s, 'AvgPhW': rW_s, 'AvgP': rP_s,
         'AvgScal': rs_s,
         'DispVelU': Disp_U_s, 'DispVelV': Disp_V_s, 'DispVelW': Disp_W_s,
         'TKE':    TKE_s,
-        'rey_uv': Rxy_s, 'rey_uu': Rxx_s,
-        'rey_vv': Ryy_s, 'rey_ww': Rzz_s,
         # Product-of-phase-average (mean-flow) stresses.  Flat wall is
         # x-homogeneous so ⟨q⟩≡q̄; only the terms without the ~0 wall-normal
         # mean (rV_s) have a real analog → ⟨u⟩² and ⟨v⟩²(spanwise, rW_s²).
@@ -759,9 +783,64 @@ def _overlay_iso_contours(ax, x, z, fld, vmin, vmax,
               manual=manual if manual else None)
 
 
+# ── Colour-scale policy, shared by plot2D_allFr and plot2D_div_allcases ──────
+# (1) ZERO-CENTRED DIVERGING SCALES.  Whenever a diverging colormap is used on a
+#     field that really goes negative, the limits are made SYMMETRIC about zero
+#     (vmin = -V, vmax = +V, V = max|field|).  The neutral colour therefore always
+#     means exactly 0, and the mapping stays LINEAR — equal colour distance is
+#     equal value distance on both sides of zero.  This holds whether the panels
+#     share a scale or not.  Because each panel is symmetric, the global min/max
+#     over panels is symmetric too, so a shared scale is centred automatically.
+#     The price is that the colorbar ends at ±V rather than at the true [min,max];
+#     the true data range is printed in the colorbar label instead (_range_note).
+# (2) AUTOMATIC SHARED SCALE.  shared_scale='auto' shares one scale when every
+#     panel's magnitude V falls in the SAME power-of-ten decade, and falls back to
+#     per-panel scales when the cases differ by more than a decade (a shared scale
+#     would then flatten the weaker panels into a single colour).
+#     NB: the decade test is a hard boundary — panels at V=0.99 and V=1.01 are 2 %
+#     apart but sit in different decades and will be split.  Pass shared_scale=True
+#     / False to override on any figure where that matters.
+def _panel_limits(fld, cmap_name, epsilon=1e-4):
+    """(vmin, vmax) for ONE panel, zero-centred when diverging (see policy above)."""
+    _fmin = float(np.nanmin(fld))
+    _fmax = float(np.nanmax(fld))
+    if (cmap_name in _DIVERGING_CMAPS) and _fmin < -epsilon:
+        _v = max(abs(_fmin), abs(_fmax))          # symmetric → white == 0, linear
+        return -_v, _v
+    return (0.0 if _fmin >= -epsilon else _fmin), _fmax
+
+def _scale_mag(vmin, vmax):
+    """Characteristic magnitude of a panel's colour scale (used by the decade test)."""
+    return max(abs(vmin), abs(vmax))
+
+def _same_decade(mags):
+    """True when every non-zero magnitude shares one power-of-ten decade."""
+    _m = [abs(float(v)) for v in mags if np.isfinite(v) and abs(v) > 0.0]
+    if len(_m) < 2:
+        return True
+    _d = [int(np.floor(np.log10(v))) for v in _m]
+    return max(_d) == min(_d)
+
+def _resolve_shared(shared_scale, mags, what=''):
+    """Resolve shared_scale True / False / 'auto' to a bool (see policy above)."""
+    if shared_scale != 'auto':
+        return bool(shared_scale)
+    _sh = _same_decade(mags)
+    if not _sh:
+        print('  [auto-scale] %s: panel magnitudes span >1 decade '
+              '(%s) → per-panel scales' % (what, ', '.join('%.3g' % m for m in mags)))
+    return _sh
+
+def _range_note(cbar_label, dmin, dmax):
+    """Colorbar label carrying the TRUE data range, since a symmetric zero-centred
+    scale ends at ±V rather than at [min, max]."""
+    _note = r'data range: [%.3g, %.3g]' % (dmin, dmax)
+    return _note if not cbar_label else '%s\n%s' % (cbar_label, _note)
+
+
 def plot2D_allFr(field_key, suptitle, cmap_name, savename,
                  ylim=None, use_inner=True, cbar_label=None,
-                 include_smooth=True, shared_scale=False,
+                 include_smooth=True, shared_scale='auto',
                  overlay_contours=False, n_contours=8, contour_fmt='%.3g'):
     if ylim is None:
         ylim = limity
@@ -801,39 +880,31 @@ def plot2D_allFr(field_key, suptitle, cmap_name, savename,
                              constrained_layout=True)
     _axflat = axes.ravel()
 
-    # Per-panel colour limits: each panel gets its OWN scale + colorbar so
-    # minor per-case structure is not washed out by a single global min/max.
-    # shared_scale=True (P01–P03) overrides this: ALL panels share ONE common
-    # scale spanning the global [min, max] across every panel, drawn with a
-    # single figure-wide colorbar whose end ticks mark that lowest / highest
-    # value (per the request that the combined legend show the global extremes).
-    _epsilon = 1e-4
-    _fb = 1 if shared_scale else 0   # +1 font bump on the shared-scale (P01–P03) figures
-    if shared_scale:
-        _gmin = min(float(np.nanmin(_p[3][:_p[4], :])) for _p in _panels)
-        _gmax = max(float(np.nanmax(_p[3][:_p[4], :])) for _p in _panels)
+    # Colour limits per the policy above: every panel is zero-centred when the
+    # map is diverging; the panels then either share one scale (+ one figure-wide
+    # colorbar) or keep their own (+ a colorbar each).
+    _crop = [_p[3][:_p[4], :] for _p in _panels]
+    _lims = [_panel_limits(_f, cmap_name) for _f in _crop]
+    _shared = _resolve_shared(shared_scale,
+                              [_scale_mag(*_l) for _l in _lims], savename)
+    _fb = 1 if _shared else 0   # +1 font bump on the shared-scale figures
+    if _shared:
+        # Panel limits are already symmetric for a diverging map, so the global
+        # min/max over them is symmetric too → the shared scale is zero-centred.
+        _gmin = min(_l[0] for _l in _lims)
+        _gmax = max(_l[1] for _l in _lims)
+        # True data range across all panels — reported in the colorbar label,
+        # because a symmetric scale's end ticks are ±V, not the real extremes.
+        _dmin = min(float(np.nanmin(_f)) for _f in _crop)
+        _dmax = max(float(np.nanmax(_f)) for _f in _crop)
 
     _pcm = None
     for _i, _pan in enumerate(_panels):
         lbl, _xp, _zp, _fld_full, _jl, _xo, _yo = _pan[:7]
         _eps = _pan[7] if len(_pan) > 7 else None
         ax = _axflat[_i]
-        _fld = _fld_full[:_jl, :]
-        if shared_scale:
-            # Common scale = exact global data range → end ticks are the true
-            # lowest / highest value across all subplots.
-            _vmin, _vmax = _gmin, _gmax
-        else:
-            _fmin = float(np.nanmin(_fld))
-            _fmax = float(np.nanmax(_fld))
-            _has_neg = _fmin < -_epsilon
-            _diverging = (cmap_name in _DIVERGING_CMAPS) and _has_neg
-            if _diverging:
-                _vmax = max(abs(_fmin), _fmax)
-                _vmin = -_vmax
-            else:
-                _vmin = 0.0 if _fmin >= -_epsilon else _fmin
-                _vmax = _fmax
+        _fld = _crop[_i]
+        _vmin, _vmax = (_gmin, _gmax) if _shared else _lims[_i]
         _pcm = ax.pcolormesh(_xp, _zp[:_jl], _fld, cmap=cmap_name,
                              vmin=_vmin, vmax=_vmax, shading='auto')
         if _eps is not None:
@@ -854,33 +925,39 @@ def plot2D_allFr(field_key, suptitle, cmap_name, savename,
         if ax.get_subplotspec().is_first_col():
             ax.set_ylabel(r'$z^+$' if use_inner else r'$z$', fontsize=10 + _fb)
         if _fb:
-            ax.tick_params(labelsize=10 + _fb)   # axis scale numbers (P01–P03)
-        if not shared_scale:
-            # One colorbar per panel (own scale)
+            ax.tick_params(labelsize=10 + _fb)   # axis scale numbers
+        if not _shared:
+            # One colorbar per panel (own zero-centred scale); its own true range
+            # is on the label, since ±V hides the weaker of the two extremes.
             _cb = fig.colorbar(_pcm, ax=ax, orientation='vertical',
                                shrink=0.9, pad=0.02)
-            if cbar_label is not None:
-                _cb.set_label(cbar_label, fontsize=8)
+            _cb.set_label(_range_note(cbar_label, float(np.nanmin(_fld)),
+                                      float(np.nanmax(_fld))), fontsize=7)
             _cb.ax.tick_params(labelsize=7)
 
     # Blank any unused grid cells (e.g. the 6th slot when 5 panels present)
     for _j in range(npan, nrows * ncols):
         _axflat[_j].axis('off')
 
-    if shared_scale and _pcm is not None:
-        # Single figure-wide colorbar shared by every panel; end ticks pinned to
-        # the global lowest / highest value so the combined scale marks both.
+    if _shared and _pcm is not None:
+        # Single figure-wide colorbar shared by every panel.  Ticks span the
+        # symmetric scale (so 0 is always a tick); the TRUE global [min, max] is
+        # spelled out on the label.
         _cb = fig.colorbar(_pcm, ax=list(_axflat[:npan]),
                            orientation='vertical', shrink=0.9, pad=0.02)
         _cb.set_ticks(np.linspace(_gmin, _gmax, 5))
-        if cbar_label is not None:
-            _cb.set_label(cbar_label, fontsize=8 + _fb)
+        _cb.set_label(_range_note(cbar_label, _dmin, _dmax), fontsize=8 + _fb)
         _cb.ax.tick_params(labelsize=7 + _fb)   # legend (colorbar) numbers
 
     fig.suptitle(suptitle, fontsize=11 + _fb)
     _out = _figdir + savename
     fig.savefig(_out, dpi=300, bbox_inches='tight')
     print(f'Saved: {_out}')
+    # Release the figure (and the panel copies matplotlib holds) — this script
+    # draws dozens of multi-panel figures; leaving them open pins every field
+    # array for the whole run.  The PNG is already on disk.
+    plt.close(fig)
+    _panels.clear()
 
 # _shade_ibm / plot2D_div_allcases use _IBM_COLOR (set in the plotRes block).
 def _shade_ibm(ax, _x, _y, eps_arr):
@@ -897,8 +974,10 @@ def _shade_ibm(ax, _x, _y, eps_arr):
 
 def plot2D_div_allcases(panels, field_label, suptitle, savename, cmap='seismic',
                         xname=r'$x$', yname=r'$z$', ylim_top=None,
-                        zero_contour=False, vmax_pct=None):
-    """Plot multiple 2D diverging fields side-by-side, per-panel colourbars.
+                        zero_contour=False, vmax_pct=None,
+                        shared_scale='auto', overlay_contours=False,
+                        n_contours=8, contour_fmt='%.3g'):
+    """Plot multiple 2D diverging fields side-by-side.
 
     panels : (label, x_arr, y_arr, field_arr[ny,nx], xfill, yfill[, eps_arr])
              An optional 7th element eps_arr (cropped to the same rows as
@@ -907,9 +986,18 @@ def plot2D_div_allcases(panels, field_label, suptitle, savename, cmap='seismic',
     xname/yname  : axis labels (default physical x/z; pass x+/z+ for inner).
     ylim_top     : if set, cap every panel's wall-normal axis at this value.
     zero_contour : draw the field = 0 isoline (used for the separation shear).
-    vmax_pct     : if set, clip the per-panel symmetric scale to this
-                   percentile of |field| (keeps small-signed pockets visible
-                   when the field has a large near-wall extreme).
+    vmax_pct     : if set, clip the symmetric scale to this percentile of
+                   |field| (keeps small-signed pockets visible when the field
+                   has a large near-wall extreme).
+    shared_scale : True / False / 'auto' — one symmetric scale spanning ALL
+                   panels + a single figure-wide colorbar, instead of a
+                   per-panel scale + colorbar.  'auto' shares when every panel's
+                   magnitude sits in the same power-of-ten decade.
+    overlay_contours : labelled black iso-contour lines on every panel
+                   (same convention as plot2D_allFr: solid +, dotted −).
+
+    Every scale here is symmetric about zero (this is a diverging-field plotter),
+    so the neutral colour always means exactly 0 and the mapping stays linear.
     """
     n = len(panels)
     if n == 0:
@@ -919,26 +1007,43 @@ def plot2D_div_allcases(panels, field_label, suptitle, savename, cmap='seismic',
                              figsize=(4.6 * ncols, 5.0 * nrows),
                              squeeze=False, constrained_layout=True)
     _axflat = axes.ravel()
-    # Per-panel symmetric colour scale + colorbar (each panel keeps its own
-    # scale so small-signed structure is not washed out by a global min/max).
-    for _i, _pan in enumerate(panels):
-        lbl, _x, _y, fld, xfill, yfill = _pan[:6]
+
+    # Blank the solid to NaN up-front so masked-to-0 derivatives neither set the
+    # colour scale nor draw a false 0-isoline along the body boundary.
+    _flds = []
+    for _pan in panels:
+        fld = _pan[3]
         _eps = _pan[6] if len(_pan) > 6 else None
-        ax = _axflat[_i]
-        # Blank the solid to NaN so masked-to-0 derivatives neither set the
-        # colour scale nor draw a false 0-isoline along the body boundary.
-        if _eps is not None:
-            fld = np.where(_eps > 0.5, np.nan, fld)
+        _flds.append(np.where(_eps > 0.5, np.nan, fld) if _eps is not None else fld)
+
+    def _sym_vmax(_f):
         if vmax_pct is not None:
-            _vmax = float(np.nanpercentile(np.abs(fld), vmax_pct)) or 1.0
-        else:
-            _vmax = max(abs(np.nanmin(fld)), abs(np.nanmax(fld))) or 1.0
+            return float(np.nanpercentile(np.abs(_f), vmax_pct)) or 1.0
+        return max(abs(np.nanmin(_f)), abs(np.nanmax(_f))) or 1.0
+
+    # ONE symmetric scale across every panel, or a symmetric scale per panel so
+    # small-signed structure is not washed out.  Either way 0 is at the neutral
+    # colour.  'auto' → share only while all panels sit in the same decade.
+    _vmaxes = [_sym_vmax(_f) for _f in _flds]
+    _shared = _resolve_shared(shared_scale, _vmaxes, savename)
+    _gvmax = max(_vmaxes) if _shared else None
+
+    _pcm = None
+    for _i, _pan in enumerate(panels):
+        lbl, _x, _y, _, xfill, yfill = _pan[:6]
+        _eps = _pan[6] if len(_pan) > 6 else None
+        fld = _flds[_i]
+        ax = _axflat[_i]
+        _vmax = _gvmax if _shared else _vmaxes[_i]
         _vmin = -_vmax
         _pcm = ax.pcolormesh(_x, _y, fld, cmap=cmap,
                              vmin=_vmin, vmax=_vmax, shading='auto')
         if zero_contour:
             ax.contour(_x, _y, fld, levels=[0.0], colors='k',
                        linewidths=0.3, linestyles=':')
+        if overlay_contours:
+            _overlay_iso_contours(ax, _x, _y, fld, _vmin, _vmax,
+                                  n_contours=n_contours, fmt=contour_fmt)
         if _eps is not None:
             _shade_ibm(ax, _x, _y, _eps)          # true eps==1 region
         elif len(xfill) > 0:
@@ -949,16 +1054,28 @@ def plot2D_div_allcases(panels, field_label, suptitle, savename, cmap='seismic',
         ax.set_xlabel(xname)
         if ax.get_subplotspec().is_first_col():
             ax.set_ylabel(yname)
-        _cb = fig.colorbar(_pcm, ax=ax, orientation='vertical',
-                           shrink=0.9, pad=0.02)
-        _cb.set_label(field_label, fontsize=8)
-        _cb.ax.tick_params(labelsize=7)
+        if not _shared:
+            _cb = fig.colorbar(_pcm, ax=ax, orientation='vertical',
+                               shrink=0.9, pad=0.02)
+            _cb.set_label(_range_note(field_label, float(np.nanmin(fld)),
+                                      float(np.nanmax(fld))), fontsize=7)
+            _cb.ax.tick_params(labelsize=7)
     for _j in range(n, nrows * ncols):
         _axflat[_j].axis('off')
+    if _shared and _pcm is not None:
+        _cb = fig.colorbar(_pcm, ax=list(_axflat[:n]),
+                           orientation='vertical', shrink=0.9, pad=0.02)
+        _cb.set_ticks(np.linspace(-_gvmax, _gvmax, 5))
+        _dmin = min(float(np.nanmin(_f)) for _f in _flds)
+        _dmax = max(float(np.nanmax(_f)) for _f in _flds)
+        _cb.set_label(_range_note(field_label, _dmin, _dmax), fontsize=8)
+        _cb.ax.tick_params(labelsize=7)
     fig.suptitle(suptitle, fontsize=11)
     _out = _figdir + savename
     fig.savefig(_out, dpi=300, bbox_inches='tight')
     print(f'Saved: {_out}')
+    plt.close(fig)          # free the figure + its copies of the panel arrays
+    _flds.clear()
 
 # _gradP_case uses _sc_gradP (= nu/u*^3, set in the plotRes block).
 def _gradP_case(cn, axis):
@@ -1790,8 +1907,8 @@ if os.path.exists(_nc_smooth):
     G_x_s = _sm['G_x_s']; G_z_s = _sm['G_z_s']; G_s = _sm['G_s']
     U_s_p = _sm['U_s_p']; W_s_p = _sm['W_s_p']
     GblU_s = _sm['GblU_s']; GblW_s = _sm['GblW_s']
-    Rxx_s = _sm['Rxx_s']; Rxy_s = _sm['Rxy_s']; Ryy_s = _sm['Ryy_s']
-    Ryz_s = _sm['Ryz_s']; Rzz_s = _sm['Rzz_s']
+    Rxx_s = _sm['Rxx_s']; Rxy_s = _sm['Rxy_s']; Rxz_s = _sm['Rxz_s']
+    Ryy_s = _sm['Ryy_s']; Ryz_s = _sm['Ryz_s']; Rzz_s = _sm['Rzz_s']
     TKE_s = _sm['TKE_s']
     cor_yx_s = _sm['cor_yx_s']; I_corr_yx_s = _sm['I_corr_yx_s']
     du_dy_s = _sm['du_dy_s']; visc_yx_s = _sm['visc_yx_s']; tau_yx_s = _sm['tau_yx_s']
@@ -1981,26 +2098,40 @@ if (1 == plotRes):
     ###########################################################################
 
     plot2D_allFr('AvgPhU',   r'Ph-avg $\langle\bar{u}\rangle$ — Re=500',              'Reds',  'P01_PhAvgU_allFr.png',
-                 shared_scale=True, overlay_contours=True, n_contours=8 )
-    plot2D_allFr('AvgPhV',   r'Ph-avg wall-normal $\langle\bar{w}\rangle$ — Re=500',  'RdBu_r',  'P02_PhAvgV_allFr.png',
-                 include_smooth=False, shared_scale=True,   # smooth rV_s is ~0 (machine noise), no real data
-                 overlay_contours=True, n_contours=8)
-    plot2D_allFr('AvgPhW',   r'Ph-avg spanwise $\langle\bar{v}\rangle$ — Re=500',     'RdBu_r',  'P03_PhAvgW_allFr.png',
-                 shared_scale=True, overlay_contours=True, n_contours=8)
+                 shared_scale=True, overlay_contours=True, n_contours=12 )
     
-    STOP
-    plot2D_allFr('AvgP',     r'Ph-avg pressure $\langle\bar{p}\rangle$ — Re=500',     'PiYG',    'P04_AvgP_allFr.png')
+    plot2D_allFr('AvgPhV',   r'Ph-avg wall-normal $\langle\bar{w}\rangle$ — Re=500',  'RdBu_r',  'P02_PhAvgV_allFr.png',
+                 include_smooth=True, shared_scale=True,   # smooth rV_s is ~0 (machine noise), no real data
+                 overlay_contours=True, n_contours=10)
+    
+    plot2D_allFr('AvgPhW',   r'Ph-avg spanwise $\langle\bar{v}\rangle$ — Re=500',     'RdBu_r',  'P03_PhAvgW_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    
+    plot2D_allFr('AvgP',     r'Ph-avg pressure $\langle\bar{p}\rangle$ — Re=500',     'PiYG',    'P04_AvgP_allFr.png', 
+                 overlay_contours=True, n_contours=12)
+    
     plot2D_allFr('AvgScal',  r'Ph-avg potential temperature $\langle\bar{\theta}\rangle$ — Re=500', 'inferno', 'P05_PotTemp_allFr.png',
-                 cbar_label=r'$\langle\overline{\theta}\rangle$ (buoyancy $b$)')
-    plot2D_allFr('DispVelU', r'Dispersive streamwise $\tilde{u}$ — Re=500',           'RdBu_r',  'P06_DispU_allFr.png')
-    plot2D_allFr('DispVelV', r'Dispersive wall-normal $\tilde{w}$ — Re=500',          'RdBu_r',  'P07_DispV_allFr.png')
-    plot2D_allFr('DispVelW', r'Dispersive spanwise $\tilde{v}$ — Re=500',             'RdBu_r',  'P08_DispW_allFr.png')
+                 shared_scale=True, cbar_label=r'$\langle\overline{\theta}\rangle$ (buoyancy $b$)', overlay_contours=True, n_contours=12)
+    
+    plot2D_allFr('DispVelU', r'Dispersive streamwise $\tilde{u}$ — Re=500',           'RdBu_r',  'P06_DispU_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    
+    plot2D_allFr('DispVelV', r'Dispersive wall-normal $\tilde{w}$ — Re=500',          'RdBu_r',  'P07_DispV_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    
+    plot2D_allFr('DispVelW', r'Dispersive spanwise $\tilde{v}$ — Re=500',             'RdBu_r',  'P08_DispW_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    
     # Raw turbulent kinetic energy k = ½⟨u_i'u_i'⟩ (NOT wall-normalised — the z+/x+
     # axes use the single 0.0618 reference l_in, but the field is raw, shared scale).
     plot2D_allFr('TKE',      r'Turbulent kinetic energy — Re=500',                   'hot_r',   'P09_TKE_allFr.png',
-                 cbar_label=r"$k=\frac{1}{2}\,\overline{u_i'u_i'}$ (raw)")
-    plot2D_allFr('disp_vortz', r'Dispersive vorticity $\tilde{\omega}_y$ — Re=500',   'coolwarm','P10_disp_vortz_allFr.png', ylim=200)
-    plot2D_allFr('vort_z',   r'Ph-avg vorticity $\langle\bar{\omega}_y\rangle$ — Re=500', 'coolwarm','P11_vort_z_allFr.png', ylim=200)
+                 cbar_label=r"$k=\frac{1}{2}\,\overline{u_i'u_i'}$ (raw)", shared_scale=True, overlay_contours=True, n_contours=12)
+    
+    plot2D_allFr('disp_vortz', r'Dispersive vorticity $\tilde{\omega}_y$ — Re=500',   'coolwarm','P10_disp_vortz_allFr.png', ylim=200,
+                 overlay_contours=True, n_contours=12)
+    plot2D_allFr('vort_z',   r'Ph-avg vorticity $\langle\bar{\omega}_y\rangle$ — Re=500', 'coolwarm','P11_vort_z_allFr.png', ylim=200,
+                 overlay_contours=True, n_contours=12)
+    
     # ── Stress-tensor families (symmetric tensor → 6 independent components each) ──
     # The pickle stores the TURBULENT stress rey_* (⟨u''_i u''_j⟩) and the DISPERSIVE
     # stress *_disp (ũ_iũ_j).  Reconstruct per case the REYNOLDS stress
@@ -2008,44 +2139,72 @@ if (1 == plotRes):
     # ⟨u_i u_j⟩ = ⟨u_i⟩⟨u_j⟩ + turbulent, then plot all FOUR families × 6 components.
     # (rey_* was previously plotted as "Reynolds stress" — it is the TURBULENT part.)
     # Met labels: AvgPhU=⟨u⟩, AvgPhV=⟨w⟩ (wall-normal), AvgPhW=⟨v⟩ (spanwise).
-    _SCOMP = [('uu', 'AvgPhU', 'AvgPhU'), ('uv', 'AvgPhU', 'AvgPhV'),
-              ('uw', 'AvgPhU', 'AvgPhW'), ('vv', 'AvgPhV', 'AvgPhV'),
-              ('vw', 'AvgPhV', 'AvgPhW'), ('ww', 'AvgPhW', 'AvgPhW')]
+    _SCOMP = {'uu': ('AvgPhU', 'AvgPhU'), 'uv': ('AvgPhU', 'AvgPhV'),
+              'uw': ('AvgPhU', 'AvgPhW'), 'vv': ('AvgPhV', 'AvgPhV'),
+              'vw': ('AvgPhV', 'AvgPhW'), 'ww': ('AvgPhW', 'AvgPhW')}
     _DISP_KEY = {'uu': 'UU_disp', 'uv': 'UV_disp', 'uw': 'UW_disp',
                  'vv': 'VV_disp', 'vw': 'VW_disp', 'ww': 'WW_disp'}
-    for _cn in SIM_NAMES:
-        _sd = sims.get(_cn)
-        if _sd is None:
-            continue
-        for _ek, _ia, _ib in _SCOMP:
+
+    def _build_stress(_ek):
+        """Materialise the derived reyn_<ek> / tot_<ek> in every case dict.
+
+        Returns the (case, key) pairs created so the caller can free them once
+        the figures that read them are drawn: each array is ny*nx float64
+        (~6 MB), and 6 components x 2 derived families x N cases would otherwise
+        stay resident for the whole run."""
+        _added = []
+        _ia, _ib = _SCOMP[_ek]
+        for _cn in SIM_NAMES:
+            _sd = sims.get(_cn)
+            if _sd is None:
+                continue
             _turb = gv('rey_%s' % _ek, _cn)
             _disp = gv(_DISP_KEY[_ek], _cn)
             _a = gv(_ia, _cn); _b = gv(_ib, _cn)
             if _turb is not None and _disp is not None:
                 _sd['reyn_%s' % _ek] = _turb + _disp              # Reynolds ⟨u'_i u'_j⟩
+                _added.append((_cn, 'reyn_%s' % _ek))
             if _turb is not None and _a is not None and _b is not None:
                 _sd['tot_%s' % _ek] = _a * _b + _turb             # Total ⟨u_i u_j⟩
+                _added.append((_cn, 'tot_%s' % _ek))
+        return _added
+
     # engineering component -> meteorological display label (v↔w swap)
     _MET = {'uu': 'uu', 'uv': 'uw', 'uw': 'uv', 'vv': 'ww', 'vw': 'wv', 'ww': 'vv'}
-    # (variable-key builder, family label, math-notation format)
+    # (key builder, family label, math fmt, include_smooth, shared_scale, n_contours)
+    # The smooth flat-wall .nc carries ONLY the Reynolds stresses ⟨u'_iu'_j⟩ — no
+    # triple decomposition — so it appears on the Total and Reynolds families and
+    # is EXCLUDED from the Turbulent and Dispersive ones (see _smooth_field_2d).
     _STRESS_FAMILIES = [
-        (lambda ek: 'tot_%s'  % ek, 'Total momentum',    r'$\langle %s%s\rangle$'),
-        (lambda ek: 'reyn_%s' % ek, 'Reynolds stress',   r"$\langle %s'%s'\rangle$"),
-        (lambda ek: 'rey_%s'  % ek, 'Turbulent stress',  r"$\langle %s''%s''\rangle$"),
-        (lambda ek: _DISP_KEY[ek],  'Dispersive stress', r'$\widetilde{%s}\widetilde{%s}$'),
+        (lambda ek: 'tot_%s'  % ek, 'Total momentum',    r'$\langle %s%s\rangle$',
+         True,  True,  10),
+        (lambda ek: 'reyn_%s' % ek, 'Reynolds stress',   r"$\langle %s'%s'\rangle$",
+         True,  True,  10),
+        (lambda ek: 'rey_%s'  % ek, 'Turbulent stress',  r"$\langle %s''%s''\rangle$",
+         False, False, 12),
+        (lambda ek: _DISP_KEY[ek],  'Dispersive stress', r'$\widetilde{%s}\widetilde{%s}$',
+         False, True,  10),
     ]
     # Figure-number prefix per stress family (P12-P15); the 6 components of a
     # family share its number, as the P37-42 shear-stress block does.
     _STRESS_PNUM = {'Total': 'P12', 'Reynolds': 'P13',
                     'Turbulent': 'P14', 'Dispersive': 'P15'}
-    for _vkey, _flabel, _nfmt in _STRESS_FAMILIES:
-        for _ek in ('uu', 'uv', 'uw', 'vv', 'vw', 'ww'):
-            _ml   = _MET[_ek]
-            _cmap = 'RdBu_r' if _ek in ('uv', 'uw', 'vw') else 'hot_r'   # shear diverging; normals ≥0
+    # Component-outer / family-inner so the two derived families for a component
+    # are built once, used by both figures, then released before the next one.
+    for _ek in ('uu', 'uv', 'uw', 'vv', 'vw', 'ww'):
+        _added = _build_stress(_ek)
+        _ml   = _MET[_ek]
+        _cmap = 'RdBu_r' if _ek in ('uv', 'uw', 'vw') else 'hot_r'   # shear diverging; normals ≥0
+        for _vkey, _flabel, _nfmt, _ism, _ish, _nctr in _STRESS_FAMILIES:
             _fam   = _flabel.split()[0]
             _title = '%s %s — Re=500' % (_flabel, _nfmt % (_ml[0], _ml[1]))
             _save  = '%s_%s_R%s_allFr.png' % (_STRESS_PNUM[_fam], _fam, _ml)
-            plot2D_allFr(_vkey(_ek), _title, _cmap, _save)
+            plot2D_allFr(_vkey(_ek), _title, _cmap, _save,
+                         include_smooth=_ism, shared_scale=_ish,
+                         overlay_contours=True, n_contours=_nctr)
+        for _cn, _k in _added:
+            sims[_cn].pop(_k, None)      # free reyn_<ek> / tot_<ek>
+        _added = None
 
     # Mean-flow (product-of-phase-average) stresses ⟨u_i⟩⟨u_j⟩ — the mean×mean
     # term of the momentum flux, the counterpart to the turbulent ⟨u_i''u_j''⟩ and
@@ -2071,21 +2230,35 @@ if (1 == plotRes):
     # (matching the dispersive-stress panels).  include_smooth=False on the two
     # terms carrying the ~0 flat-wall wall-normal mean (⟨w⟩), as for P02.
     plot2D_allFr('PhUV_mean', r'Mean-flow stress $\langle u\rangle\langle w\rangle$ — Re=500', 'RdBu_r', 'P85_PhUV_mean_allFr.png',
-                 include_smooth=False)
-    plot2D_allFr('PhUU_mean', r'Mean-flow stress $\langle u\rangle\langle u\rangle$ — Re=500', 'hot_r',  'P86_PhUU_mean_allFr.png')
+                 include_smooth=False, shared_scale=True, overlay_contours=True, n_contours=12)
+    plot2D_allFr('PhUU_mean', r'Mean-flow stress $\langle u\rangle\langle u\rangle$ — Re=500', 'hot_r',  'P86_PhUU_mean_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
     plot2D_allFr('PhVV_mean', r'Mean-flow stress $\langle w\rangle\langle w\rangle$ — Re=500', 'hot_r',  'P87_PhVV_mean_allFr.png',
-                 include_smooth=False)
-    plot2D_allFr('PhWW_mean', r'Mean-flow stress $\langle v\rangle\langle v\rangle$ — Re=500', 'hot_r',  'P88_PhWW_mean_allFr.png')
+                 include_smooth=False, shared_scale=True, overlay_contours=True, n_contours=12)
+    plot2D_allFr('PhWW_mean', r'Mean-flow stress $\langle v\rangle\langle v\rangle$ — Re=500', 'hot_r',  'P88_PhWW_mean_allFr.png',
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+
+    # The four mean-flow products are cheap to rebuild from the pickled velocity
+    # fields; drop them now rather than carry ~4 x N x 6 MB through the rest of
+    # the script.
+    for _cn in SIM_NAMES:
+        for _k in ('PhUV_mean', 'PhUU_mean', 'PhVV_mean', 'PhWW_mean'):
+            sims.get(_cn, {}).pop(_k, None)
 
     ###########################################################################
     # SECTION 1b — 2D INSTANTANEOUS PLANE COLORMAPS (all available Fr)
     # First x-y plane of flow.* / scal.* binary files; turbulent fluctuation
     # (subtract x-averaged y-profile) zeroed over solid region.
     ###########################################################################
-    plot2D_allFr('inst_u',    r"Inst. $u' = u - \langle u\rangle_x$ — Re=500",               'RdBu_r', 'P19_inst_u_allFr.png', 530, False)
-    plot2D_allFr('inst_v',    r"Inst. wall-normal $w' = w - \langle w\rangle_x$ — Re=500",    'RdBu_r', 'P20_inst_v_allFr.png', 530, False)
-    plot2D_allFr('inst_w',    r"Inst. spanwise $v' = v - \langle v\rangle_x$ — Re=500",       'RdBu_r', 'P21_inst_w_allFr.png', 530, False)
-    plot2D_allFr('inst_scal', r"Inst. $\theta' = \theta - \langle\theta\rangle_x$ — Re=500", 'RdBu_r', 'P22_inst_scal_allFr.png', 700, False)
+    # No flat-wall analog exists for an instantaneous plane → include_smooth=False.
+    plot2D_allFr('inst_u',    r"Inst. $u' = u - \langle u\rangle_x$ — Re=500",               'RdBu_r', 'P19_inst_u_allFr.png', 530, False,
+                 include_smooth=False, shared_scale=True, overlay_contours=True, n_contours=10)
+    plot2D_allFr('inst_v',    r"Inst. wall-normal $w' = w - \langle w\rangle_x$ — Re=500",    'RdBu_r', 'P20_inst_v_allFr.png', 530, False,
+                 include_smooth=False, shared_scale=True, overlay_contours=True, n_contours=10)
+    plot2D_allFr('inst_w',    r"Inst. spanwise $v' = v - \langle v\rangle_x$ — Re=500",       'RdBu_r', 'P21_inst_w_allFr.png', 530, False,
+                 include_smooth=False, shared_scale=True, overlay_contours=True, n_contours=10)
+    plot2D_allFr('inst_scal', r"Inst. $\theta' = \theta - \langle\theta\rangle_x$ — Re=500", 'RdBu_r', 'P22_inst_scal_allFr.png', 700, False,
+                 overlay_contours=True, n_contours=12)
 
     # (Req 1) Neutral-only streamline/vorticity figures removed — this script
     # only produces combined all-simulation plots; the single-case streamline
@@ -2116,7 +2289,9 @@ if (1 == plotRes):
         plot2D_div_allcases(
             _prod_panels,
             r'$-\overline{u^\prime w^\prime}\,\partial\langle\bar{u}\rangle/\partial z$',
-            r'TKE production — all cases', 'P23_TKEprod_allFr.png')
+            r'TKE production — all cases', 'P23_TKEprod_allFr.png',
+            shared_scale=True, overlay_contours=True, n_contours=10)
+    _prod_panels = None
 
     # TKE advection — smooth (if loaded) + all active rough cases (subplots)
     _adv_panels = []
@@ -2517,7 +2692,7 @@ if (1 == plotRes):
         plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
     plt.xscale('log')
     plt.xlim(y_in[1], _xmax_own)
-    plt.xlabel(r'$z^+ = y\,u_{\star,\mathrm{case}}/\nu$')
+    plt.xlabel(r'$z^+ = z\,u_{\star,\mathrm{case}}/\nu$')
     plt.ylabel(r'$\langle\bar{u}_i\rangle / u_{\star,\mathrm{case}}$')
     _lgh_2b = (all_handles()
                + [Line2D([0],[0], color='k', ls='-',   lw=1.5, label=r'$u^+$ (solid)'),
@@ -3696,10 +3871,15 @@ if (1 == plotRes):
                 _pmin = _ch6[case]['psi_min'][0]
                 _ratio = (float(np.nanmin(_pd)) / _pmin) if _pmin != 0 else float('nan')
                 _ch6set(case, 'psi_disp_ratio', _ratio)
-    plot2D_allFr('psi_mean', r'Mean streamfunction $\psi(x^+,z^+)$ — all Fr',
-                 'RdBu_r', 'P66_Ch6_streamfunction_allFr.png', ylim=250)
+    # The MEAN streamfunction figure (former P66) is intentionally not drawn;
+    # psi_mean is still computed above because psi_min / psi_disp_ratio (D2/D3)
+    # depend on it, and is released below.
     plot2D_allFr('psi_disp', r"Dispersive streamfunction $\psi''(x^+,z^+)$ — all Fr",
-                 'RdBu_r', 'P67_Ch6_streamfunction_disp_allFr.png', ylim=250)
+                 'RdBu_r', 'P67_Ch6_streamfunction_disp_allFr.png', ylim=250,
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    for case in SIM_NAMES:
+        sims.get(case, {}).pop('psi_mean', None)   # only psi_min (a scalar) is kept
+        sims.get(case, {}).pop('psi_disp', None)
     print('  [D2/D3] ψ note: 2-D spanwise-mean projection; the spanwise drift '
           '⟨w̄⟩ (AvgPhW) carries fluid through the apparent recirculation — a '
           'true 3-D closed-orbit test needs spanwise-resolved fields (gated).')
@@ -3714,7 +3894,10 @@ if (1 == plotRes):
         _m = gmask0(case); _Vm = _V * _m if np.shape(_m) == np.shape(_V) else _V
         sims[case]['C2D'] = -vIntegral_2d(_Vm, _V.shape[0], _yc)
     plot2D_allFr('C2D', r'Streamwise-resolved Coriolis integrand $\mathcal{C}(x^+,z^+)$ — all Fr',
-                 'RdBu_r', 'P68_Ch6_Coriolis2D_allFr.png', ylim=200)
+                 'RdBu_r', 'P68_Ch6_Coriolis2D_allFr.png', ylim=200,
+                 shared_scale=True, overlay_contours=True, n_contours=12)
+    for case in SIM_NAMES:
+        sims.get(case, {}).pop('C2D', None)
 
     # ── D18. Pressure-Poisson source decomposition (medium 3) ──────
     # ∇²P = −∂²(u_iu_j)/∂x_i∂x_j.  Split the RHS into mean-strain / turbulent /
@@ -3749,7 +3932,7 @@ if (1 == plotRes):
             print(f"  [D18] {case:<12} Poisson source over valley: mean={_fm/_tot:.2f} "
                   f"rey={_fr/_tot:.2f} disp={_fd/_tot:.2f} → dominant: {_dom}")
     plot2D_allFr('Psource_total', r'Pressure-Poisson source $-\partial^2(u_iu_j)/\partial x_i\partial x_j$ — all Fr',
-                 'RdBu_r', 'P69_Ch6_Poisson_source_allFr.png', ylim=200)
+                 'RdBu_r', 'P69_Ch6_Poisson_source_allFr.png', ylim=200, overlay_contours=True, n_contours=12)
 
     # ── D11/D16. Terrain-following maps (immediate #14, #20) ────
     # Re-sample to ζ⁺ = z⁺ − local-surface⁺ so a constant-ζ row sits a constant

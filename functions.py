@@ -166,7 +166,7 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
 
     Returns dict with generic keys: sy, nys, U, V, W, su, sw, alpha, ustr_stored,
         alpha_str, y, y_p, rU, rV, rW, G_x, G_z, G, U_p, W_p, GblU, GblW, Rxx,
-        Rxy, Ryy, Ryz, Rzz, TKE, case_v, cor_yx, I_corr_yx, du_dy, visc_yx,
+        Rxy, Rxz, Ryy, Ryz, Rzz, TKE, case_v, cor_yx, I_corr_yx, du_dy, visc_yx,
         tau_yx, cor_yz, I_corr_yz, dw_dy, visc_yz, tau_yz, AVG_TKE_V, x,
         AVG_TKE_V_i, ustr_M2, ustr_M2_plateau, ustr_scale.
     """
@@ -214,6 +214,8 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
     GblW = np.mean(rW, axis=1)
     Rxx = (s1.variables['Rxx'][:]).T
     Rxy = (s1.variables['Rxy'][:]).T
+    # Rxz = ⟨u'w'⟩ (streamwise-spanwise); guarded — an avg file may omit it.
+    Rxz = (s1.variables['Rxz'][:]).T if 'Rxz' in s1.variables else None
     Ryy = (s1.variables['Ryy'][:]).T
     Ryz = (s1.variables['Ryz'][:]).T
     Rzz = (s1.variables['Rzz'][:]).T
@@ -252,7 +254,7 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
         'rU': rU, 'rV': rV, 'rW': rW, 'rP': rP, 'rs': rs,
         'G_x': G_x, 'G_z': G_z, 'G': G,
         'U_p': U_p, 'W_p': W_p, 'GblU': GblU, 'GblW': GblW,
-        'Rxx': Rxx, 'Rxy': Rxy, 'Ryy': Ryy, 'Ryz': Ryz, 'Rzz': Rzz,
+        'Rxx': Rxx, 'Rxy': Rxy, 'Rxz': Rxz, 'Ryy': Ryy, 'Ryz': Ryz, 'Rzz': Rzz,
         'TKE': TKE, 'case_v': case_v,
         'cor_yx': cor_yx, 'I_corr_yx': I_corr_yx, 'du_dy': du_dy,
         'visc_yx': visc_yx, 'tau_yx': tau_yx,
@@ -281,7 +283,8 @@ def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
         'rs_s': d['rs'],
         'G_x_s': d['G_x'], 'G_z_s': d['G_z'], 'G_s': d['G'],
         'U_s_p': d['U_p'], 'W_s_p': d['W_p'], 'GblU_s': d['GblU'], 'GblW_s': d['GblW'],
-        'Rxx_s': d['Rxx'], 'Rxy_s': d['Rxy'], 'Ryy_s': d['Ryy'], 'Ryz_s': d['Ryz'],
+        'Rxx_s': d['Rxx'], 'Rxy_s': d['Rxy'], 'Rxz_s': d['Rxz'],
+        'Ryy_s': d['Ryy'], 'Ryz_s': d['Ryz'],
         'Rzz_s': d['Rzz'], 'TKE_s': d['TKE'], 'case_v_s': d['case_v'],
         'cor_yx_s': d['cor_yx'], 'I_corr_yx_s': d['I_corr_yx'], 'du_dy_s': d['du_dy'],
         'visc_yx_s': d['visc_yx'], 'tau_yx_s': d['tau_yx'],
