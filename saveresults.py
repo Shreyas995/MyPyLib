@@ -224,4 +224,9 @@ var_names = [
     # (Ch. 6 velocity-profile items: matched-range κ, z₀/d extraction).
     'kappa_loglaw', 'd_m_loglaw', 'z0m_loglaw',
 
+    # Obukhov (1971) modified (stability-corrected) log-law fit — v*/u★, the
+    # dynamic-turbulence scale L1⁺, additive offset, R², and the Ri_cr implied
+    # from L1⁺ + surface buoyancy flux B_s (see PhAvg_rotated.py).
+    'v_star_mod', 'L1_plus_mod', 'offset_mod', 'r2_mod', 'Ri_cr_implied',
+
 ]

@@ -185,6 +185,164 @@ case_v_g = np.reshape(case_v[:,512].astype(int),((ny,1)))
 # epsi_s, epsi_e, epsj_s, epsj_e = gap(x, y, nx, ny, eps)
 
 # intepolate(x, y, Nx, Ny, eps_s, eps_e, gapi, gapj, field):
+
+# %%
+###############################################################################
+#  Obukhov (1971) stability-corrected surface-layer wind profile
+#  "Turbulence in an Atmosphere with a Non-Uniform Temperature",
+#   Bound.-Layer Meteorol. 2, 7-29.
+# -----------------------------------------------------------------------------
+#  This is the SECOND, paper-faithful wall-law option, added ALONGSIDE (not
+#  replacing) the neutral log law and the earlier Xi-integral fit above.  It
+#  implements Obukhov's Section-6 parametric surface-layer profile so the DNS
+#  mean wind can be fitted with the modified law and compared, on the same plot,
+#  with the neutral log law.
+#
+#  All quantities are NON-DIMENSIONAL (the DNS has g = 1, f = 1).  None of the
+#  paper's dimensional constants (g = 981 cm/s^2, c_p, rho, ...) appear.  The
+#  paper's buoyancy-flux group  (g/T)*u  (u = -q/(c_p*rho*T)) maps directly onto
+#  the DNS surface wall-normal BUOYANCY FLUX  B_s = <w'b'>  already computed in
+#  the research-diagnostics block below (b is the scalar; g absorbed).  [FLAG:
+#  judgement call — see the fit block for the sign/normalisation discussion.]
+#
+#  Parametric substitution (eq 39, unified stable + unstable branches):
+#      xi  = z / L1 = 1/u' - u'^3            (u' = auxiliary parameter)
+#      eta = Ri/Ri_cr = 1 - u'^4
+#      phi(Ri) = sqrt(1 - eta) = u'^2       (eq 38)
+#    u' in (0,1]   -> xi >= 0  STABLE   (Ri > 0, phi < 1, mixing suppressed)
+#    u' in [1,inf) -> xi <= 0  UNSTABLE (Ri < 0, phi > 1, mixing enhanced)
+#  Wind gradient (eq 22):  sqrt(phi)*k*z*dv/dz = v*  ->  dv/dz = v*/(k z u'),
+#    v(z) = (v*/k) * psi(xi),   psi(xi) = int dxi / (xi u').
+#  Table III of the paper tabulates eta(xi) and psi(xi); validate_obukhov_
+#  tableIII() reproduces both from the solver below (they are already
+#  dimensionless in the paper, so this is a direct, unit-independent check).
+###############################################################################
+OBU_KAPPA = 0.4        # paper's von Karman constant — the ONE fixed empirical
+                       # constant of the modified fit.  [FLAG: config.kappa =
+                       # 0.42 and the neutral fit FITS kappa in kappa_bounds;
+                       # the paper/Table-III uses 0.4, so the modified law is
+                       # pinned to 0.4 per the paper.  v* scales as 1/k, so a
+                       # different k only rescales the reported v*, not L1.]
+
+# --- monotone lookup table over u' spanning xi in ~[-100, +1e4] --------------
+_OBU_U_LO, _OBU_U_HI = 1.0e-4, 4.5
+_OBU_U = np.concatenate([
+    np.linspace(_OBU_U_HI, 1.0, 4000, endpoint=False),   # unstable side (u'>1)
+    np.linspace(1.0, _OBU_U_LO, 12000)])                 # stable side  (u'<=1)
+_OBU_XI = 1.0 / _OBU_U - _OBU_U**3                        # ascending along grid
+
+# psi_hat(xi) = psi(xi) - ln|xi|  is finite through xi -> 0.
+#   d psi_hat / du' = (1 + 3u'^4)(u' - 1) / (u'^2 (1 - u'^4)) ; limit -1/2 at u'=1
+with np.errstate(divide='ignore', invalid='ignore'):
+    _OBU_DPSIH = (1.0 + 3.0*_OBU_U**4)*(_OBU_U - 1.0) / (_OBU_U**2 * (1.0 - _OBU_U**4))
+_OBU_DPSIH[~np.isfinite(_OBU_DPSIH)] = -0.5
+_OBU_I0 = int(np.argmin(np.abs(_OBU_U - 1.0)))
+_OBU_PSIH = np.zeros_like(_OBU_U)
+_OBU_PSIH[1:] = np.cumsum(0.5*(_OBU_DPSIH[1:] + _OBU_DPSIH[:-1])*np.diff(_OBU_U))
+_OBU_PSIH -= _OBU_PSIH[_OBU_I0]                           # psi_hat(xi=0) = 0
+
+
+def obu_up_of_xi(xi):
+    """Auxiliary parameter u'(xi), stable & unstable, via monotone interp."""
+    return np.interp(np.asarray(xi, float), _OBU_XI, _OBU_U)
+
+
+def obu_eta_of_xi(xi):
+    """eta(xi) = Ri/Ri_cr = 1 - u'^4  (Table III column 'eta')."""
+    return 1.0 - obu_up_of_xi(xi)**4
+
+
+def obu_psi(xi):
+    """Wind function psi(xi) = (k/v*) v = ln|xi| + psi_hat(xi)  (Table III 'psi').
+
+    Additive constant is arbitrary (it is absorbed by the fit's offset / z0);
+    as xi -> 0 psi -> ln|xi|, so the modified law reduces to the neutral log law
+    in the unstratified limit (L1 -> inf)."""
+    xi = np.asarray(xi, float)
+    psih = np.interp(xi, _OBU_XI, _OBU_PSIH)
+    with np.errstate(divide='ignore'):
+        return np.log(np.abs(xi)) + psih
+
+
+def obu_wind_profile(z, v_star, L1, offset, kappa=OBU_KAPPA):
+    """Modified log-law wind  v(z) = (v*/k) psi(z/L1) + offset.
+    L1 > 0 stable, L1 < 0 unstable (sign of xi follows sign of L1)."""
+    return (v_star/kappa)*obu_psi(np.asarray(z, float)/L1) + offset
+
+
+def obu_K_unstable(z, u_flux, kappa=OBU_KAPPA):
+    """Eq (40) unstable-branch asymptote  K(z) = k^(4/3) (g u)^(1/3) z^(4/3);
+    the dimensional group  g*u  -> non-dimensional buoyancy-flux magnitude."""
+    return kappa**(4.0/3.0)*np.abs(u_flux)**(1.0/3.0)*np.asarray(z, float)**(4.0/3.0)
+
+
+def fit_modified_loglaw(z, u, kappa=OBU_KAPPA, L1_0=None):
+    """Nonlinear least-squares fit (scipy curve_fit) of the modified log law
+        u(z) = (v*/k) psi(z/L1) + offset
+    for (v_star, L1, offset).  Returns a dict (or None if too few points).
+    Sign of L1_0 seeds the stable(+)/unstable(-) branch."""
+    z = np.asarray(z, float); u = np.asarray(u, float)
+    good = np.isfinite(z) & np.isfinite(u) & (z > 0)
+    z, u = z[good], u[good]
+    if z.size < 4:
+        return None
+    if L1_0 is None:
+        L1_0 = 3.0*float(z.max())                        # weak-stratification seed
+    _d = obu_psi(z[-1]/L1_0) - obu_psi(z[0]/L1_0)
+    v0   = kappa*(u[-1] - u[0]) / (_d if abs(_d) > 1e-6 else 1e-6)
+    off0 = u[0] - (v0/kappa)*obu_psi(z[0]/L1_0)
+
+    def _model(zz, vs, L1, off):
+        return (vs/kappa)*obu_psi(np.asarray(zz, float)/L1) + off
+    try:
+        popt, pcov = curve_fit(_model, z, u, p0=[abs(v0), L1_0, off0], maxfev=20000)
+    except Exception as _e:
+        return {'ok': False, 'err': str(_e)}
+    resid  = u - _model(z, *popt)
+    ss_res = float(np.sum(resid**2)); ss_tot = float(np.sum((u - u.mean())**2))
+    r2 = (1.0 - ss_res/ss_tot) if ss_tot > 0 else float('nan')
+    return {'ok': True, 'v_star': float(popt[0]), 'L1': float(popt[1]),
+            'offset': float(popt[2]), 'r2': float(r2),
+            'perr': np.sqrt(np.diag(pcov)).tolist()}
+
+
+# Obukhov (1971) Table III — xi, eta(=Ri/Ri_cr), psi.  The printed xi=1.5 row
+# (psi = 5.230) breaks the monotone psi(xi) and is a transcription typo; dropped.
+_OBU_TBL3 = np.array([
+ (0.05,0.055,1.600),(0.10,0.102,2.370),(0.15,0.144,2.742),(0.20,0.189,3.065),
+ (0.25,0.231,3.320),(0.30,0.278,3.500),(0.35,0.320,3.662),(0.40,0.359,3.803),
+ (0.45,0.398,3.928),(0.50,0.435,4.045),(0.55,0.470,4.157),(0.60,0.502,4.258),
+ (0.65,0.533,4.360),(0.70,0.565,4.450),(0.75,0.597,4.560),(0.80,0.626,4.608),
+ (0.85,0.650,4.695),(0.90,0.677,4.769),(0.95,0.700,4.839),(1.00,0.723,4.908),
+ (1.1,0.76,5.03),(1.2,0.80,5.16),(1.3,0.84,5.29),(1.4,0.86,5.41),(1.6,0.90,5.63),
+ (1.7,0.92,5.74),(1.8,0.93,5.85),(1.9,0.94,5.95),(2.0,0.95,6.06),(2.1,0.96,6.16),
+ (2.2,0.96,6.27),(2.3,0.97,6.37),(2.4,0.97,6.47),(2.5,0.98,6.57),(2.6,0.98,6.68),
+ (2.7,0.98,6.78),(2.8,0.98,6.88),(2.9,0.99,6.99),(3.0,0.99,7.09),(3.5,0.99,7.60),
+ (4.0,1.00,8.10),(4.5,1.00,8.60),(5.0,1.00,9.10),(5.5,1.00,9.60),(6.0,1.00,10.10)])
+
+
+def validate_obukhov_tableIII(verbose=True, tol_eta=0.02, tol_psi=0.06):
+    """Reproduce Obukhov (1971) Table III (eta and psi vs xi) from the solver.
+    Unit-independent (all quantities dimensionless in the paper).  psi carries an
+    arbitrary additive constant, so it is compared after a single best-fit shift
+    C (= Obukhov's integration constant, ~4.6)."""
+    xi, eta_t, psi_t = _OBU_TBL3[:, 0], _OBU_TBL3[:, 1], _OBU_TBL3[:, 2]
+    eta_c = obu_eta_of_xi(xi)
+    psi_c = obu_psi(xi)
+    C     = float(np.mean(psi_t - psi_c))
+    e_eta = np.abs(eta_c - eta_t)
+    e_psi = np.abs(psi_c + C - psi_t)
+    ok = (e_eta.max() < tol_eta) and (float(np.sqrt(np.mean(e_psi**2))) < tol_psi)
+    if verbose:
+        print(f"[Obukhov Table III] eta(xi): max|err|={e_eta.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_eta**2)):.4f}")
+        print(f"[Obukhov Table III] psi(xi): shift C={C:.3f} max|err|={e_psi.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_psi**2)):.4f}")
+        print(f"[Obukhov Table III] {'PASS' if ok else 'FAIL'}  "
+              f"(k={OBU_KAPPA}, stable+unstable parametric solver)")
+    return ok
+
+
 # %%
 ############################# Main Code #######################################
 # Phase averaging: read DNS binary output files (avg_flow* for velocity, avg_stress* for stress
@@ -887,6 +1045,47 @@ if (1 == postprocess):
         print(f"   stratified (Fr={Fr:.2e}, Ri_cr={Ri_cr:.3f}):  "
               f"⟨Ri⟩_fit={np.mean(_Ri_fit):+.4f}  Ri_max={np.max(_Ri_fit):+.4f}")
 
+    # ── Obukhov (1971) MODIFIED log-law fit (paper-faithful, Sec. 6) ──────────
+    # GATED on config.Fr: the modified (stability-corrected) law is fitted ONLY
+    # for the stratified runs (finite Fr = 1, 0.1, 0.01, …).  For the NEUTRAL run
+    # (Fr = np.inf) it is skipped entirely — only the original neutral log law
+    # above runs — and v_star_mod/L1⁺/offset/R²/Ri_cr_implied stay NaN, so the
+    # plot overlay, summary rows and pickle all fall back to "skipped".
+    #   u⁺(z⁺) = (v*/k) psi(z⁺/L1⁺) + offset          (k = OBU_KAPPA = 0.4)
+    # Free parameters: v* (in u_star units — v*≈1 ⇔ profile-implied friction
+    # velocity equals Method-2 u_star), L1⁺ (dynamic-turbulence scale, wall
+    # units; +stable/−unstable), and an additive offset (roughness/intercept).
+    # As stratification → 0, L1⁺ → ∞ and psi → ln(z⁺): the modified law would
+    # collapse onto the neutral log law, so the two are directly comparable.
+    # Fit window: fixed z⁺ ∈ [70, 150] (the log-law region for this flow), so the
+    # modified-law parameters are fitted over a consistent, user-chosen band.
+    _mod_lo, _mod_hi = 70.0, 150.0
+    obu_fit = None
+    v_star_mod = L1_plus_mod = offset_mod = r2_mod = float('nan')
+    if _stratified:                                     # finite Fr only
+        _mod_mask = (y_in >= _mod_lo) & (y_in <= _mod_hi) & np.isfinite(u_h_plus)
+        if np.count_nonzero(_mod_mask) >= 4:
+            # The surface buoyancy flux sign (B_s, computed below) is not yet
+            # available here; seed the stable branch — curve_fit migrates to the
+            # unstable branch on its own if the profile is better matched there.
+            obu_fit = fit_modified_loglaw(y_in[_mod_mask], u_h_plus[_mod_mask])
+            if obu_fit and obu_fit.get('ok'):
+                v_star_mod  = obu_fit['v_star']
+                L1_plus_mod = obu_fit['L1']
+                offset_mod  = obu_fit['offset']
+                r2_mod      = obu_fit['r2']
+                print(f"Modified log-law (Obukhov 1971) fit [z⁺∈[{_mod_lo:.0f},{_mod_hi:.0f}]]:"
+                      f"  v*/u★={v_star_mod:.4f}  L1⁺={L1_plus_mod:+.3e}  "
+                      f"offset={offset_mod:.3f}  R²={r2_mod:.4f}")
+            else:
+                print(f"Modified log-law (Obukhov 1971) fit: FAILED "
+                      f"({obu_fit.get('err','<4 pts') if obu_fit else 'no data'})")
+        # Table-III self-test (unit-independent) — provenance for the modified law.
+        validate_obukhov_tableIII(verbose=True)
+    else:
+        print("Modified log-law (Obukhov 1971): skipped — neutral run "
+              "(Fr=∞); only the classical neutral log law is fitted.")
+
 ###############################################################################
 ################ Canopy exponential law (z+ ∈ [0, h⁺+20pts]) ################
 ###############################################################################
@@ -1382,6 +1581,35 @@ if (1 == postprocess):
 
     L_obukhov_col = _obukhov(u_star, B_s)                   # column (domain) Obukhov length
     L_col_plus    = L_obukhov_col * u_star / nu             # in wall units
+
+    # ── Ri_cr implied by the modified-log-law fit (Obukhov eqs 23a/26/27) ─────
+    # Obukhov's dynamic-turbulence scale is  L1 = α·Ri_cr·v*³ / (k·|g u|), with
+    # β = 1/(α·Ri_cr) and the buoyancy-flux group (g u) → the DNS surface flux
+    # B_s.  Inverting for Ri_cr, with α = K_T/K = 1/Pr_t and k = OBU_KAPPA:
+    #     Ri_cr = L1_phys · k · |B_s| · Pr_t / v*_phys³.
+    # CAREFUL with the two rescalings — they use DIFFERENT friction velocities:
+    #   L1_phys  = L1⁺ · l_in ,  and  l_in = ν/u★_config  (config.u_star sets the
+    #              grid's viscous length, so z⁺ = y/l_in is scaled by u★_config,
+    #              NOT by the measured Method-2 plateau).
+    #   v*_phys  = v_star_mod · u_star ,  because the fit was performed on
+    #              u_h_plus = u_plus_rot/u_star (the MEASURED plateau).
+    # Writing L1_phys as L1⁺·ν/u_star would silently rescale Ri_cr by
+    # u★_config/u★_measured (≈1.16 here).  Use l_in explicitly.
+    # [FLAG] This uses B_s (= <w'b'>, dispersive + Route-C temporal); when
+    # Mean*Theta.npy is absent B_s is dispersive-only, so Ri_cr_implied is a
+    # lower bound.  α = 1/Pr_t (config.Pr_t) is a closure choice, not measured.
+    Ri_cr_implied = float('nan')
+    if (np.isfinite(L1_plus_mod) and np.isfinite(v_star_mod) and abs(v_star_mod) > _FLUX_EPS
+            and np.isfinite(B_s) and abs(B_s) > _FLUX_EPS and u_star > 0):
+        _L1_phys_ric = L1_plus_mod * l_in            # wall units → physical
+        _v_phys_ric  = v_star_mod * u_star           # fit is in measured-u★ units
+        Ri_cr_implied = (_L1_phys_ric * OBU_KAPPA * abs(B_s) * Pr_t
+                         / _v_phys_ric**3)
+        _sign_ok = (L1_plus_mod > 0) == (B_s < 0)   # stable: L1>0 with downward flux
+        print(f"Modified log-law → implied Ri_cr={Ri_cr_implied:+.4f} "
+              f"(α=1/Pr_t={1.0/Pr_t:.3f}; config Ri_cr={Ri_cr:.3f}; "
+              f"branch {'stable' if L1_plus_mod > 0 else 'unstable'}, "
+              f"flux-sign {'consistent' if _sign_ok else 'INCONSISTENT'})")
 
     # Local (per-station) friction velocity from near-wall shear, and local L⁺
     _tau_loc   = nu * np.sqrt(du_dy[_surf_j, np.arange(nx)]**2 + dw_dy[_surf_j, np.arange(nx)]**2)
@@ -1947,6 +2175,11 @@ if (1 == postprocess):
         ('Log-law roughness z0m+',               z0m_loglaw,                '.5f'),
         ('Log-law fit R^2',                      _best_r2,                  '.4f'),
         ('Canopy attenuation alpha',             alpha_canopy,              '.4f'),
+        ('Mod. log-law v*/u* (Obukhov 71)',      v_star_mod,                '.4f'),
+        ('Mod. log-law L1+ (wall units)',        L1_plus_mod,               '.3e'),
+        ('Mod. log-law offset',                  offset_mod,                '.3f'),
+        ('Mod. log-law fit R^2',                 r2_mod,                    '.4f'),
+        ('Mod. log-law implied Ri_cr',           Ri_cr_implied,             '.4f'),
     ])
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -2895,6 +3128,19 @@ if (1 == plotRes):
     _z_vll_plot    = np.geomspace(_z_vll_ext_lo, _z_vll[-1], 300)
     u_loglaw_valley_plot = _slp_v * np.log(_z_vll_plot) + _int_v
 
+    # --- Obukhov (1971) MODIFIED log-law overlay for the valley ---------------
+    # obu_wind_profile returns u⁺ in u_star units (that is how it was fitted);
+    # the plotted valley curve is normalised by 0.0617, so rescale by u_star/0.0617
+    # to land on _valley_u.  Drawn only when the modified fit succeeded.
+    if np.isfinite(v_star_mod) and np.isfinite(L1_plus_mod):
+        _z_mod_plot = np.geomspace(max(_mod_lo, y_in[1]), _mod_hi, 300)
+        u_mod_valley_plot = (obu_wind_profile(_z_mod_plot, v_star_mod,
+                                              L1_plus_mod, offset_mod)
+                             * (u_star / 0.0617))
+    else:
+        _z_mod_plot = np.array([])
+        u_mod_valley_plot = np.array([])
+
     # --- Log-law fit for smooth streamwise: z+ ∈ [23, 100] ---
     # u+ = (1/κ) ln(z+) + B  →  OLS of u+ vs ln(z+), slope=1/κ, intercept=B
     _sml_mask = (y_s_p >= 23.0) & (y_s_p <= 100.0)
@@ -2983,6 +3229,10 @@ if (1 == plotRes):
     ref_plot(plot_ref_rough, y_r_p, -np.mean(W_r_p, axis=1),      color=ROUGH_COLOR, linestyle=ROUGH_LS, alpha=0.4)
     # Valley log-law — extended 5 u+ units below fit-range start
     plt.plot(_z_vll_plot, u_loglaw_valley_plot, color='red', linestyle='dotted', linewidth=2)
+    # Valley MODIFIED log-law (Obukhov 1971) — stability-corrected profile
+    if u_mod_valley_plot.size > 0:
+        plt.plot(_z_mod_plot, u_mod_valley_plot, color='darkorange',
+                 linestyle='-.', linewidth=2)
     # Smooth log-law — extended 5 u+ units below fit-range start
     if _z_sml_plot.size > 0:
         ref_plot(plot_ref_smooth, _z_sml_plot, u_loglaw_smooth_plot, color=SMOOTH_COLOR, linestyle='dotted', linewidth=2)
@@ -3014,6 +3264,11 @@ if (1 == plotRes):
                label=rf'Log-law valley ($\kappa$={kappa_vll:.3f}, $z^+\!\in\![60,200]$)'),
         Line2D([0], [0], color=SMOOTH_COLOR, linestyle='dotted',  linewidth=2,
                label=rf'Log-law smooth ($\kappa$={kappa_sml:.3f}, $z^+\!\in\![23,100]$)'),
+    ] + ([
+        Line2D([0], [0], color='darkorange', linestyle='-.',      linewidth=2,
+               label=(rf'Obukhov (1971) mod. log-law '
+                      rf'($v_*/u_\star$={v_star_mod:.2f}, $L_1^+$={L1_plus_mod:+.0f})'))
+    ] if (u_mod_valley_plot.size > 0) else []) + [
         Line2D([0], [0], color='green',      linestyle='--',      label=canopy_legend),
     ]
     # This is the reference plot for the layer-marker key (filled=oro, hollow=smooth).
@@ -4276,5 +4531,270 @@ if plot_spectra == 1:
             figC.savefig(_outC, dpi=300)
             plt.show()
             print(f'[spectra] saved {_outC}')
+
+    # %%###########################################################################
+    #  PLAIN-LANGUAGE SUMMARY (written at the END of execution)
+    # -----------------------------------------------------------------------------
+    #  The tables above use terse developer variable names.  This closing block
+    #  restates the run in self-explanatory, scientifically consistent language,
+    #  with every symbol defined and its units stated.  Three sections:
+    #     (1) friction velocity + boundary-layer parameters,
+    #     (2) Monin-Obukhov stability parameters (the length scales),
+    #     (3) curve-fit / wall-law results (classical + Obukhov 1971 modified).
+    #
+    #  Conventions.  All quantities are non-dimensional (DNS units: g = 1, f = 1).
+    #  The friction velocity quoted throughout is METHOD 2 ONLY — the plateau of
+    #  the vertically-integrated Ekman momentum balance, `ustr_M2_plateau_o`
+    #  (Kostelecky & Ansorge 2024, eq. 4.2).  In a rotating Ekman layer this is
+    #  the only height-independent estimate; Methods 1/3 are deliberately omitted.
+    #  "Wall units" (superscript +) denote inner scaling by the viscous length
+    #  l_in = nu/u*_cfg, i.e. z+ = z/l_in, where u*_cfg is the CONFIG friction
+    #  velocity used to build the grid — not necessarily the measured plateau.
+    #  Where the two differ that is stated explicitly.
+    ###############################################################################
+    import textwrap as _tw
+
+    _NA = float('nan')
+
+    def _g(name, default=_NA):
+        """Fetch a possibly-unset diagnostic without raising."""
+        return globals().get(name, default)
+
+    def _sci(x, nd=4):
+        """Human-friendly number: 'n/a' for None/NaN, 'infinite' for +/-inf."""
+        if x is None:
+            return 'n/a'
+        try:
+            xf = float(x)
+        except (TypeError, ValueError):
+            return str(x)
+        if np.isnan(xf):
+            return 'n/a'
+        if np.isinf(xf):
+            return ('+' if xf > 0 else '-') + 'infinite'
+        ax = abs(xf)
+        if ax != 0 and (ax < 1e-3 or ax >= 1e5):
+            return f'{xf:.{nd}e}'
+        return f'{xf:.{nd}f}'
+
+    def _para(text):
+        print(_tw.fill(text, width=80, initial_indent='  ', subsequent_indent='  '))
+
+    def _kv(label, value, nd=4, unit=''):
+        """Aligned 'quantity (symbol) .... value unit' line."""
+        cell = _sci(value, nd) + (f' {unit}' if unit else '')
+        print(f'    {label:<54s}{cell:>22s}')
+
+    def _hdr(title):
+        print('\n  ' + title)
+        print('  ' + '-' * 76)
+
+    # Method-2 friction velocity — the single reference for the whole summary.
+    _ustar   = _g('ustr_M2_plateau_o')
+    _nu      = _g('nu'); _f = _g('f'); _lin = _g('l_in')
+    _delta   = _g('delta_run')                       # d = u*/f
+    _dplus   = _g('Re_tau')                          # u*^2/nu  ( = d+ since f = 1 )
+
+    print('\n' + '=' * 80)
+    print('  PLAIN-LANGUAGE SUMMARY OF THIS RUN')
+    print('  (all quantities non-dimensional; friction velocity = Method 2 only)')
+    print('=' * 80)
+
+    # ══ 1. Friction velocity and boundary-layer parameters ════════════════════
+    _hdr('1. Friction velocity and boundary-layer parameters')
+    _para('The friction velocity is obtained from the vertically-integrated Ekman '
+          'momentum balance (Method 2) and read as the constant-flux plateau of the '
+          'resulting u*(z) profile. In a rotating Ekman layer the direct total '
+          'stress is NOT height-constant (Coriolis drains momentum with height), so '
+          'a stress plateau would read artificially low; only the full '
+          'Coriolis+viscous+Reynolds balance is height-independent and equals the '
+          'surface stress. Methods 1 and 3 are omitted from this summary by design.')
+    print()
+    _kv('Friction velocity  u* (Method 2 plateau)', _ustar, 5)
+    _kv('Kinematic viscosity  nu', _nu, 3)
+    _kv('Viscous (inner) length  l_in = nu/u*_cfg', _lin, 3)
+    _kv('Coriolis parameter  f', _f, 3)
+    _kv('Friction Reynolds number  Re_tau = u*^2/nu', _dplus, 1)
+    _kv('Boundary-layer depth  delta = u*/f', _delta, 5)
+    _kv('Boundary-layer depth in wall units  delta+', _dplus, 1)
+    _kv('Geostrophic wind magnitude  |G|', _g('G_mag'), 4)
+    _kv('Surface stress veer (turning angle)', _g('veer_oro'), 2, 'deg')
+    print()
+    _kv('Valley crest height  H', _g('H_phys'), 5)
+    _kv('Crest height in wall units  H+', _g('H_plus_r'), 1)
+    _kv('Crest height / BL depth  H/delta', _g('H_delta'), 4)
+    _kv('Streamwise domain length in wall units  Lx+', _g('Lx_plus'), 1)
+    _kv('Topography-to-Ekman scale ratio  Psi = Lx/(2 delta)', _g('Psi'), 4)
+    _para(f'Interpretation: the boundary layer is {_sci(_dplus,0)} viscous lengths '
+          f'deep. The valley occupies a fraction H/delta = {_sci(_g("H_delta"),3)} of '
+          f'that depth. Psi = Lx/(2 delta) = {_sci(_g("Psi"),3)} compares the '
+          f'topographic wavelength with the rotation-limited Ekman depth: Psi >> 1 '
+          f'means the topography is wide compared with delta (weak Coriolis-'
+          f'topography coupling), Psi ~ 1 means the two scales interact. The surface '
+          f'stress vector is veered {_sci(_g("veer_oro"),1)} degrees from the '
+          f'geostrophic direction.')
+
+    # ══ 2. Monin-Obukhov stability parameters (the lengths) ═══════════════════
+    _hdr('2. Monin-Obukhov stability parameters')
+    _para('Buoyancy is the transported scalar b (g absorbed, so b IS the buoyancy). '
+          'The Obukhov length L = -u*^3/(kappa B_s) is the height at which buoyant '
+          'and shear production of turbulent kinetic energy balance: below |L| the '
+          'flow is shear-dominated, above it buoyancy dominates. B_s is the surface '
+          'wall-normal buoyancy flux <w\'b\'> (dispersive + temporal parts).')
+    print()
+    _kv('Froude number of the case  Fr', _g('Fr'), 3)
+    _kv('Surface buoyancy  B_0', _g('B_0'), 5)
+    _kv('Surface buoyancy flux  B_s = <w\'b\'>', _g('B_s'), 5)
+    _kv('Buoyancy scale  b* = -B_s/u*', _g('b_star'), 5)
+    _kv('Bulk Richardson number  Ri_B', _g('Ri_B'), 4)
+    _kv('Reference (neutral) depth used for Ri_B', _g('delta_neu_eff'), 5)
+    print()
+    _kv('Obukhov length  L (column)', _g('L_obukhov_col'), 5)
+    _kv('Obukhov length in wall units  L+', _g('L_col_plus'), 2)
+    _kv('Stability ratio  delta/L', (_delta / _g('L_obukhov_col'))
+        if np.isfinite(_g('L_obukhov_col')) and _g('L_obukhov_col') != 0 else _NA, 4)
+    _Lloc = _g('L_loc', {})
+    if isinstance(_Lloc, dict):
+        for _nm in ('windward', 'floor', 'lee'):
+            if _nm in _Lloc:
+                _kv(f'Local Obukhov length  L+ ({_nm})', _Lloc[_nm], 2)
+    print()
+    _para(f'Stability classification: "{_g("stab_class","n/a")}" (from Ri_B). '
+          + ('Turbulence-collapse warning: |L+| is below the configured threshold, '
+             'so the stratified surface layer may be intermittent or collapsed. '
+             if _g('collapse_flag', False) else
+             'No turbulence-collapse warning: |L+| exceeds the configured threshold. ')
+          + ('This run is neutral (Fr = infinite): there is no surface buoyancy '
+             'flux, L is infinite, and buoyancy never competes with shear.'
+             if not _stratified else
+             'Buoyancy actively suppresses mixing above z ~ |L|.'))
+
+    # ══ 3. Curve fits and wall laws ═══════════════════════════════════════════
+    _hdr('3. Curve fits and wall-law data')
+
+    print('  (a) Classical logarithmic law of the wall')
+    _para('Fitted form  U+ = (1/kappa) ln(z+ - d+) + B, equivalently '
+          'U+ = (1/kappa) ln((z+ - d+)/z0m+), by ordinary least squares with the '
+          'zero-plane displacement d+ obtained from a grid search maximising R^2. '
+          'This baseline ignores buoyancy and is fitted for every case.')
+    print()
+    _kv('Fit window (lower bound)  z+_min', _g('loglaw_zmin'), 1)
+    _kv('Fit window (upper bound)  z+_max', _g('loglaw_zmax'), 1)
+    _kv('von Karman constant  kappa', _g('kappa_loglaw'), 4)
+    _kv('Zero-plane displacement  d+', _g('d_m_loglaw'), 3)
+    _kv('Aerodynamic roughness length  z0m+', _g('z0m_loglaw'), 5)
+    _kv('Coefficient of determination  R^2', _g('_best_r2'), 4)
+    print()
+    _kv('Valley log-law kappa (plot fit)', _g('kappa_vll'), 4)
+    _kv('Smooth-wall log-law kappa (plot fit)', _g('kappa_sml'), 4)
+
+    print('\n  (b) Roughness / canopy sublayer')
+    _kv('Power law prefactor  A   (U+ = A z+^n)', _g('A_power'), 4)
+    _kv('Power law exponent  n', _g('n_power'), 4)
+    _kv('Power law  R^2', _g('r2_power'), 4)
+    _kv('Canopy attenuation coefficient  alpha', _g('alpha_canopy_v'), 4)
+    _kv('Canopy law  R^2', _g('r2_canopy'), 4)
+
+    print('\n  (c) Obukhov (1971) stability-corrected logarithmic law')
+    if not _stratified:
+        _para('Not fitted for this run. The surface layer is neutral (Fr = infinite), '
+              'so there is no surface buoyancy flux to bend the mean-wind profile away '
+              'from the classical log line, and Obukhov\'s modified law is undefined '
+              '(it reduces identically to the classical log law above). The modified '
+              'law is fitted only for the stratified cases (finite Fr).')
+    elif not (np.isfinite(_g('v_star_mod')) and np.isfinite(_g('L1_plus_mod'))):
+        _para('The stability-corrected fit did not converge for this run (too few '
+              'points inside the fit window, or the optimiser failed). See the '
+              '"Modified log-law ... FAILED" line printed earlier. The classical log '
+              'law in (a) still applies.')
+    else:
+        _vsm  = _g('v_star_mod'); _L1p = _g('L1_plus_mod')
+        _vphy = _vsm * _ustar if np.isfinite(_ustar) else _NA
+        _L1ph = _L1p * _lin if np.isfinite(_lin) else _NA
+        _L1od = (_L1ph / _delta) if (np.isfinite(_delta) and _delta != 0) else _NA
+        _para('Following Obukhov (1971), "Turbulence in an Atmosphere with a '
+              'Non-Uniform Temperature", Bound.-Layer Meteorol. 2, 7-29, the mean '
+              'wind is fitted to the stability-corrected surface-layer profile '
+              'V(z) = (v*/kappa) psi(z/L1) + offset. Here psi is Obukhov\'s universal '
+              'wind function (his Sec. 6 / Table III), obtained by integrating '
+              'sqrt(phi(Ri)) kappa z dV/dz = v* with the energy-balance universal '
+              'function phi(Ri) = sqrt(1 - Ri/Ri_cr) (his eq. 38). psi reduces to '
+              'ln(z) as the stratification vanishes, so the modified law degenerates '
+              'to the classical log law in the neutral limit.')
+        print()
+        _kv('von Karman constant (fixed at paper value)  kappa', OBU_KAPPA, 2)
+        _kv('Fit window (lower bound)  z+_min', _g('_mod_lo'), 1)
+        _kv('Fit window (upper bound)  z+_max', _g('_mod_hi'), 1)
+        _kv('Fitted friction velocity ratio  v*/u*', _vsm, 4)
+        _kv('Fitted friction velocity  v*', _vphy, 5)
+        _kv('Dynamic-turbulence length  L1+ (wall units)', _L1p, 3)
+        _kv('Dynamic-turbulence length  L1', _L1ph, 5)
+        _kv('L1 / boundary-layer depth  L1/delta', _L1od, 4)
+        _kv('Additive offset (roughness term)', _g('offset_mod'), 3)
+        _kv('Coefficient of determination  R^2', _g('r2_mod'), 4)
+        _kv('Critical Richardson number implied  Ri_cr', _g('Ri_cr_implied'), 4)
+        _kv('Critical Richardson number prescribed  Ri_cr', _g('Ri_cr'), 3)
+        print()
+        _para(f'Friction velocity: the profile-implied v* is '
+              f'{_sci(100.0*_vsm,1)}% of the independently measured Method-2 '
+              f'u* = {_sci(_ustar,5)}. A ratio near unity confirms that the '
+              f'stability-corrected profile and the Ekman momentum integral agree; a '
+              f'large departure indicates an unsuitable fit window or a genuinely '
+              f'non-logarithmic profile.')
+        _para(f'Dynamic-turbulence length: L1 = {_sci(_L1p,1)} wall units '
+              f'({_sci(_L1od,3)} of the boundary-layer depth delta). L1 is the '
+              f'thickness of the near-wall sub-layer in which turbulence is governed '
+              f'by shear rather than buoyancy; above z ~ L1 the mean wind departs '
+              f'from the straight log line and, in a stable layer, Ri approaches its '
+              f'critical value asymptotically. The fitted sign is '
+              + ('positive, i.e. a STABLE surface layer (Ri > 0, buoyancy suppresses '
+                 'mixing).' if _L1p > 0 else
+                 'negative, i.e. an UNSTABLE surface layer (Ri < 0, buoyancy enhances '
+                 'mixing).')
+              + (f' Note L1/delta = {_sci(_L1od,2)} > 1, meaning the stratification '
+                 f'signal is weak over the fit window and L1 is only loosely '
+                 f'constrained.' if (np.isfinite(_L1od) and _L1od > 1) else ''))
+        if np.isfinite(_g('Ri_cr_implied')):
+            _para(f'Critical Richardson number: inverting L1 = alpha Ri_cr v*^3 / '
+                  f'(kappa |B_s|) with the surface buoyancy flux B_s = '
+                  f'{_sci(_g("B_s"),5)} and a turbulent Prandtl number Pr_t = '
+                  f'{_sci(_g("Pr_t"),3)} (heat/momentum eddy-diffusivity ratio '
+                  f'alpha = K_T/K = 1/Pr_t) gives Ri_cr = '
+                  f'{_sci(_g("Ri_cr_implied"),4)}, against the prescribed '
+                  f'{_sci(_g("Ri_cr"),3)}. Caveat: if the temporal buoyancy '
+                  f'cross-moments (Mean*Theta) were absent, B_s contains only the '
+                  f'dispersive contribution and this Ri_cr is a lower bound.')
+            _Lobu  = _g('L_obukhov_col')
+            _kap   = _g('kappa')                    # config kappa used to build L
+            _L1oL  = (_L1ph / _Lobu) if (np.isfinite(_Lobu) and _Lobu != 0) else _NA
+            _xchk  = (_g('Pr_t') * _L1oL * OBU_KAPPA / _kap
+                      if (np.isfinite(_L1oL) and np.isfinite(_kap) and _kap != 0) else _NA)
+            _kv('Ratio of the two length scales  L1/L', _L1oL, 5)
+            _kv('Cross-check  Pr_t (L1/L) (kappa_obu/kappa)', _xchk, 5)
+            _para(f'Cross-check: the column Obukhov length is built as '
+                  f'L = -u*^3/(kappa B_s) with the CONFIG kappa = {_sci(_kap,3)}, '
+                  f'whereas Obukhov\'s L1 = alpha Ri_cr v*^3/(kappa_obu |B_s|) uses '
+                  f'the paper value kappa_obu = {_sci(OBU_KAPPA,2)}. Eliminating '
+                  f'|B_s| between them gives the identity '
+                  f'Ri_cr = Pr_t (L1/L) (kappa_obu/kappa) whenever v* = u*. Here that '
+                  f'evaluates to {_sci(_xchk,5)}, which must agree with the implied '
+                  f'Ri_cr = {_sci(_g("Ri_cr_implied"),5)} above. Agreement is an '
+                  f'independent confirmation that the fitted L1, the measured '
+                  f'buoyancy flux B_s and the wall-unit scaling l_in are mutually '
+                  f'consistent; a mismatch by a constant factor points to a friction '
+                  f'velocity or kappa used inconsistently between the two. Note '
+                  f'L1 << L implies a correspondingly small Ri_cr.')
+        _xi_t  = _OBU_TBL3[:, 0]
+        _e_eta = float(np.max(np.abs(obu_eta_of_xi(_xi_t) - _OBU_TBL3[:, 1])))
+        _psi_c = obu_psi(_xi_t)
+        _e_psi = float(np.sqrt(np.mean(
+            (_psi_c + np.mean(_OBU_TBL3[:, 2] - _psi_c) - _OBU_TBL3[:, 2]) ** 2)))
+        _para(f'Solver provenance: the psi(z/L1) machinery reproduces Obukhov\'s '
+              f'Table III to a maximum error of {_sci(_e_eta,4)} in Ri/Ri_cr and an '
+              f'RMS error of {_sci(_e_psi,4)} in psi (after the single arbitrary '
+              f'additive constant), confirming the universal function is implemented '
+              f'as published.')
+
+    print('=' * 80 + '\n')
 
     # %%

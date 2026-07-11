@@ -22,6 +22,7 @@ from matplotlib.lines import Line2D
 from scipy.integrate import simpson
 from scipy.integrate import trapezoid
 from scipy.stats import linregress
+from scipy.optimize import curve_fit
 import matplotlib.animation as animation
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
@@ -1198,6 +1199,147 @@ def _save_layers_y(base_path, base_title):
     _ax.set_xlim(*_xlim0)
     plt.title(base_title)
 
+###############################################################################
+#  Obukhov (1971) stability-corrected surface-layer wind profile
+#  "Turbulence in an Atmosphere with a Non-Uniform Temperature",
+#   Bound.-Layer Meteorol. 2, 7-29.
+# -----------------------------------------------------------------------------
+#  PORTED VERBATIM from MyPyLib/PhAvg_rotated.py (keep the two in sync).  There
+#  the same machinery fits ONE run; here it is applied per case so the modified
+#  law can be compared ACROSS the Froude ladder.  This is the paper-faithful
+#  Section-6 parametric profile, fitted ALONGSIDE (not replacing) the neutral log
+#  law and the Xi-integral OLS fit already in _loglaw_fit_case below.
+#
+#  All quantities are NON-DIMENSIONAL (the DNS has g = 1, f = 1).
+#
+#  Parametric substitution (eq 39, unified stable + unstable branches):
+#      xi  = z / L1 = 1/u' - u'^3            (u' = auxiliary parameter)
+#      eta = Ri/Ri_cr = 1 - u'^4
+#      phi(Ri) = sqrt(1 - eta) = u'^2       (eq 38)
+#    u' in (0,1]   -> xi >= 0  STABLE   (Ri > 0, phi < 1, mixing suppressed)
+#    u' in [1,inf) -> xi <= 0  UNSTABLE (Ri < 0, phi > 1, mixing enhanced)
+#  Wind gradient (eq 22):  sqrt(phi)*k*z*dv/dz = v*  ->  dv/dz = v*/(k z u'),
+#    v(z) = (v*/k) * psi(xi),   psi(xi) = int dxi / (xi u').
+###############################################################################
+OBU_KAPPA = 0.4        # paper's von Karman constant — the ONE fixed empirical
+                       # constant of the modified fit (config.kappa = 0.42 and the
+                       # neutral fit FITS kappa in _LL_KBND; the paper/Table-III
+                       # uses 0.4).  v* scales as 1/k, so a different k only
+                       # rescales the reported v*, not L1.
+
+# --- monotone lookup table over u' spanning xi in ~[-100, +1e4] --------------
+_OBU_U_LO, _OBU_U_HI = 1.0e-4, 4.5
+_OBU_U = np.concatenate([
+    np.linspace(_OBU_U_HI, 1.0, 4000, endpoint=False),   # unstable side (u'>1)
+    np.linspace(1.0, _OBU_U_LO, 12000)])                 # stable side  (u'<=1)
+_OBU_XI = 1.0 / _OBU_U - _OBU_U**3                        # ascending along grid
+
+# psi_hat(xi) = psi(xi) - ln|xi|  is finite through xi -> 0.
+#   d psi_hat / du' = (1 + 3u'^4)(u' - 1) / (u'^2 (1 - u'^4)) ; limit -1/2 at u'=1
+with np.errstate(divide='ignore', invalid='ignore'):
+    _OBU_DPSIH = (1.0 + 3.0*_OBU_U**4)*(_OBU_U - 1.0) / (_OBU_U**2 * (1.0 - _OBU_U**4))
+_OBU_DPSIH[~np.isfinite(_OBU_DPSIH)] = -0.5
+_OBU_I0 = int(np.argmin(np.abs(_OBU_U - 1.0)))
+_OBU_PSIH = np.zeros_like(_OBU_U)
+_OBU_PSIH[1:] = np.cumsum(0.5*(_OBU_DPSIH[1:] + _OBU_DPSIH[:-1])*np.diff(_OBU_U))
+_OBU_PSIH -= _OBU_PSIH[_OBU_I0]                           # psi_hat(xi=0) = 0
+
+
+def obu_up_of_xi(xi):
+    """Auxiliary parameter u'(xi), stable & unstable, via monotone interp."""
+    return np.interp(np.asarray(xi, float), _OBU_XI, _OBU_U)
+
+
+def obu_eta_of_xi(xi):
+    """eta(xi) = Ri/Ri_cr = 1 - u'^4  (Table III column 'eta')."""
+    return 1.0 - obu_up_of_xi(xi)**4
+
+
+def obu_psi(xi):
+    """Wind function psi(xi) = (k/v*) v = ln|xi| + psi_hat(xi)  (Table III 'psi').
+
+    Additive constant is arbitrary (it is absorbed by the fit's offset / z0);
+    as xi -> 0 psi -> ln|xi|, so the modified law reduces to the neutral log law
+    in the unstratified limit (L1 -> inf)."""
+    xi = np.asarray(xi, float)
+    psih = np.interp(xi, _OBU_XI, _OBU_PSIH)
+    with np.errstate(divide='ignore'):
+        return np.log(np.abs(xi)) + psih
+
+
+def obu_wind_profile(z, v_star, L1, offset, kappa=OBU_KAPPA):
+    """Modified log-law wind  v(z) = (v*/k) psi(z/L1) + offset.
+    L1 > 0 stable, L1 < 0 unstable (sign of xi follows sign of L1)."""
+    return (v_star/kappa)*obu_psi(np.asarray(z, float)/L1) + offset
+
+
+def fit_modified_loglaw(z, u, kappa=OBU_KAPPA, L1_0=None):
+    """Nonlinear least-squares fit (scipy curve_fit) of the modified log law
+        u(z) = (v*/k) psi(z/L1) + offset
+    for (v_star, L1, offset).  Returns a dict (or None if too few points).
+    Sign of L1_0 seeds the stable(+)/unstable(-) branch."""
+    z = np.asarray(z, float); u = np.asarray(u, float)
+    good = np.isfinite(z) & np.isfinite(u) & (z > 0)
+    z, u = z[good], u[good]
+    if z.size < 4:
+        return None
+    if L1_0 is None:
+        L1_0 = 3.0*float(z.max())                        # weak-stratification seed
+    _d = obu_psi(z[-1]/L1_0) - obu_psi(z[0]/L1_0)
+    v0   = kappa*(u[-1] - u[0]) / (_d if abs(_d) > 1e-6 else 1e-6)
+    off0 = u[0] - (v0/kappa)*obu_psi(z[0]/L1_0)
+
+    def _model(zz, vs, L1, off):
+        return (vs/kappa)*obu_psi(np.asarray(zz, float)/L1) + off
+    try:
+        popt, pcov = curve_fit(_model, z, u, p0=[abs(v0), L1_0, off0], maxfev=20000)
+    except Exception as _e:
+        return {'ok': False, 'err': str(_e)}
+    resid  = u - _model(z, *popt)
+    ss_res = float(np.sum(resid**2)); ss_tot = float(np.sum((u - u.mean())**2))
+    r2 = (1.0 - ss_res/ss_tot) if ss_tot > 0 else float('nan')
+    return {'ok': True, 'v_star': float(popt[0]), 'L1': float(popt[1]),
+            'offset': float(popt[2]), 'r2': float(r2),
+            'perr': np.sqrt(np.diag(pcov)).tolist()}
+
+
+# Obukhov (1971) Table III — xi, eta(=Ri/Ri_cr), psi.  The printed xi=1.5 row
+# (psi = 5.230) breaks the monotone psi(xi) and is a transcription typo; dropped.
+_OBU_TBL3 = np.array([
+ (0.05,0.055,1.600),(0.10,0.102,2.370),(0.15,0.144,2.742),(0.20,0.189,3.065),
+ (0.25,0.231,3.320),(0.30,0.278,3.500),(0.35,0.320,3.662),(0.40,0.359,3.803),
+ (0.45,0.398,3.928),(0.50,0.435,4.045),(0.55,0.470,4.157),(0.60,0.502,4.258),
+ (0.65,0.533,4.360),(0.70,0.565,4.450),(0.75,0.597,4.560),(0.80,0.626,4.608),
+ (0.85,0.650,4.695),(0.90,0.677,4.769),(0.95,0.700,4.839),(1.00,0.723,4.908),
+ (1.1,0.76,5.03),(1.2,0.80,5.16),(1.3,0.84,5.29),(1.4,0.86,5.41),(1.6,0.90,5.63),
+ (1.7,0.92,5.74),(1.8,0.93,5.85),(1.9,0.94,5.95),(2.0,0.95,6.06),(2.1,0.96,6.16),
+ (2.2,0.96,6.27),(2.3,0.97,6.37),(2.4,0.97,6.47),(2.5,0.98,6.57),(2.6,0.98,6.68),
+ (2.7,0.98,6.78),(2.8,0.98,6.88),(2.9,0.99,6.99),(3.0,0.99,7.09),(3.5,0.99,7.60),
+ (4.0,1.00,8.10),(4.5,1.00,8.60),(5.0,1.00,9.10),(5.5,1.00,9.60),(6.0,1.00,10.10)])
+
+
+def validate_obukhov_tableIII(verbose=True, tol_eta=0.02, tol_psi=0.06):
+    """Reproduce Obukhov (1971) Table III (eta and psi vs xi) from the solver.
+    Unit-independent (all quantities dimensionless in the paper).  psi carries an
+    arbitrary additive constant, so it is compared after a single best-fit shift
+    C (= Obukhov's integration constant, ~4.6)."""
+    xi, eta_t, psi_t = _OBU_TBL3[:, 0], _OBU_TBL3[:, 1], _OBU_TBL3[:, 2]
+    eta_c = obu_eta_of_xi(xi)
+    psi_c = obu_psi(xi)
+    C     = float(np.mean(psi_t - psi_c))
+    e_eta = np.abs(eta_c - eta_t)
+    e_psi = np.abs(psi_c + C - psi_t)
+    ok = (e_eta.max() < tol_eta) and (float(np.sqrt(np.mean(e_psi**2))) < tol_psi)
+    if verbose:
+        print(f"[Obukhov Table III] eta(xi): max|err|={e_eta.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_eta**2)):.4f}")
+        print(f"[Obukhov Table III] psi(xi): shift C={C:.3f} max|err|={e_psi.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_psi**2)):.4f}")
+        print(f"[Obukhov Table III] {'PASS' if ok else 'FAIL'}  "
+              f"(k={OBU_KAPPA}, stable+unstable parametric solver)")
+    return ok
+
+
 # _loglaw_fit_case uses the fit-window/κ/Ri_cr constants (_LL_*) set in plotRes.
 def _ll_cumtrapz0(_fv, _xv):
     """Cumulative trapezoid of _fv over _xv, starting at 0 (matches PhAvg)."""
@@ -1292,6 +1434,74 @@ def _loglaw_fit_case(case):
             'Ri_mean': float(np.mean(_Ri)), 'Ri_max': float(np.max(_Ri)),
             'u_star': _uc, 'Fr': _Fr, 'z_ref': _zref, 'u_ref': _uref,
             'z_own': _zown_d, 'u_own': _uown_d}
+
+def _modloglaw_fit_case(case):
+    """Obukhov (1971) MODIFIED log-law fit for one case (mirrors the per-run block
+    in PhAvg_rotated.py, applied here across the Froude ladder):
+
+        u⁺(z⁺) = (v*/k) psi(z⁺/L1⁺) + offset        (k = OBU_KAPPA = 0.4)
+
+    GATED on SIM_FR: fitted ONLY for the stratified runs (finite Fr).  For the
+    NEUTRAL run (Fr = ∞) it is skipped — psi → ln(z⁺) there, so the modified law
+    collapses onto the classical log law already fitted by _loglaw_fit_case.
+
+    Free parameters: v* (in this case's own u★ units — v*≈1 ⇔ the profile-implied
+    friction velocity equals the Method-2 u★), L1⁺ (dynamic-turbulence scale in
+    wall units; + stable / − unstable) and an additive offset (roughness/intercept).
+
+    Fit window: from _LL_ZMIN up to ≈ the BL top δ⁺ — the curvature that pins L1
+    lives at z⁺ ~ L1⁺, well above the neutral [_LL_ZMIN,_LL_ZMAX] window — capped
+    at the data.  Fitted in the case's OWN inner units, exactly like the classical
+    fit, and the display curve is also returned on the shared reference axis.
+
+    Returns None when the case has no profile / is neutral / has too few points;
+    otherwise a dict, with 'ok': False and 'err' if curve_fit itself failed."""
+    _upr = gv('u_plus_rot', case)
+    _yg  = gv('y', case)
+    if _upr is None or _yg is None:
+        return None
+    _Fr = SIM_FR.get(case, np.inf)
+    if not np.isfinite(_Fr):                 # neutral → modified law undefined
+        return {'ok': False, 'skipped': True, 'Fr': _Fr,
+                'err': 'neutral run (Fr=inf)'}
+    _us2 = gv('u_star2', case)
+    _uc  = float(_us2[ghill(case)]) if _us2 is not None else u_star
+    if not np.isfinite(_uc) or _uc <= 0:
+        _uc = u_star
+    _zown = _yg * _uc / nu                   # z⁺ in THIS case's own inner units
+    _uown = _upr / _uc                       # u⁺ in own units
+
+    # δ⁺ = u★²/(f ν)  (f = 1 here), same expression as PhAvg_rotated.py.
+    _delta_plus = float(_uc**2 / (f * nu)) if (f != 0 and nu != 0) \
+        else float(np.nanmax(_zown))
+    _fin  = np.isfinite(_uown) & np.isfinite(_zown)
+    if not np.any(_fin):
+        return None
+    _hi   = min(float(np.nanmax(_zown[_fin])),
+                max(3.0*_LL_ZMAX, 0.6*_delta_plus))
+    _mask = (_zown >= _LL_ZMIN) & (_zown <= _hi) & _fin
+    if np.count_nonzero(_mask) < 4:
+        return {'ok': False, 'skipped': False, 'Fr': _Fr, 'err': '<4 pts',
+                'z_lo': _LL_ZMIN, 'z_hi': _hi}
+    # Seed the stable branch; curve_fit migrates to the unstable branch on its own
+    # if the profile is better matched there (the surface buoyancy-flux sign is
+    # not consulted, exactly as in PhAvg_rotated.py).
+    _fit = fit_modified_loglaw(_zown[_mask], _uown[_mask])
+    if _fit is None or not _fit.get('ok'):
+        return {'ok': False, 'skipped': False, 'Fr': _Fr,
+                'err': (_fit.get('err', '<4 pts') if _fit else 'no data'),
+                'z_lo': _LL_ZMIN, 'z_hi': _hi}
+    # Display curve over the fit window, in own units AND on the shared ref axis
+    # (plotted u = u⁺_own·u★_case/ustr_s1  vs  z⁺_ref = y/l_in) — same mapping the
+    # classical fit uses, so the two overlays are directly comparable.
+    _zd    = _zown[_mask]
+    _ufit  = obu_wind_profile(_zd, _fit['v_star'], _fit['L1'], _fit['offset'])
+    return {'ok': True, 'skipped': False, 'Fr': _Fr, 'u_star': _uc,
+            'v_star': _fit['v_star'], 'L1_plus': _fit['L1'],
+            'offset': _fit['offset'], 'r2': _fit['r2'], 'perr': _fit['perr'],
+            'delta_plus': _delta_plus, 'z_lo': _LL_ZMIN, 'z_hi': _hi,
+            'z_own': _zd, 'u_own': _ufit,
+            'z_ref': (_yg/l_in)[_mask], 'u_ref': _ufit * _uc / ustr_s1}
 
 # Veer as a BOUNDED angle arctan2(w_rot,u_rot) in degrees (∈[-180,180]) directly
 # from the rotated velocity components — the pickled `inst_alpha` is the RATIO
@@ -1653,6 +1863,15 @@ load_arrays = 1
 postprocess = 1
 plotRes = 1
 animate = 0
+
+# Selective replot: regenerate ONLY the two shear-stress momentum-balance figures
+# (P46 tau_zx + P47 tau_zy) and exit, instead of running the whole ~45-figure block.
+#   RESULTS_ONLY=shear python results.py      # only P46 + P47
+#   python results.py                         # '' -> full run (default, unchanged)
+# Accepted values: shear / tau / p46 / p47 / p46p47.  Hardcode the default below if
+# you prefer a plain toggle over the environment variable.
+plot_only = os.environ.get('RESULTS_ONLY', '').strip().lower()
+_ONLY_SHEAR = plot_only in ('shear', 'tau', 'p46', 'p47', 'p46p47')
 
 ###############################################################################
 ############################# Main Code #######################################
@@ -2068,6 +2287,183 @@ if (1 == plotRes):
     # Helpers _z_out/_oro_layer_idx/_smo_layer_idx → FUNCTION DEFINITIONS (top).
 
     ###########################################################################
+    # SHEAR-STRESS MOMENTUM BALANCE — P46 (tau_zx) + P47 (tau_zy), inner units.
+    #
+    # Defined HERE (right after the case/axis setup) rather than inline in
+    # SECTION 3 so the RESULTS_ONLY=shear flag can draw just these two figures
+    # and exit, without executing the other ~45.  A full run calls it from its
+    # original SECTION 3 position, so the figure order is unchanged.
+    #
+    # Sign convention = the validated one of PhAvg_rotated.py [PLOT 30]/[PLOT 32]
+    # (Kostelecky & Ansorge fig-4).  For BOTH components:
+    #     Coriolis C = -I_corr_*                Viscous  V = +visc_*
+    #     Reynolds R = -(turbulent + dispersive) = -rey_flux_*        (gold)
+    #     Temporal   = +dudt / +dwdt            Total = C + V + R + temporal (black)
+    # Only the Coriolis INPUT differs between the two (I_corr_yz vs I_corr_yx);
+    # every term is built identically, so tau_zy is a true mirror of tau_zx.
+    #
+    # The Reynolds shear stress is drawn as the SINGLE combined curve
+    # (turbulent + dispersive = rey_flux_yx / rey_flux_yz of PhAvg_rotated.py).
+    # The magenta/cyan turbulent-vs-dispersive split is deliberately NOT drawn
+    # here — it made the figure unreadable.  The outer-unit twins further down
+    # still show the split, which is why the shared _term_handles keeps them.
+    ###########################################################################
+    def _plot_shear_stress_balance():
+        # Reduced, LOCAL handles: no Turbulent/Dispersive (not drawn here).  The
+        # module-level _term_handles/_total_handle are left untouched for the
+        # outer-unit plots, which do still draw the split.
+        _rey_handles = [
+            Line2D([0], [0], color='steelblue',   ls='-', lw=1.5, label='Coriolis'),
+            Line2D([0], [0], color='firebrick',   ls='-', lw=1.5, label='Viscous'),
+            Line2D([0], [0], color='gold',        ls='-', lw=1.5, label='Reynolds'),
+            Line2D([0], [0], color='saddlebrown', ls='-', lw=1.5, label='Temporal'),
+        ]
+        _tot_handle = Line2D([0], [0], color='black', ls='-', lw=1.5,
+                             label=r'Total $\Sigma$')
+        # Boundary-layer region markers.  Colour already encodes the stress TERM,
+        # so the markers must be black — marking every case would be unreadable.
+        # Only ONE representative valley curve (the first case that actually draws
+        # a Reynolds curve) + the smooth curve carry them, on the gold Reynolds
+        # curve.  Small size keeps the figure uncluttered.
+        _MK_SIZE = 3.5
+
+        # ---- 3a. Shear stress tau_zx — streamwise/wall-normal (INNER units) ----
+        plt.figure(figsize=(10, 6), dpi=300)
+        if _smooth_loaded:
+            _rey_s = -np.mean(Rxy_s, axis=1)      # flat wall: Reynolds ≡ turbulent
+            _tot_s = -I_corr_yx_s + np.mean(visc_yx_s, axis=1) + _rey_s
+            plt.plot(y_in_s[:160], -I_corr_yx_s[:160]/ustr_s1**2,
+                     color='steelblue', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], np.mean(visc_yx_s, axis=1)[:160]/ustr_s1**2,
+                     color='firebrick', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], _rey_s[:160]/ustr_s1**2,
+                     color='gold', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], _tot_s[:160]/ustr_s1**2,
+                     color='black', linestyle=SMOOTH_LS, linewidth=1.5)
+            mark_layers(y_in_s[:160], _rey_s[:160]/ustr_s1**2, _smo_layer_idx(),
+                        filled=False, color='black', size=_MK_SIZE)
+        _marked = False                        # only the first valley curve is marked
+        for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
+            _Ic = gv('I_corr_yx', case)
+            _vx = gv('visc_yx',   case)
+            _rv = gv('rey_uv',    case)
+            _dv = gv('UV_disp',   case)
+            _dt = gv('dudt',      case)
+            _yi = gy_in(case)
+            if _Ic is None or _yi is None:
+                continue
+            _yn = _yi[:limity]
+            plt.plot(_yn, -_Ic[:limity]/_ustar_ref**2, color='steelblue', linestyle=ls)
+            _tot = -np.asarray(_Ic, dtype=float)
+            _vxp = _xprof(case, _vx)
+            if _vxp is not None:
+                plt.plot(_yn, _vxp[:limity]/_ustar_ref**2, color='firebrick', linestyle=ls)
+                _tot = _tot + np.asarray(_vxp, dtype=float)
+            # Reynolds = turbulent ⟨u''v''⟩ (rey_uv) + dispersive ũṽ (UV_disp),
+            # drawn as ONE curve; both still enter the Total.
+            _rvp = _xprof(case, _rv)
+            _dvp = _xprof(case, _dv)
+            if _rvp is not None:
+                _tot = _tot - np.asarray(_rvp, dtype=float)
+            if _dvp is not None:
+                _tot = _tot - np.asarray(_dvp, dtype=float)
+            if _rvp is not None and _dvp is not None:
+                _rey = -(np.asarray(_rvp) + np.asarray(_dvp))/_ustar_ref**2
+                plt.plot(_yn, _rey[:limity], color='gold', linestyle=ls)
+                if not _marked:
+                    mark_layers(_yn, _rey[:limity], _oro_layer_idx(case),
+                                filled=True, color='black', size=_MK_SIZE)
+                    _marked = True
+            if _dt is not None:
+                plt.plot(_yn, _dt[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
+                _tot = _tot + np.asarray(_dt, dtype=float)
+            plt.plot(_yn, _tot[:limity]/_ustar_ref**2, color='black', linestyle=ls, linewidth=1.5)
+        plt.legend(handles=_rey_handles + [_tot_handle] + all_handles(),
+                   fontsize=7, ncol=2, loc='upper right')
+        _mark_h('v')
+        add_marker_legend(oro=True, smooth=_smooth_loaded, case_lines=True,
+                          shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
+        plt.xlim(0, Z_PLUS_MAX)
+        # y-scale left free (autoscaled) so curves dipping below 0 are shown.
+        plt.xlabel(r'$z^+$')
+        plt.ylabel(r'$\langle\bar{\tau}_{zx}\rangle^+$')
+        plt.title(r'Shear stress $\tau_{zx}$ — all Fr, Re=500 ($z^+\leq200$)')
+        plt.grid(True)
+        plt.savefig(cwd+'fig'+'/'+'P46_MomBal_tauyx_allFr.png', dpi=300)
+        plt.show()
+
+        # ---- 3b. Shear stress tau_zy — spanwise/wall-normal (INNER units) ----
+        # Identical construction to tau_zx above; ONLY the Coriolis input differs.
+        plt.figure(figsize=(10, 6), dpi=300)
+        if _smooth_loaded:
+            _rey_sz = -np.mean(Ryz_s, axis=1)     # R_zy = -⟨v'w'⟩
+            _tot_sz = -I_corr_yz_s + np.mean(visc_yz_s, axis=1) + _rey_sz
+            plt.plot(y_in_s[:160], -I_corr_yz_s[:160]/ustr_s1**2,
+                     color='steelblue', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], np.mean(visc_yz_s, axis=1)[:160]/ustr_s1**2,
+                     color='firebrick', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], _rey_sz[:160]/ustr_s1**2,
+                     color='gold', linestyle=SMOOTH_LS, linewidth=1.5)
+            plt.plot(y_in_s[:160], _tot_sz[:160]/ustr_s1**2,
+                     color='black', linestyle=SMOOTH_LS, linewidth=1.5)
+            mark_layers(y_in_s[:160], _rey_sz[:160]/ustr_s1**2, _smo_layer_idx(),
+                        filled=False, color='black', size=_MK_SIZE)
+        _marked = False                        # only the first valley curve is marked
+        for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
+            _Iz  = gv('I_corr_yz', case)
+            _vz  = gv('visc_yz',   case)
+            _rw  = gv('rey_vw',    case)
+            _dvw = gv('VW_disp',   case)
+            _dw  = gv('dwdt',      case)
+            _yi = gy_in(case)
+            if _Iz is None or _yi is None:
+                continue
+            _yn = _yi[:limity]
+            plt.plot(_yn, -_Iz[:limity]/_ustar_ref**2, color='steelblue', linestyle=ls)
+            _tot = -np.asarray(_Iz, dtype=float)
+            _vzp = _xprof(case, _vz)
+            if _vzp is not None:
+                plt.plot(_yn, _vzp[:limity]/_ustar_ref**2, color='firebrick', linestyle=ls)
+                _tot = _tot + np.asarray(_vzp, dtype=float)
+            # Reynolds = turbulent ⟨v''w''⟩ (rey_vw) + dispersive ṽw̃ (VW_disp).
+            _rwp = _xprof(case, _rw)
+            _dwp = _xprof(case, _dvw)
+            if _rwp is not None:
+                _tot = _tot - np.asarray(_rwp, dtype=float)
+            if _dwp is not None:
+                _tot = _tot - np.asarray(_dwp, dtype=float)
+            if _rwp is not None and _dwp is not None:
+                _rey = -(np.asarray(_rwp) + np.asarray(_dwp))/_ustar_ref**2
+                plt.plot(_yn, _rey[:limity], color='gold', linestyle=ls)
+                if not _marked:
+                    mark_layers(_yn, _rey[:limity], _oro_layer_idx(case),
+                                filled=True, color='black', size=_MK_SIZE)
+                    _marked = True
+            if _dw is not None:
+                plt.plot(_yn, _dw[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
+                _tot = _tot + np.asarray(_dw, dtype=float)
+            plt.plot(_yn, _tot[:limity]/_ustar_ref**2, color='black', linestyle=ls, linewidth=1.5)
+        plt.legend(handles=_rey_handles + [_tot_handle] + all_handles(),
+                   fontsize=7, ncol=2, loc='upper right')
+        _mark_h('v')
+        add_marker_legend(oro=True, smooth=_smooth_loaded, case_lines=True,
+                          shade_case=True, smooth_ls=SMOOTH_LS, smooth_color=SMOOTH_COLOR)
+        plt.xlim(0, Z_PLUS_MAX)
+        # y-scale left free (autoscaled), exactly as for tau_zx.
+        plt.xlabel(r'$z^+$')
+        plt.ylabel(r'$\langle\bar{\tau}_{zy}\rangle^+$')
+        plt.title(r'Shear stress $\tau_{zy}$ — all Fr, Re=500 ($z^+\leq200$)')
+        plt.grid(True)
+        plt.savefig(cwd+'fig'+'/'+'P47_MomBal_tauyz_allFr.png', dpi=300)
+        plt.show()
+
+    # Selective replot: draw only P46 + P47 and stop, so these two can be
+    # iterated on without running the other ~45 figures (RESULTS_ONLY=shear).
+    if _ONLY_SHEAR:
+        _plot_shear_stress_balance()
+        raise SystemExit(0)
+
+    ###########################################################################
     # Helper: side-by-side 2D pcolormesh panels for all available Fr.
     # A single shared colorbar is placed in an explicit dedicated axes at the
     # far right.  Colour limits are the global max/min across ALL panels.
@@ -2090,6 +2486,82 @@ if (1 == plotRes):
     _IBM_COLOR = 'black'
 
     # Helpers _shade_ibm/plot2D_div_allcases → FUNCTION DEFINITIONS (top).
+
+    ###########################################################################
+    # SECTION 0 — NEW FIGURES (drawn first so they can be produced on their own
+    # by running just this block against an already-loaded namespace).
+    #
+    #   P29b  wind turning angle α(x⁺,z⁺) = atan2(⟨v⟩,⟨u⟩)   [met. labels;
+    #         engineering arrays AvgPhW = spanwise, AvgPhU = streamwise]
+    #   P24d2 second wall-normal derivative ∂²⟨u⟩/∂z², whose zero isoline is the
+    #         inflection line of the streamwise profile.  Read together with the
+    #         existing P24de (∂⟨u⟩/∂z = 0 → separation / reattachment): the
+    #         inflection line marks where the shear stops steepening and starts
+    #         relaxing, i.e. where the separated shear layer detaches from the
+    #         surface, which is far easier to localise than the shear zero itself.
+    ###########################################################################
+
+    # ── P29b: 2-D wind turning angle ────────────────────────────────────────
+    # arctan2 (not arctan of the ratio) so the angle stays bounded in [-180,180]
+    # where ⟨u⟩ reverses inside the valley — the same fix already applied to the
+    # 1-D P30 veer profile.  Solid cells are NaN'd so they neither set the colour
+    # limits nor produce a spurious α = atan2(0,0) = 0 in the recirculation shade.
+    for _cn in SIM_NAMES:
+        _sd = sims.get(_cn)
+        if _sd is None:
+            continue
+        _phu, _phw = gv('AvgPhU', _cn), gv('AvgPhW', _cn)
+        if _phu is None or _phw is None:
+            continue
+        _ang = np.degrees(np.arctan2(_phw, _phu))
+        _sd['veer_2d'] = np.where(geps(_cn) >= 0.5, np.nan, _ang)
+
+    plot2D_allFr('veer_2d',
+                 r'Wind turning angle $\alpha=\arctan(\langle v\rangle/\langle u\rangle)$ — Re=500',
+                 'RdBu_r', 'P29b_TurningAngle2D_allFr.png',
+                 include_smooth=False, shared_scale=True,
+                 cbar_label=r'$\alpha$ (deg)',
+                 overlay_contours=True, n_contours=12, contour_fmt='%.1f')
+
+    for _cn in SIM_NAMES:
+        sims.get(_cn, {}).pop('veer_2d', None)
+
+    # ── P24d2: inflection line ∂²⟨u⟩/∂z² = 0 ────────────────────────────────
+    # du_dy is pickled per case; differentiate it once more with the same IBM-aware
+    # Fornberg stencils used for the first derivative, on THIS case's own y grid
+    # (the stratified runs are on a different wall-normal grid than the neutral one).
+    # Inner scaling: ∂²u⁺/∂z⁺² = (l_in²/u_*)·∂²u/∂z² = (nu²/u_*³)·∂²u/∂z².
+    _sc_d2u    = nu**2 / u_star**3
+    _zI_lim_in = 200.0
+
+    _d2_panels = []
+    for _cname, _clbl in zip(SIM_NAMES, SIM_LABELS):
+        _dudy = gv('du_dy', _cname)
+        if _dudy is None:
+            continue
+        _epsc = geps(_cname)
+        if _dudy.shape != _epsc.shape:
+            print(f'P24d2: {_cname} du_dy shape {_dudy.shape} != eps {_epsc.shape}; skipped.')
+            continue
+        _yg = sims[_cname].get('y', y)
+        _nyc, _nxc = _dudy.shape
+        _d2 = diffu_dy(_dudy, _nyc, _nxc, _epsc, _yg)
+        _xc, _yc, _xo, _yo = _case_grid(_cname, use_inner=True)
+        _jl = _clip_rows(_yc, _zI_lim_in)
+        _d2_panels.append((_clbl, _xc, _yc[:_jl], _d2[:_jl, :] * _sc_d2u,
+                           _xo, _yo, _epsc[:_jl, :]))
+        _d2 = None
+
+    if _d2_panels:
+        plot2D_div_allcases(
+            _d2_panels,
+            r'$(\partial^2\langle u\rangle/\partial z^2)\,\nu^2/u_*^3$',
+            (r'Inflection of the streamwise profile — $\partial^2\langle u\rangle'
+             r'/\partial z^2$, all cases (black isoline: $=0$ inflection)'),
+            'P24d2_inflection_d2udz2_allFr.png', cmap='RdBu_r',
+            xname=r'$x^+$', yname=r'$z^+$', ylim_top=_zI_lim_in,
+            zero_contour=True, vmax_pct=92)
+    _d2_panels = None
 
     ###########################################################################
     # SECTION 1 — 2D SIDE-BY-SIDE COLORMAPS (rough-wall cases, all available Fr)
@@ -2479,6 +2951,11 @@ if (1 == plotRes):
     # curve overlay on P25).
     _ll_fits = {case: _loglaw_fit_case(case) for case in SIM_NAMES}
 
+    # Obukhov (1971) MODIFIED log-law (paper-faithful, nonlinear curve_fit) —
+    # stratified cases only; the neutral run returns skipped=True.  Fitted here
+    # per case, exactly as PhAvg_rotated.py fits it per run.
+    _mod_fits = {case: _modloglaw_fit_case(case) for case in SIM_NAMES}
+
     # Smooth flat-wall reference (neutral, Fr = ∞): fit the SAME neutral law to
     # its plotted profile.  U_s_p is already in u⁺ units and z⁺ = y_in_s, so no
     # rescaling is needed (unlike the rough cases, whose u_plus_rot is in G units).
@@ -2558,6 +3035,44 @@ if (1 == plotRes):
                  _f['B'], _f['r2'], _f['Ri_mean'], _f['Ri_max']))
     print('=' * 78)
 
+    # ── Obukhov (1971) MODIFIED log-law fit (per simulation, stratified only) ──
+    print('=' * 78)
+    print('MODIFIED LOG-LAW FIT — Obukhov (1971), Sec. 6  (nonlinear curve_fit)')
+    print('  u+(z+) = (v*/k) psi(z+/L1+) + offset      (k = %.2f, fixed at the '
+          'paper value)' % OBU_KAPPA)
+    print('  v* is in each case\'s OWN u* units (v*~1 <=> profile u* = Method-2 u*)')
+    print('  L1+ > 0 stable, < 0 unstable;  psi -> ln(z+) as L1+ -> inf '
+          '(neutral log law)')
+    print('  fit window z+ in [%.0f, min(3*%.0f, 0.6*delta+)] (own inner units)'
+          % (_LL_ZMIN, _LL_ZMAX))
+    print('-' * 78)
+    print('  %-14s %8s %12s %9s %7s %10s %12s'
+          % ('case', 'v*/u*', 'L1+', 'offset', 'R2', 'delta+', 'z+ window'))
+    _any_mod = False
+    for case in SIM_NAMES:
+        _m = _mod_fits.get(case)
+        if _m is None:
+            print('  %-14s  (no profile / grid pickled — skipped)' % case)
+            continue
+        if _m.get('skipped'):
+            print('  %-14s  skipped — neutral run (Fr=inf); the modified law '
+                  'reduces to the classical log law' % case)
+            continue
+        if not _m.get('ok'):
+            print('  %-14s  FIT NOT SUCCESSFUL (%s) -- not plotted'
+                  % (case, _m.get('err', 'unknown')))
+            continue
+        _any_mod = True
+        print('  %-14s %8.4f %+12.3e %9.3f %7.4f %10.1f  [%5.0f,%6.0f]'
+              % (case, _m['v_star'], _m['L1_plus'], _m['offset'], _m['r2'],
+                 _m['delta_plus'], _m['z_lo'], _m['z_hi']))
+    if _any_mod:
+        # Table-III self-test (unit-independent) — provenance for the modified law.
+        validate_obukhov_tableIII(verbose=True)
+    else:
+        print('  (no stratified case fitted — Table-III self-test skipped)')
+    print('=' * 78)
+
     # 2a. Log-law velocity profile (u+ and w+ vs z+) — INNER units.
     # Solid lines = streamwise (u+), faded (alpha=0.4) = spanwise (w+).
     # Vertical dashed lines mark the per-case BL thickness δ⁺ = u_*(h) × u_star/ν.
@@ -2606,6 +3121,12 @@ if (1 == plotRes):
         if _ff is not None and _ff['z_ref'] is not None:
             plt.plot(_ff['z_ref'], _ff['u_ref'], color=clr, linestyle=(0, (6, 2)),
                      linewidth=1.0, alpha=0.5, zorder=6)
+        # Overlay the Obukhov (1971) MODIFIED log-law fit (dash-dot, case colour).
+        # Stratified cases only — the neutral run has no modified law to draw.
+        _mf = _mod_fits.get(case)
+        if _mf is not None and _mf.get('ok') and _mf.get('z_ref') is not None:
+            plt.plot(_mf['z_ref'], _mf['u_ref'], color=clr, linestyle=(0, (4, 1, 1, 1)),
+                     linewidth=1.2, alpha=0.85, zorder=7)
         # BL height = the friction velocity (grid rule: y_BL = u★).  On the shared
         # single-reference z+ axis this is δ⁺ = u_*(h)·u_star/ν, using THIS case's
         # own Method-2 crest friction velocity u_*(h) = u_star2[ghill] — so each
@@ -2625,6 +3146,8 @@ if (1 == plotRes):
                   Line2D([0],[0], color='k', ls='-',   lw=1.5, alpha=0.4, label=r'$v^+$ (faded)'),
                   Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.6, label='Log-law'),
                   Line2D([0],[0], color='k', ls=(0,(6,2)), lw=1.0, alpha=0.5, label=r'Wall-law fit ($z^+\!\in[45,125]$)'),
+                  Line2D([0],[0], color='k', ls=(0,(4,1,1,1)), lw=1.2, alpha=0.85,
+                         label=r'Obukhov (1971) mod. log-law (stratified)'),
                   Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')])
     plt.legend(handles=_lgh_2a, fontsize=7, ncol=2)
     add_marker_legend(oro=True, smooth=_smooth_loaded)
@@ -2686,6 +3209,11 @@ if (1 == plotRes):
         if _ff is not None and _ff.get('z_own') is not None:
             plt.plot(_ff['z_own'], _ff['u_own'], color=clr, linestyle=(0, (6, 2)),
                      linewidth=1.0, alpha=0.5, zorder=6)
+        # Obukhov (1971) modified log-law, own units (stratified cases only).
+        _mf = _mod_fits.get(case)
+        if _mf is not None and _mf.get('ok') and _mf.get('z_own') is not None:
+            plt.plot(_mf['z_own'], _mf['u_own'], color=clr, linestyle=(0, (4, 1, 1, 1)),
+                     linewidth=1.2, alpha=0.85, zorder=7)
         # BL height δ⁺ = u★_case²/ν in own units.
         plt.axvline(x=_uc**2 / nu, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
     if _smooth_loaded:
@@ -2699,6 +3227,8 @@ if (1 == plotRes):
                   Line2D([0],[0], color='k', ls='-',   lw=1.5, alpha=0.4, label=r'$v^+$ (faded)'),
                   Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.6, label='Log-law'),
                   Line2D([0],[0], color='k', ls=(0,(6,2)), lw=1.0, alpha=0.5, label=r'Wall-law fit ($z^+\!\in[45,125]$)'),
+                  Line2D([0],[0], color='k', ls=(0,(4,1,1,1)), lw=1.2, alpha=0.85,
+                         label=r'Obukhov (1971) mod. log-law (stratified)'),
                   Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')])
     plt.legend(handles=_lgh_2b, fontsize=7, ncol=2)
     add_marker_legend(oro=True, smooth=_smooth_loaded)
@@ -3187,7 +3717,10 @@ if (1 == plotRes):
     # SECTION 3 -- MOMENTUM BALANCE (all 5 Fr, zoomed to y+ <= 200)
     ###########################################################################
 
-    # Shared term colour handles (defined once, used in both tau_yx and tau_yz).
+    # Shared term colour handles for the OUTER-unit tau_yx / tau_yz plots below,
+    # which still draw the turbulent-vs-dispersive split.  The inner-unit P46/P47
+    # build their own reduced handles inside _plot_shear_stress_balance() (they
+    # show only the combined Reynolds curve), so do NOT trim this list.
     # Double encoding: term by colour, case by linestyle (see all_handles() for case key).
     _term_handles = [
         Line2D([0],[0], color='steelblue',   ls='-', lw=1.5, label='Coriolis'),
@@ -3199,122 +3732,16 @@ if (1 == plotRes):
     ]
 
     # (Req 6) Black "Total" handle — the sum of all shear-stress terms (as in
-    # PhAvg_rotated.py / functions.plot_fig4_budget).  Kept LOCAL to the tau_yx
-    # plots so it is not shown in the tau_yz legend (which has no total curve).
+    # PhAvg_rotated.py / functions.plot_fig4_budget).  Used by the outer-unit
+    # tau_yx plot, which is the only one below that draws a total curve.
     _total_handle = Line2D([0], [0], color='black', ls='-', lw=1.5, label=r'Total $\Sigma$')
 
-    # 3a. Shear stress tau_yx — streamwise/wall-normal, all 6 cases (INNER)
-    # Colour = stress term; linestyle = case; black = total (sum of all terms).
-    # (Req 6) renamed "momentum balance" -> "shear stress"; free y-scale; total sum.
-    plt.figure(figsize=(10, 6), dpi=300)
-    if _smooth_loaded:
-        plt.plot(y_in_s[:160], -I_corr_yx_s[:160]/ustr_s1**2,
-                 color='steelblue',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(y_in_s[:160], np.mean(visc_yx_s, axis=1)[:160]/ustr_s1**2,
-                 color='firebrick',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(y_in_s[:160], -np.mean(Rxy_s, axis=1)[:160]/ustr_s1**2,
-                 color='gold',        linestyle=SMOOTH_LS, linewidth=1.5)   # flat wall: Reynolds ≡ turbulent
-        _tot_s = (-I_corr_yx_s + np.mean(visc_yx_s, axis=1)
-                  - np.mean(Rxy_s, axis=1))
-        plt.plot(y_in_s[:160], _tot_s[:160]/ustr_s1**2,
-                 color='black', linestyle=SMOOTH_LS, linewidth=1.5)
-    for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
-        _Ic = gv('I_corr_yx', case)
-        _vx = gv('visc_yx',   case)
-        _rv = gv('rey_uv',    case)
-        _dv = gv('UV_disp',   case)
-        _dt = gv('dudt',      case)
-        _yi = gy_in(case)
-        if _Ic is None or _yi is None:
-            continue
-        _yn = _yi[:limity]
-        plt.plot(_yn, -_Ic[:limity]/_ustar_ref**2,    color='steelblue',   linestyle=ls)
-        _tot = -np.asarray(_Ic, dtype=float)
-        if _vx is not None:
-            plt.plot(_yn,  _vx[:limity]/_ustar_ref**2, color='firebrick',   linestyle=ls)
-            _tot = _tot + np.asarray(_vx, dtype=float)
-        # Momentum flux split: turbulent ⟨u''v''⟩ (rey_uv) + dispersive ũṽ (UV_disp);
-        # their sum is the Reynolds shear stress.  All three enter the balance.
-        _rvp = _xprof(case, _rv) if _rv is not None else None
-        _dvp = _xprof(case, _dv) if _dv is not None else None
-        if _rvp is not None:
-            plt.plot(_yn, -_rvp[:limity]/_ustar_ref**2, color='magenta', linestyle=ls)   # turbulent
-            _tot = _tot - np.asarray(_rvp, dtype=float)
-        if _dvp is not None:
-            plt.plot(_yn, -_dvp[:limity]/_ustar_ref**2, color='cyan',    linestyle=ls)   # dispersive
-            _tot = _tot - np.asarray(_dvp, dtype=float)
-        if _rvp is not None and _dvp is not None:
-            plt.plot(_yn, -(np.asarray(_rvp) + np.asarray(_dvp))[:limity]/_ustar_ref**2,
-                     color='gold', linestyle=ls)                                          # Reynolds = turb+disp
-        if _dt is not None:
-            plt.plot(_yn,  _dt[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
-            _tot = _tot + np.asarray(_dt, dtype=float)
-        plt.plot(_yn, _tot[:limity]/_ustar_ref**2, color='black', linestyle=ls, linewidth=1.5)
-    plt.legend(handles=_term_handles + [_total_handle] + all_handles(),
-               fontsize=7, ncol=2, loc='upper right')
-    _mark_h('v')
-    plt.xlim(0, Z_PLUS_MAX)
-    # (Req 6) y-scale left free (autoscaled) so curves dipping below 0 are shown.
-    plt.xlabel(r'$z^+$')
-    plt.ylabel(r'$\langle\bar{\tau}_{zx}\rangle^+$')
-    plt.title(r'Shear stress $\tau_{zx}$ — all Fr, Re=500 ($z^+\leq200$)')
-    plt.grid(True)
-    plt.savefig(cwd+'fig'+'/'+'P46_MomBal_tauyx_allFr.png', dpi=300)
-    _save_layers_x(cwd+'fig'+'/'+'P46_MomBal_tauyx_allFr',
-                   r'Shear stress $\tau_{zx}$ — all Fr, Re=500')
-    plt.show()
-
-    # 3b. Shear stress tau_yz — spanwise/wall-normal, all 6 cases (INNER)
-    # Colour = stress term; linestyle = case (see legend).
-    # (Req 7) renamed "momentum balance" -> "shear stress"; the SMOOTH Coriolis
-    # term sign is FLIPPED (-I_corr_yz_s) so it matches the rough-case convention
-    # (_Iz = -I_corr_yz), which was inconsistent before.
-    plt.figure(figsize=(10, 6), dpi=300)
-    if _smooth_loaded:
-        plt.plot(y_in_s[:160], -I_corr_yz_s[:160]/ustr_s1**2,
-                 color='steelblue',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(y_in_s[:160], np.mean(visc_yz_s, axis=1)[:160]/ustr_s1**2,
-                 color='firebrick',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(y_in_s[:160], np.mean(Ryz_s, axis=1)[:160]/ustr_s1**2,
-                 color='gold',        linestyle=SMOOTH_LS, linewidth=1.5)   # flat wall: Reynolds ≡ turbulent
-    for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
-        _Iz  = -gv('I_corr_yz', case)     # negated: view as positive contribution
-        _vz  =  gv('visc_yz',   case)
-        _rw  =  gv('rey_vw',    case)
-        _dvw =  gv('VW_disp',   case)
-        _dw  =  gv('dwdt',      case)
-        _yi = gy_in(case)
-        if _Iz is None or _yi is None:
-            continue
-        _yn = _yi[:limity]
-        plt.plot(_yn,  _Iz[:limity]/_ustar_ref**2,   color='steelblue',   linestyle=ls)
-        if _vz is not None:
-            plt.plot(_yn, _xprof(case, _vz)[:limity]/_ustar_ref**2,
-                     color='firebrick', linestyle=ls)
-        # Turbulent ⟨v''w''⟩ (rey_vw) + dispersive ṽw̃ (VW_disp) = Reynolds shear stress.
-        _rwp = _xprof(case, _rw)  if _rw  is not None else None
-        _dwp = _xprof(case, _dvw) if _dvw is not None else None
-        if _rwp is not None:
-            plt.plot(_yn, _rwp[:limity]/_ustar_ref**2, color='magenta', linestyle=ls)   # turbulent
-        if _dwp is not None:
-            plt.plot(_yn, _dwp[:limity]/_ustar_ref**2, color='cyan',    linestyle=ls)   # dispersive
-        if _rwp is not None and _dwp is not None:
-            plt.plot(_yn, (np.asarray(_rwp) + np.asarray(_dwp))[:limity]/_ustar_ref**2,
-                     color='gold', linestyle=ls)                                        # Reynolds = turb+disp
-        if _dw is not None:
-            plt.plot(_yn,  _dw[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
-    plt.legend(handles=_term_handles + all_handles(), fontsize=7, ncol=2, loc='upper right')
-    _mark_h('v')
-    plt.xlim(0, Z_PLUS_MAX)
-    plt.ylim(-0.5, 1.0)
-    plt.xlabel(r'$z^+$')
-    plt.ylabel(r'$\langle\bar{\tau}_{zy}\rangle^+$')
-    plt.title(r'Shear stress $\tau_{zy}$ — all Fr, Re=500 ($z^+\leq200$)')
-    plt.grid(True)
-    plt.savefig(cwd+'fig'+'/'+'P47_MomBal_tauyz_allFr.png', dpi=300)
-    _save_layers_x(cwd+'fig'+'/'+'P47_MomBal_tauyz_allFr',
-                   r'Shear stress $\tau_{zy}$ — all Fr, Re=500')
-    plt.show()
+    # 3a/3b. Shear stress tau_zx (P46) + tau_zy (P47), inner units, all cases.
+    # Body lives in _plot_shear_stress_balance() (defined near the top of this
+    # block) so RESULTS_ONLY=shear can regenerate just these two figures.
+    # Colour = stress term; linestyle = case; black = Total; the Reynolds stress
+    # is one combined curve (turbulent + dispersive).  No zoomed layer PNGs.
+    _plot_shear_stress_balance()
 
     ###########################################################################
     # SECTION 3 (outer units) — MOMENTUM BALANCE
@@ -3883,6 +4310,8 @@ if (1 == plotRes):
     print('  [D2/D3] ψ note: 2-D spanwise-mean projection; the spanwise drift '
           '⟨w̄⟩ (AvgPhW) carries fluid through the apparent recirculation — a '
           'true 3-D closed-orbit test needs spanwise-resolved fields (gated).')
+# %%
+
 
     # ── D17. Streamwise-resolved Coriolis integrand C(x⁺,z⁺) (#3) ──
     # C(x,z)=∫₀^z(g2−⟨v⟩)dz' (g2≈0 rotated).  R(x,z)=−⟨u''v''⟩ is already the
@@ -3898,7 +4327,7 @@ if (1 == plotRes):
                  shared_scale=True, overlay_contours=True, n_contours=12)
     for case in SIM_NAMES:
         sims.get(case, {}).pop('C2D', None)
-
+    STOP
     # ── D18. Pressure-Poisson source decomposition (medium 3) ──────
     # ∇²P = −∂²(u_iu_j)/∂x_i∂x_j.  Split the RHS into mean-strain / turbulent /
     # dispersive sources (turbulent + dispersive = the Reynolds source); store the
