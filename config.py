@@ -99,11 +99,26 @@ Re_rough        = 1000                   # bulk Reynolds number of the rough cas
 Re_lambda_rough = 0.5 * Re_rough**2      # = 5e5  (tlab 1/nu)
 nu_rough        = 1 / Re_lambda_rough    # = 2e-6  kinematic viscosity
 
+# Rough Re=1000 STABLE LADDER (Cedrick's ri00.00 → ri18.78 avg_all.nc files) — a
+# LOG-LAW-ONLY overlay.  Each file is read minimally (mean rU + stored
+# FrictionVelocity only; see functions.load_loglaw_nc / load_rough_ladder_loglaw)
+# and drawn in its OWN inner units (Re=1000 → nu_rough).  The directory lives on
+# the machine that holds the data (not in this code-prep repo); the loader returns
+# an empty list when it is absent, so leaving this on here is harmless.
+rough_ladder_dir     = '/home/shreyad95/Documents/PhD/Code/Re1000/'
+rough_ladder_pattern = 'ri*_avg.nc'      # glob for the ladder avg files
+# These stable files store NO FrictionVelocity; the log-law only needs a
+# normalising scale, so u⁺ = ⟨ū⟩/rough_ladder_ustar, z⁺ = y·rough_ladder_ustar/ν.
+rough_ladder_ustar   = 0.0618
+
 # ── 10. Reference-overlay master switches (testing vs publication) ────────────
 #   Each: True → overlay that reference case on the smooth-vs-orographic plots.
 #   Default = smooth only (publication mode); flip plot_ref_rough on for testing.
 plot_ref_smooth = True    # overlay smooth (Re=500) reference
 plot_ref_rough  = False   # overlay rough r1 (Re=1000) reference  (test only)
+# Overlay the FULL rough Re=1000 stable ladder (ri00.00 → ri18.78) on the LOG-LAW
+# plots ONLY (PhAvg_rotated PLOT 36; results.py P25/P25b).  Off by default.
+plot_ref_rough_ladder = False
 
 # ── 11. Stratification / research diagnostics (8-goal post-processing) ────────
 # Research.md:536-550.  Buoyancy = the scalar directly: AvgScal IS the non-dim
@@ -166,3 +181,73 @@ Fr = np.inf                   # this run's Froude number (np.inf ⇒ neutral)
 # Obukhov cites 1/11 … 1 (Sverdrup ⇒ Ri_cr = 1/α = K/K_T ≈ Pr_t); 0.25 is the
 # standard Miles–Howard value used here — set it to Pr_t if that closure is wanted.
 Ri_cr = 0.25                  # critical gradient Richardson number  [Obukhov eqs 36/38]
+
+# ── 13. PhAvg_rotated.py internal constants ───────────────────────────────────
+# Constants formerly hard-coded inside PhAvg_rotated.py, collected here so every
+# tunable lives in config (project rule: all constants in config.py).  Values are
+# byte-for-byte identical to the literals they replace, so pickled quantities that
+# depend on them (y0, u_most, …) are unchanged.
+
+# Phase-average read loop: first DNS iteration of the avg_* file series.  File
+# names are  avg_flow{srt}_{end}.c  with srt/end stepping by `restart` from this
+# base (see the cal_Avg / verify_TimeAvg read loops).
+avg_iter_base = 234500
+
+# planesK.* instantaneous-field layout — shared by the intermittency, animation
+# and spectra blocks (was triplicated as N_KPLANES/NVARS/KPLANE_IDX, _NK…, _SP_*).
+planesK_n_kplanes  = 1        # k-planes saved per file  (kplanes%n in TLAB)
+planesK_nvars      = 5        # variables per k-plane    (u, v, w, s1, p)
+planesK_kplane_idx = 0        # which k-plane to read/show (0-based)
+planesK_vel_max    = 1.5      # reject a frame whose |u| or |v| exceeds this (diverged)
+
+# Modified (Obukhov 1971) stability-corrected log-law fit window (wall units z⁺).
+# The neutral classical fit uses loglaw_zmin/zmax (§8); the modified fit sits higher.
+modlaw_zmin = 70.0
+modlaw_zmax = 150.0
+
+# Monin–Obukhov reference-profile (MOST) near-wall scales & additive constant:
+#   d  = most_d_factor  · u★   (zero-plane displacement in u_most_v)
+#   y0 = most_y0_factor · u★   (roughness length / first evaluation height)
+#   u_most = (1/κ) ln(z⁺) + most_B     (classical log law, additive constant B)
+most_d_factor  = 0.01
+most_y0_factor = 5.0
+most_B         = 4.5
+
+# planesK animation block (animate==1): which snapshots and how to render.
+anim_ny         = 430         # wall-normal points to include
+anim_first_iter = 262510      # first planesK iteration
+anim_last_iter  = 264500      # last  planesK iteration
+anim_iter_step  = 10          # iteration stride between frames
+anim_fps        = 10          # animation frames per second
+
+# Streamwise-spectra block (plot_spectra==1): wall-normal target heights z⁺ at
+# which the pre-multiplied spectrum is sampled (log/inertial region).
+spectra_z_targets = [30.0, 60.0, 100.0, 150.0]
+
+# Modified (Obukhov 1971) log-law fixed von Kármán constant.  The paper/Table-III
+# pins it to 0.4 (NOT config.kappa = 0.42, which the neutral fit fits within
+# kappa_bounds); v* scales as 1/κ, so a different κ only rescales v*, not L1.
+# Used by the Obukhov wall-law helpers in functions.py.
+obu_kappa = 0.4
+
+# Neutral log-law OLS fit fallback defaults (used only if no valid κ is found in
+# kappa_bounds): κ, zero-plane displacement d⁺, roughness z₀ₘ⁺.  All three are
+# pickled (kappa_loglaw / d_m_loglaw / z0m_loglaw).
+loglaw_kappa_default = 0.41
+loglaw_d_default     = 0.0
+loglaw_z0m_default   = 0.068
+
+# Kostelecky & Ansorge (2024) fig-4 validation budget (reference .nc cases;
+# PLOT 32r in PhAvg[_rotated].py): the geostrophic vector is read at
+# fig4_top_frac·Ly (free stream, below the Rayleigh sponge — the avg files
+# store no usable G), and the Method-2 u* plateau is averaged over
+# fig4_plateau_lo·y_top < y < y_top.
+fig4_top_frac   = 0.8
+fig4_plateau_lo = 0.05
+# Display handedness of the SPANWISE panel (τ_zy).  Our tlab runs carry the
+# opposite sign-of-f to K&A's written eq. 4.2, so the physically-native closing
+# budget gives C_zy<0 / R_zy>0 — the exact MIRROR of the paper.  With this True
+# the τ_zy budget is negated for DISPLAY (τ_zy → −τ_zy) so the panel matches the
+# paper and fig4_smooth_standalone.py (Coriolis reads positive); it leaves τ_zx,
+# u*, and the closure untouched (only the plotted sign of the spanwise flips).
+fig4_paper_spanwise_sign = True

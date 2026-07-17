@@ -29,6 +29,40 @@ from matplotlib.ticker import MaxNLocator
 from PIL import Image
 from functions import *
 
+# Display handedness of the SPANWISE (τ_zy) shear-stress panels — mirrors
+# config.fig4_paper_spanwise_sign.  Our tlab f-sign gives the closing τ_zy budget
+# as C_zy<0 / R_zy>0 (mirror of K&A 2024); True negates the τ_zy panel for DISPLAY
+# so Coriolis reads positive like the paper (physical closure / u* unaffected — this
+# only scales the plotted τ_zy curves).  results.py may be deployed WITHOUT config.py
+# (setup.sh --results-only), so fall back to the documented default True.
+try:
+    from config import fig4_paper_spanwise_sign as FIG4_PAPER_SPANWISE_SIGN
+except Exception:
+    FIG4_PAPER_SPANWISE_SIGN = True
+
+# Rough Re=1000 stable-ladder LOG-LAW overlay (config-gated; same WITHOUT-config.py
+# fallback as above).  Directory holds the ri00.00 → ri18.78 avg_all.nc files and
+# lives on the machine with the data; the loader returns [] when it is absent.
+try:
+    from config import (plot_ref_rough_ladder as REF_ROUGH_LADDER,
+                        rough_ladder_dir as ROUGH_LADDER_DIR,
+                        rough_ladder_pattern as ROUGH_LADDER_PATTERN,
+                        rough_ladder_ustar as ROUGH_LADDER_USTAR,
+                        nu_rough as NU_ROUGH)
+except Exception:
+    REF_ROUGH_LADDER    = False
+    ROUGH_LADDER_DIR    = '/home/shreyad95/Documents/PhD/Code/Re1000/'
+    ROUGH_LADDER_PATTERN = 'ri*_avg.nc'
+    ROUGH_LADDER_USTAR  = 0.0618
+    NU_ROUGH            = 2e-6
+
+# MOST neutral turbulent Prandtl number for the cross-case local-similarity
+# (φ_h) overlay (Goal 5 / P87); same WITHOUT-config.py fallback as above.
+try:
+    from config import Pr_t as PR_T
+except Exception:
+    PR_T = 0.85
+
 ###############################################################################
 ############################## Function defintion #############################
 
@@ -2294,13 +2328,19 @@ if (1 == plotRes):
     # and exit, without executing the other ~45.  A full run calls it from its
     # original SECTION 3 position, so the figure order is unchanged.
     #
-    # Sign convention = the validated one of PhAvg_rotated.py [PLOT 30]/[PLOT 32]
-    # (Kostelecky & Ansorge fig-4).  For BOTH components:
-    #     Coriolis C = -I_corr_*                Viscous  V = +visc_*
-    #     Reynolds R = -(turbulent + dispersive) = -rey_flux_*        (gold)
-    #     Temporal   = +dudt / +dwdt            Total = C + V + R + temporal (black)
-    # Only the Coriolis INPUT differs between the two (I_corr_yz vs I_corr_yx);
-    # every term is built identically, so tau_zy is a true mirror of tau_zx.
+    # 🔒 LOCKED — STANDARD shear-stress budget (CLAUDE.md "Standard shear-stress
+    # budget formulation"; verified against Kostelecky & Ansorge fig-4).  DO NOT
+    # MODIFY the P46/P47 (inner) or P48/P49 (outer) tau_zx/tau_zy blocks below.
+    #     Viscous  V = +visc_*      Reynolds R = -(turbulent + dispersive)   (gold)
+    #     Temporal   = +dudt/+dwdt  Total = C + V + R + temporal              (black)
+    #     Coriolis:  C_zx = -I_corr_yx  BUT  C_zy = +I_corr_yz  (Levi-Civita
+    #                ε_{ik3}: the two Coriolis terms carry OPPOSITE signs — this
+    #                is the only difference between the tau_zx and tau_zy panels,
+    #                and it is what keeps each Total height-constant).
+    #     DISPLAY: the SPANWISE (tau_zy) panels are negated by _SP for paper
+    #                handedness (FIG4_PAPER_SPANWISE_SIGN, mirroring
+    #                config.fig4_paper_spanwise_sign / PhAvg_rotated.py); this scales
+    #                only the plotted tau_zy curves — closure and u* are untouched.
     #
     # The Reynolds shear stress is drawn as the SINGLE combined curve
     # (turbulent + dispersive = rey_flux_yx / rey_flux_yz of PhAvg_rotated.py).
@@ -2393,20 +2433,26 @@ if (1 == plotRes):
         plt.show()
 
         # ---- 3b. Shear stress tau_zy — spanwise/wall-normal (INNER units) ----
-        # Identical construction to tau_zx above; ONLY the Coriolis input differs.
+        # 🔒 LOCKED — STANDARD budget (see CLAUDE.md "Standard shear-stress budget
+        # formulation").  Same construction as tau_zx, but the spanwise Coriolis
+        # carries the OPPOSITE sign (Levi-Civita ε_{ik3}): C_zy = +I_corr_yz (vs
+        # −I_corr_yx for tau_zx); R_zy = −(turb+disp).  DISPLAY: the whole τ_zy panel
+        # is negated by _SP for paper handedness (mirrors PhAvg_rotated.py /
+        # fig4_smooth_standalone.py); the physical closure and u* are unaffected.
+        _SP = -1.0 if FIG4_PAPER_SPANWISE_SIGN else 1.0
         plt.figure(figsize=(10, 6), dpi=300)
         if _smooth_loaded:
             _rey_sz = -np.mean(Ryz_s, axis=1)     # R_zy = -⟨v'w'⟩
-            _tot_sz = -I_corr_yz_s + np.mean(visc_yz_s, axis=1) + _rey_sz
-            plt.plot(y_in_s[:160], -I_corr_yz_s[:160]/ustr_s1**2,
+            _tot_sz = I_corr_yz_s + np.mean(visc_yz_s, axis=1) + _rey_sz
+            plt.plot(y_in_s[:160], _SP*I_corr_yz_s[:160]/ustr_s1**2,
                      color='steelblue', linestyle=SMOOTH_LS, linewidth=1.5)
-            plt.plot(y_in_s[:160], np.mean(visc_yz_s, axis=1)[:160]/ustr_s1**2,
+            plt.plot(y_in_s[:160], _SP*np.mean(visc_yz_s, axis=1)[:160]/ustr_s1**2,
                      color='firebrick', linestyle=SMOOTH_LS, linewidth=1.5)
-            plt.plot(y_in_s[:160], _rey_sz[:160]/ustr_s1**2,
+            plt.plot(y_in_s[:160], _SP*_rey_sz[:160]/ustr_s1**2,
                      color='gold', linestyle=SMOOTH_LS, linewidth=1.5)
-            plt.plot(y_in_s[:160], _tot_sz[:160]/ustr_s1**2,
+            plt.plot(y_in_s[:160], _SP*_tot_sz[:160]/ustr_s1**2,
                      color='black', linestyle=SMOOTH_LS, linewidth=1.5)
-            mark_layers(y_in_s[:160], _rey_sz[:160]/ustr_s1**2, _smo_layer_idx(),
+            mark_layers(y_in_s[:160], _SP*_rey_sz[:160]/ustr_s1**2, _smo_layer_idx(),
                         filled=False, color='black', size=_MK_SIZE)
         _marked = False                        # only the first valley curve is marked
         for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
@@ -2419,11 +2465,11 @@ if (1 == plotRes):
             if _Iz is None or _yi is None:
                 continue
             _yn = _yi[:limity]
-            plt.plot(_yn, -_Iz[:limity]/_ustar_ref**2, color='steelblue', linestyle=ls)
-            _tot = -np.asarray(_Iz, dtype=float)
+            plt.plot(_yn, _SP*_Iz[:limity]/_ustar_ref**2, color='steelblue', linestyle=ls)
+            _tot = np.asarray(_Iz, dtype=float)
             _vzp = _xprof(case, _vz)
             if _vzp is not None:
-                plt.plot(_yn, _vzp[:limity]/_ustar_ref**2, color='firebrick', linestyle=ls)
+                plt.plot(_yn, _SP*_vzp[:limity]/_ustar_ref**2, color='firebrick', linestyle=ls)
                 _tot = _tot + np.asarray(_vzp, dtype=float)
             # Reynolds = turbulent ⟨v''w''⟩ (rey_vw) + dispersive ṽw̃ (VW_disp).
             _rwp = _xprof(case, _rw)
@@ -2434,15 +2480,15 @@ if (1 == plotRes):
                 _tot = _tot - np.asarray(_dwp, dtype=float)
             if _rwp is not None and _dwp is not None:
                 _rey = -(np.asarray(_rwp) + np.asarray(_dwp))/_ustar_ref**2
-                plt.plot(_yn, _rey[:limity], color='gold', linestyle=ls)
+                plt.plot(_yn, _SP*_rey[:limity], color='gold', linestyle=ls)
                 if not _marked:
-                    mark_layers(_yn, _rey[:limity], _oro_layer_idx(case),
+                    mark_layers(_yn, _SP*_rey[:limity], _oro_layer_idx(case),
                                 filled=True, color='black', size=_MK_SIZE)
                     _marked = True
             if _dw is not None:
-                plt.plot(_yn, _dw[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
+                plt.plot(_yn, _SP*_dw[:limity]/_ustar_ref**2, color='saddlebrown', linestyle=ls)
                 _tot = _tot + np.asarray(_dw, dtype=float)
-            plt.plot(_yn, _tot[:limity]/_ustar_ref**2, color='black', linestyle=ls, linewidth=1.5)
+            plt.plot(_yn, _SP*_tot[:limity]/_ustar_ref**2, color='black', linestyle=ls, linewidth=1.5)
         plt.legend(handles=_rey_handles + [_tot_handle] + all_handles(),
                    fontsize=7, ncol=2, loc='upper right')
         _mark_h('v')
@@ -2956,6 +3002,22 @@ if (1 == plotRes):
     # per case, exactly as PhAvg_rotated.py fits it per run.
     _mod_fits = {case: _modloglaw_fit_case(case) for case in SIM_NAMES}
 
+    # Rough Re=1000 STABLE LADDER (ri00.00 → ri18.78) — LOG-LAW overlay only, drawn
+    # in each case's OWN inner units (z⁺ = y·u*/ν_rough, u⁺ = ⟨ū⟩/u*).  Gated on the
+    # config flag REF_ROUGH_LADDER; the loader reads only mean rU + stored
+    # FrictionVelocity per file (memory-light) and returns [] when the data dir is
+    # absent.  Colour = Ri gradient (viridis); overlaid on P25 and P25b below.
+    _rough_ladder = (load_rough_ladder_loglaw(ROUGH_LADDER_DIR, NU_ROUGH,
+                                              ROUGH_LADDER_PATTERN,
+                                              u_star_default=ROUGH_LADDER_USTAR)
+                     if REF_ROUGH_LADDER else [])
+    _ladder_colors = (plt.cm.viridis(np.linspace(0.12, 0.92, len(_rough_ladder)))
+                      if _rough_ladder else [])
+    _lgh_ladder = ([Line2D([0], [0], color=plt.cm.viridis(0.5), linestyle='-',
+                           linewidth=1.2,
+                           label=r'rough Re1000 stable ladder (own $u_\star$)')]
+                   if _rough_ladder else [])
+
     # Smooth flat-wall reference (neutral, Fr = ∞): fit the SAME neutral law to
     # its plotted profile.  U_s_p is already in u⁺ units and z⁺ = y_in_s, so no
     # rescaling is needed (unlike the rough cases, whose u_plus_rot is in G units).
@@ -3136,6 +3198,10 @@ if (1 == plotRes):
             plt.axvline(x=_delta_case, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
     if _smooth_loaded:
         plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
+    # Rough Re=1000 stable-ladder log-law overlay (own inner units; colour = Ri).
+    for _rc, _rcol in zip(_rough_ladder, _ladder_colors):
+        plt.plot(_rc['z_plus'], _rc['u_plus'], color=_rcol, linestyle='-',
+                 linewidth=0.8, alpha=0.75, zorder=2)
     _mark_h('v')
     plt.xscale('log')
     plt.xlim(y_in[1], _xmax_loglaw)
@@ -3148,7 +3214,8 @@ if (1 == plotRes):
                   Line2D([0],[0], color='k', ls=(0,(6,2)), lw=1.0, alpha=0.5, label=r'Wall-law fit ($z^+\!\in[45,125]$)'),
                   Line2D([0],[0], color='k', ls=(0,(4,1,1,1)), lw=1.2, alpha=0.85,
                          label=r'Obukhov (1971) mod. log-law (stratified)'),
-                  Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')])
+                  Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')]
+               + _lgh_ladder)
     plt.legend(handles=_lgh_2a, fontsize=7, ncol=2)
     add_marker_legend(oro=True, smooth=_smooth_loaded)
     plt.grid(True, which='both', linestyle='--', linewidth=0.4)
@@ -3218,6 +3285,10 @@ if (1 == plotRes):
         plt.axvline(x=_uc**2 / nu, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
     if _smooth_loaded:
         plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
+    # Rough Re=1000 stable-ladder log-law overlay (own inner units; colour = Ri).
+    for _rc, _rcol in zip(_rough_ladder, _ladder_colors):
+        plt.plot(_rc['z_plus'], _rc['u_plus'], color=_rcol, linestyle='-',
+                 linewidth=0.8, alpha=0.75, zorder=2)
     plt.xscale('log')
     plt.xlim(y_in[1], _xmax_own)
     plt.xlabel(r'$z^+ = z\,u_{\star,\mathrm{case}}/\nu$')
@@ -3229,7 +3300,8 @@ if (1 == plotRes):
                   Line2D([0],[0], color='k', ls=(0,(6,2)), lw=1.0, alpha=0.5, label=r'Wall-law fit ($z^+\!\in[45,125]$)'),
                   Line2D([0],[0], color='k', ls=(0,(4,1,1,1)), lw=1.2, alpha=0.85,
                          label=r'Obukhov (1971) mod. log-law (stratified)'),
-                  Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')])
+                  Line2D([0],[0], color='k', ls='--',  lw=1.0, alpha=0.8, label=r'$\delta_o$ per case')]
+               + _lgh_ladder)
     plt.legend(handles=_lgh_2b, fontsize=7, ncol=2)
     add_marker_legend(oro=True, smooth=_smooth_loaded)
     plt.grid(True, which='both', linestyle='--', linewidth=0.4)
@@ -3732,8 +3804,8 @@ if (1 == plotRes):
     ]
 
     # (Req 6) Black "Total" handle — the sum of all shear-stress terms (as in
-    # PhAvg_rotated.py / functions.plot_fig4_budget).  Used by the outer-unit
-    # tau_yx plot, which is the only one below that draws a total curve.
+    # PhAvg_rotated.py PLOT 32r / PlotField.plot_fig4_budget).  Used by the
+    # outer-unit tau_yx plot, which is the only one below that draws a total curve.
     _total_handle = Line2D([0], [0], color='black', ls='-', lw=1.5, label=r'Total $\Sigma$')
 
     # 3a/3b. Shear stress tau_zx (P46) + tau_zy (P47), inner units, all cases.
@@ -3808,19 +3880,22 @@ if (1 == plotRes):
     plt.show()
 
     # 3b (outer). Shear stress tau_yz — outer units z- = y/u_star2(h).
-    # (Req 7/8) renamed to "shear stress"; SMOOTH Coriolis sign flipped
-    # (-I_corr_yz_s) to match the rough convention; z- <= 4.
+    # 🔒 LOCKED — STANDARD signs (see CLAUDE.md), mirroring the tau_zx outer twin but
+    # with the spanwise Coriolis C_zy = +I_corr_yz (Levi-Civita) and R_zy = -(turb+disp).
+    # DISPLAY: the whole τ_zy panel is negated by _SP for paper handedness (same flag
+    # as PhAvg_rotated.py / the inner P47 twin); physical closure & u* unaffected. z- <= 4.
+    _SP = -1.0 if FIG4_PAPER_SPANWISE_SIGN else 1.0
     plt.figure(figsize=(10, 6), dpi=300)
     if _smooth_loaded:
         _y_out_s = y_s / ustr_s1
-        plt.plot(_y_out_s, -I_corr_yz_s/ustr_s1**2,
+        plt.plot(_y_out_s, _SP*I_corr_yz_s/ustr_s1**2,
                  color='steelblue',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(_y_out_s, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
+        plt.plot(_y_out_s, _SP*np.mean(visc_yz_s, axis=1)/ustr_s1**2,
                  color='firebrick',   linestyle=SMOOTH_LS, linewidth=1.5)
-        plt.plot(_y_out_s, np.mean(Ryz_s, axis=1)/ustr_s1**2,
+        plt.plot(_y_out_s, _SP*-np.mean(Ryz_s, axis=1)/ustr_s1**2,
                  color='gold',        linestyle=SMOOTH_LS, linewidth=1.5)   # flat wall: Reynolds ≡ turbulent
     for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
-        _Iz  = -gv('I_corr_yz',   case)
+        _Iz  =  gv('I_corr_yz',   case)   # C_zy = +I_corr_yz (standard)
         _vz  =  gv('visc_yz',     case)
         _rw  =  gv('rey_vw',      case)
         _dvw =  gv('VW_disp',     case)
@@ -3831,22 +3906,22 @@ if (1 == plotRes):
             continue
         _us2_hgt = _us2[ghill(case)]
         _y_out   = _yc / _us2_hgt
-        plt.plot(_y_out,  _Iz/_us2_hgt**2, color='steelblue',  linestyle=ls)
+        plt.plot(_y_out,  _SP*_Iz/_us2_hgt**2, color='steelblue',  linestyle=ls)
         if _vz is not None:
-            plt.plot(_y_out, _xprof(case, _vz)/_us2_hgt**2,
+            plt.plot(_y_out, _SP*_xprof(case, _vz)/_us2_hgt**2,
                      color='firebrick',  linestyle=ls)
         # turbulent (rey_vw) + dispersive (VW_disp) = Reynolds shear stress.
         _rwp = _xprof(case, _rw)  if _rw  is not None else None
         _dwp = _xprof(case, _dvw) if _dvw is not None else None
         if _rwp is not None:
-            plt.plot(_y_out, _rwp/_us2_hgt**2, color='magenta', linestyle=ls)   # turbulent
+            plt.plot(_y_out, _SP*-_rwp/_us2_hgt**2, color='magenta', linestyle=ls)   # turbulent  R=-turb
         if _dwp is not None:
-            plt.plot(_y_out, _dwp/_us2_hgt**2, color='cyan',    linestyle=ls)   # dispersive
+            plt.plot(_y_out, _SP*-_dwp/_us2_hgt**2, color='cyan',    linestyle=ls)   # dispersive R=-disp
         if _rwp is not None and _dwp is not None:
-            plt.plot(_y_out, (np.asarray(_rwp) + np.asarray(_dwp))/_us2_hgt**2,
-                     color='gold', linestyle=ls)                                # Reynolds = turb+disp
+            plt.plot(_y_out, _SP*-(np.asarray(_rwp) + np.asarray(_dwp))/_us2_hgt**2,
+                     color='gold', linestyle=ls)                                 # Reynolds = -(turb+disp)
         if _dw is not None:
-            plt.plot(_y_out,  _dw/_us2_hgt**2, color='saddlebrown', linestyle=ls)
+            plt.plot(_y_out,  _SP*_dw/_us2_hgt**2, color='saddlebrown', linestyle=ls)
     plt.legend(handles=_term_handles + all_handles(), fontsize=7, ncol=2, loc='upper right')
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
@@ -4632,6 +4707,190 @@ if (1 == plotRes):
             fig.savefig(_figdir_x + 'P78_Xcase_wave_flux.png', dpi=300, bbox_inches='tight'); plt.show()
         else:
             plt.close(fig)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # CROSS-CASE PROFILE MIRRORS of the per-run PhAvg_rotated.py Research_*.png
+        # figures.  The scatter-vs-Ri_B views above (P72–P77) collapse each profile
+        # to one BL-mean number; these overlay the FULL z⁺ profiles, one colour per
+        # case, so the wall-normal structure a single run shows can be compared side
+        # by side.  All read only the per-run research keys already pickled; a case
+        # missing a key is skipped and an empty figure is dropped (graceful).
+        # (Not mirrored here: Research_intermittency_gamma2D — its γ(x,z) field is
+        # the npz-based P79/P80 below; Research_intermittency_omega_field — the
+        # instantaneous |ω| snapshot is NOT pickled, so it cannot be rebuilt from
+        # pickles and stays a per-run-only diagnostic.)
+        # ══════════════════════════════════════════════════════════════════════
+
+        # ── [X8] Turbulent vs dispersive FLUX SPLIT vs z⁺ (Goal 4 / R1) ────────
+        # Mirror of Research_flux_split.png: x-averaged wall-normal momentum flux
+        # (left) and buoyancy flux (right), split into turbulent (solid) and
+        # dispersive (dashed) parts.  Buoyancy ≈ 0 for the neutral case (graceful).
+        figR, (axRm, axRb) = plt.subplots(1, 2, figsize=(12, 6), dpi=300)
+        _anyf = False
+        for c in _xc:
+            n = c['name']
+            _zi = gy_in(n)
+            if _zi is None:
+                continue
+            _ruv = gv('rey_uv_x', n); _duv = gv('UV_disp_x', n)
+            if _ruv is not None and _duv is not None:
+                _t = min(limity, len(_zi), len(_ruv), len(_duv))
+                axRm.plot(np.asarray(_ruv)[:_t], _zi[:_t], color=c['color'], ls='-',
+                          label=c['label'])
+                axRm.plot(np.asarray(_duv)[:_t], _zi[:_t], color=c['color'], ls='--')
+                _anyf = True
+            _bt = gv('Bflux_temp', n); _bd = gv('Bflux_disp', n)
+            if _bt is not None and _bd is not None:
+                _tb = min(limity, len(_zi), len(_bt), len(_bd))
+                axRb.plot(np.asarray(_bt)[:_tb], _zi[:_tb], color=c['color'], ls='-',
+                          label=c['label'])
+                axRb.plot(np.asarray(_bd)[:_tb], _zi[:_tb], color=c['color'], ls='--')
+        if _anyf:
+            for _ax, _ttl in ((axRm, 'Momentum flux split'),
+                              (axRb, r'Buoyancy flux split (neutral $\approx$ 0)')):
+                _ax.set_ylim(0, _row_to_height(limity, use_inner=True))
+                _ax.set_xlabel('wall-normal flux'); _ax.set_ylabel(r'$z^+$')
+                _ax.set_title(_ttl); _ax.grid(True, ls='--', lw=0.5)
+            axRm.legend(fontsize=7, title='solid: turbulent   dashed: dispersive')
+            figR.tight_layout()
+            figR.savefig(_figdir_x + 'P85_Xcase_flux_split.png', dpi=300, bbox_inches='tight'); plt.show()
+        else:
+            plt.close(figR)
+
+        # ── [X9] Dispersive FLUX SHARE profiles vs z⁺ (Goal 4 / R2) ────────────
+        # Mirror of Research_dispersive_share.png: |disp| / (|disp| + |turb|) for
+        # momentum (solid) and buoyancy (dashed).  P73 is the BL-mean of these vs
+        # Ri_B; this shows their z-structure.
+        fig, ax = plt.subplots(figsize=(7, 7), dpi=300)
+        _anys = False
+        for c in _xc:
+            n = c['name']; _zi = gy_in(n)
+            if _zi is None:
+                continue
+            _sm = gv('disp_share_mom', n); _sb = gv('disp_share_buoy', n)
+            if _sm is not None:
+                _t = min(limity, len(_zi), len(_sm))
+                ax.plot(np.asarray(_sm)[:_t], _zi[:_t], color=c['color'], ls='-',
+                        label=c['label']); _anys = True
+            if _sb is not None:
+                _t = min(limity, len(_zi), len(_sb))
+                ax.plot(np.asarray(_sb)[:_t], _zi[:_t], color=c['color'], ls='--')
+        if _anys:
+            ax.set_xlim(0, 1); ax.set_ylim(0, _row_to_height(limity, use_inner=True))
+            ax.set_xlabel('dispersive share  |disp| / (|disp| + |turb|)')
+            ax.set_ylabel(r'$z^+$')
+            ax.set_title('Dispersive flux share vs $z^+$\nsolid: momentum   dashed: buoyancy')
+            ax.grid(True, ls='--', lw=0.5); ax.legend(fontsize=7)
+            fig.savefig(_figdir_x + 'P86_Xcase_dispshare_profile.png', dpi=300, bbox_inches='tight'); plt.show()
+        else:
+            plt.close(fig)
+
+        # ── [X10] Local similarity φ_m, φ_h vs z⁺ by station (Goal 5 / R3) ─────
+        # Mirror of Research_similarity_phi.png: φ_m (left col) and φ_h (right col)
+        # at windward / floor / lee stations (rows), one colour per case.  P75 is
+        # the RMS departure of these from MOST vs Ri_B; this shows the profiles.
+        # The φ arrays start at the station's local surface, so the surface row is
+        # js = ny − len(φ) and z⁺ = (y − y[js]) / l_in on the shared reference axis.
+        # φ_h is NaN for a neutral run (no buoyancy) → its line simply draws nothing.
+        _stn_order = ['windward', 'floor', 'lee']
+        figP, axP = plt.subplots(3, 2, figsize=(11, 12), dpi=300, sharey='row')
+        _anyp = False
+        for _r, _st in enumerate(_stn_order):
+            for c in _xc:
+                n = c['name']
+                _pm = gv('phi_m_st', n); _ph = gv('phi_h_st', n); _yc = gv('y', n)
+                if not isinstance(_pm, dict) or _yc is None or _st not in _pm:
+                    continue
+                _phim = np.asarray(_pm[_st], float)
+                _yc = np.asarray(_yc, float)
+                _js = len(_yc) - len(_phim)
+                if _js < 0 or _js >= len(_yc):
+                    continue
+                _zp = (_yc[_js:_js + len(_phim)] - _yc[_js]) / l_in
+                axP[_r, 0].plot(_phim, _zp, color=c['color'], ls='-', label=c['label'])
+                _anyp = True
+                if isinstance(_ph, dict) and _st in _ph:
+                    _phih = np.asarray(_ph[_st], float)
+                    _m = min(len(_phih), len(_zp))
+                    axP[_r, 1].plot(_phih[:_m], _zp[:_m], color=c['color'], ls='-')
+            axP[_r, 0].axvline(1.0,  color='k', ls=':', lw=0.8)   # MOST neutral φ_m = 1
+            axP[_r, 1].axvline(PR_T, color='k', ls=':', lw=0.8)   # MOST neutral φ_h = Pr_t
+            axP[_r, 0].set_ylabel(_st + '\n' + r'$z^+$ (from local surface)')
+            for _cc in (0, 1):
+                axP[_r, _cc].set_ylim(0, 500)
+                axP[_r, _cc].grid(True, ls='--', lw=0.5)
+        axP[0, 0].set_title(r'$\phi_m$  (MOST neutral $=1$)')
+        axP[0, 1].set_title(r'$\phi_h$  (MOST neutral $=Pr_t$)')
+        axP[2, 0].set_xlabel(r'$\phi_m$'); axP[2, 1].set_xlabel(r'$\phi_h$')
+        axP[0, 0].legend(fontsize=7)
+        if _anyp:
+            figP.suptitle('Local similarity by station — one colour per case')
+            figP.tight_layout()
+            figP.savefig(_figdir_x + 'P87_Xcase_similarity_phi.png', dpi=300, bbox_inches='tight'); plt.show()
+        else:
+            plt.close(figP)
+
+        # ── [X11] Intermittency γ(z⁺) overlay (Goal 6 / R6a; if γ computed) ────
+        # Mirror of Research_intermittency_gamma.png using the per-run γ(z) pickled
+        # by PhAvg_rotated.py (planesK / flow-plane based).  This is INDEPENDENT of
+        # the standalone-Intermittency.py .npz used by P82 below; a case whose pickle
+        # carries no γ (compute_intermittency=0) is skipped.
+        fig, ax = plt.subplots(figsize=(6, 7), dpi=300)
+        _anyg = False
+        for c in _xc:
+            n = c['name']; _zi = gy_in(n); _g = gv('gamma_z', n)
+            if _zi is None or _g is None:
+                continue
+            _t = min(limity, len(_zi), len(_g))
+            ax.plot(np.asarray(_g)[:_t], _zi[:_t], color=c['color'], label=c['label'])
+            _anyg = True
+        if _anyg:
+            ax.set_xlim(0, 1.02); ax.set_ylim(0, _row_to_height(limity, use_inner=True))
+            ax.set_xlabel(r'intermittency $\gamma$'); ax.set_ylabel(r'$z^+$')
+            ax.set_title(r'Intermittency $\gamma(z^+)$ (per-run) — all Fr')
+            ax.grid(True, ls='--', lw=0.5); ax.legend(fontsize=7)
+            fig.savefig(_figdir_x + 'P88_Xcase_gamma_profile.png', dpi=300, bbox_inches='tight'); plt.show()
+        else:
+            plt.close(fig)
+
+        # ── [X12] Local intermittency γ(x,z⁺) field panels (Goal 6 / R6b) ──────
+        # Mirror of Research_intermittency_gamma2D.png from the pickled per-run
+        # gamma_field (ny×nx, planesK / flow-plane based).  Complements the npz-based
+        # P79/P80 below: those need the standalone Intermittency.py cluster run, this
+        # works straight from the PhAvg_rotated.py pickle (compute_intermittency=1).
+        # A case with no γ field is skipped; if none has one the figure is dropped.
+        _grows = [c for c in _xc if gv('gamma_field', c['name']) is not None]
+        if _grows:
+            _zmax = _contour_zmax(use_inner=True)
+            _npan = len(_grows)
+            _nr, _ncl = _panel_grid_shape(_npan)
+            figG, axG = plt.subplots(_nr, _ncl, figsize=(4.8 * _ncl, 4.6 * _nr),
+                                     squeeze=False, dpi=300)
+            _gflat = axG.ravel()
+            for _i, c in enumerate(_grows):
+                n = c['name']; _ax = _gflat[_i]
+                _xp = gx_in(n); _zp = gy_in(n)
+                if _zp is None:
+                    _ax.axis('off'); continue
+                _gf = np.asarray(gv('gamma_field', n), float)
+                _jr = _clip_rows(_zp, _zmax)
+                _pcm = _ax.pcolormesh(_xp, _zp[:_jr], _gf[:_jr, :], cmap='hot_r',
+                                      vmin=0.0, vmax=1.0, shading='auto')
+                _ax.contour(_xp, _zp[:_jr], np.nan_to_num(_gf[:_jr, :]),
+                            levels=[0.5], colors='cyan', linewidths=1.0)
+                _shade_ibm(_ax, _xp, _zp[:_jr], geps(n)[:_jr, :])
+                _ax.set_ylim(0, _zmax); _ax.set_title(c['label'], fontsize=9)
+                _ax.set_xlabel(r'$x^+$')
+                if _ax.get_subplotspec().is_first_col():
+                    _ax.set_ylabel(r'$z^+$')
+                _cb = figG.colorbar(_pcm, ax=_ax, shrink=0.9, pad=0.02)
+                _cb.set_label(r'$\gamma$', fontsize=8); _cb.ax.tick_params(labelsize=7)
+            for _j in range(_npan, _nr * _ncl):
+                _gflat[_j].axis('off')
+            figG.suptitle(r'Local intermittency $\gamma(x^+,z^+)$ (per-run pickle) — '
+                          r'cyan: $\gamma=0.5$', fontsize=11)
+            figG.tight_layout()
+            figG.savefig(_figdir_x + 'P89_Xcase_gamma_field.png', dpi=300, bbox_inches='tight'); plt.show()
 
         # ── Console matrix summary + Goal 8 (Re 500 vs 750) status ────────────
         print('\n=== CROSS-CASE RESEARCH MATRIX (Re_D=500) ===')

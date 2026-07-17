@@ -34,6 +34,37 @@ import matplotlib.animation as animation
 import matplotlib.patches as mpatches
 from matplotlib import cm
 from config import *
+# ── Master-config backfill (stale per-case config guard) ─────────────────────
+# A per-simulation config.py (which SHADOWS the master via the sys.path
+# bootstrap above — by design, it carries per-case values such as Fr) can
+# predate constants later added to the master config (§13).  Backfill any
+# names the local config lacks from the MASTER config (the one next to this
+# script's realpath) so a stale case config prints a notice instead of
+# NameError-ing mid-run.  Names the local config DOES define keep their local
+# per-case values.  (Kept in sync with PhAvg_rotated.py.)
+import config as _cfg_local
+_cfg_master_dir = os.path.dirname(os.path.realpath(__file__))
+if os.path.dirname(os.path.realpath(_cfg_local.__file__)) != _cfg_master_dir:
+    import importlib.util as _ilu
+    _cfg_spec = _ilu.spec_from_file_location(
+        '_config_master', os.path.join(_cfg_master_dir, 'config.py'))
+    _cfg_master = _ilu.module_from_spec(_cfg_spec)
+    _cfg_spec.loader.exec_module(_cfg_master)
+    _cfg_backfill = {_k: _v for _k, _v in vars(_cfg_master).items()
+                     if not _k.startswith('_') and _k not in globals()}
+    if _cfg_backfill:
+        # Patch the LIVE config module (not just this script's globals) so that a
+        # downstream direct `from config import <name>` — e.g. functions.py's
+        # `from config import obu_kappa` — also sees the backfilled constants.
+        for _k, _v in _cfg_backfill.items():
+            setattr(_cfg_local, _k, _v)
+        globals().update(_cfg_backfill)
+        print(f'[config] local config.py is missing {len(_cfg_backfill)} newer '
+              f'master constant(s) — backfilled from the master config: '
+              f'{sorted(_cfg_backfill)}')
+    del _ilu, _cfg_spec, _cfg_master, _cfg_backfill
+del _cfg_local, _cfg_master_dir
+# ──────────────────────────────────────────────────────────────────────────────
 from functions import *
 from saveresults import *
 from functions import (        # simulation helper routines
@@ -49,9 +80,12 @@ from compact_derivatives import (
 # from geopotential import *
 
 
-# Reference-overlay helpers (ref_plot / ref_mark) and the Kostelecky & Ansorge
-# fig-4 momentum-budget reproducer (plot_fig4_budget) are shared, self-contained
-# routines that live in functions.py and arrive via `from functions import *`.
+# Reference-overlay helpers (ref_plot / ref_mark) are shared routines in
+# functions.py (`from functions import *`).  The Kostelecky & Ansorge fig-4
+# budget is split per module role: read_ekman_budget_profiles (IO, via the
+# saveresults shim) loads the reference profiles, the eq.-4.2 budget is
+# computed IN THIS SCRIPT (PLOT 32r), and PlotField.plot_fig4_budget only
+# draws the passed-in terms.
 
 
 # %%
@@ -540,8 +574,12 @@ if (1 == postprocess):
 
     # Method 2 — friction velocity from the Ekman momentum-integral balance.
     # Steady-state (∂/∂t = 0) intrinsic-averaged momentum equations:
-    #   τ_yx(y) = f∫₀ʸ ⟨w̃ − G_z⟩ dy'  +  (1/Re_Λ) ∂⟨ū⟩/∂y  − ⟨u'v'⟩
-    #   τ_yz(y) = −f∫₀ʸ ⟨ũ − G_x⟩ dy'  +  (1/Re_Λ) ∂⟨w̄⟩/∂y  − ⟨v'w'⟩
+    # STANDARD shear-stress budget (see CLAUDE.md "Standard shear-stress budget
+    # formulation"), the sign combination that keeps Total = C+V+R height-constant:
+    #   τ_zx(y) = ∫₀ʸ (G_z − ⟨w⟩) dy'  +  (1/Re_Λ) ∂⟨u⟩/∂y  − ⟨u'v'⟩   (= −I_corr_yx + V − turb)
+    #   τ_zy(y) = ∫₀ʸ (⟨u⟩ − G_x) dy'  +  (1/Re_Λ) ∂⟨w⟩/∂y  − ⟨w'v'⟩   (= +I_corr_yz + V − turb)
+    # Levi-Civita ε_{ik3}: the spanwise Coriolis is +I_corr_yz, OPPOSITE the
+    # streamwise −I_corr_yx.
     # u* = |τ_wall|^0.5 evaluated at y→0 (where τ profiles collapse to the surface stress).
     # Momentum Balance to find u*
     # Time derivative is zero
@@ -561,12 +599,14 @@ if (1 == postprocess):
     visc_yz = (1/Re_lambda) * (avg_c(eps, dw_dy, axis=1))
     turb_yz = avg_c(eps, rey_vw, axis=1)
     # Reynolds stresses given by 'rey_vw'
-    # Tau_yz(z) = - Temporal + Coriolis + Viscous - Reynolds
-    total_tau_yz = -I_corr_yz + visc_yz + turb_yz
-    # Display total for the τ_zy PLOTS = sum of the component curves AS PLOTTED
-    # (Total = Coriolis + Viscous + Reynolds; signs kept as set for plotting convenience).
-    # NB: distinct from total_tau_yz (the physical balance used for u_star).
-    tau_disp_yz = -I_corr_yz + visc_yz + turb_yz
+    # STANDARD τ_zy = C_zy + V_zy + R_zy = (+I_corr_yz) + visc_yz + (−turb_yz).
+    # Old code had −I_corr_yz + turb_yz (BOTH signs wrong: it did not close and
+    # biased u_star).  +I_corr_yz is the Levi-Civita partner of the streamwise
+    # −I_corr_yx; −turb_yz is R_zy = −⟨w'v'⟩ (matches PhAvg_rotated.py bug-6 fix).
+    total_tau_yz = I_corr_yz + visc_yz - turb_yz
+    # Display total for the τ_zy plots = the SAME standard balance (no separate
+    # "plotting-convenience" sign now that the physical balance is standardised).
+    tau_disp_yz = I_corr_yz + visc_yz - turb_yz
 
     # ── Alternative Coriolis integral: integrate per-column, THEN intrinsic avg ──
     # The existing I_corr_y* x-average (np.mean, EXTRINSIC over all nx columns)
@@ -617,7 +657,7 @@ if (1 == postprocess):
     # THEN integral).  Compared in the Friction-Velocity comparison plot; inner
     # scaling (u_star) above is unchanged and still uses the original u_star2.
     total_tau_yx_c = -I_corr_yx_c + visc_yx - turb_yx
-    total_tau_yz_c = -I_corr_yz_c + visc_yz + turb_yz
+    total_tau_yz_c = I_corr_yz_c + visc_yz - turb_yz
     u_star2_c = ((total_tau_yx_c**2 + total_tau_yz_c**2)**0.5)**0.5
     u_star_c  = np.mean(u_star2_c)
 
@@ -741,16 +781,13 @@ if (1 == postprocess):
         _Ri_fit   = np.zeros_like(_z_fit)
         _phi_corr = np.ones_like(_z_fit)
 
-    def _cumtrapz0(fvals, xvals):
-        """Cumulative trapezoidal integral of fvals over xvals, starting at 0."""
-        return np.concatenate(([0.0],
-                               np.cumsum(0.5 * (fvals[1:] + fvals[:-1])
-                                         * np.diff(xvals))))
+    # cumtrapz0 (cumulative trapezoid from 0) lives in functions.py — shared by
+    # this Ξ-integral fit and the fig-4 budget computation (PLOT 32r).
 
-    # Defaults (fallback if no valid κ found in constrained range)
-    kappa_loglaw = 0.41
-    d_m_loglaw   = 0.0
-    z0m_loglaw   = 0.068
+    # Defaults (fallback if no valid κ found in constrained range; config §13)
+    kappa_loglaw = loglaw_kappa_default
+    d_m_loglaw   = loglaw_d_default
+    z0m_loglaw   = loglaw_z0m_default
     _best_r2     = -np.inf
 
     if _u_fit.size >= 3:
@@ -760,7 +797,7 @@ if (1 == postprocess):
                 break
             # Stability-modified log abscissa Ξ; ≡ ln(z⁺−d⁺) in the neutral limit.
             if _stratified:
-                _x = np.log(_zs[0]) + _cumtrapz0(_phi_corr / _zs, _z_fit)
+                _x = np.log(_zs[0]) + cumtrapz0(_phi_corr / _zs, _z_fit)
             else:
                 _x = np.log(_zs)
             _slope, _intercept, _r, *_ = linregress(_x, _u_fit)
@@ -1771,26 +1808,28 @@ if (1 == plotRes):
     
     # %%###########################################################################
     # Shear Stress ZY
-    # do not change the sign of the terms below. THey are particulary set for plotting convenience
+    # STANDARD shear-stress budget signs (CLAUDE.md): C_zy=+I_corr_yz, V_zy=+visc_yz,
+    # R_zy=-turb_yz, Total=tau_disp_yz.  (Superseded the old "plotting-convenience"
+    # negated-component signs so this matches PhAvg_rotated.py / results.py / fig-4.)
     # [PLOT 31] Shear stress $\tau_{zy}$
     plt.figure(figsize=(8, 6), dpi=300)
-    plt.plot(y_inner[:], -I_corr_yz[:], label='Coriolis', color='blue', linestyle='-')
-    plt.plot(y_inner[:], -visc_yz[:], label='Viscous', color='red', linestyle='-')
-    plt.plot(y_inner[:], turb_yz[:], label='Rey Stress', color='orange', linestyle='-')
+    plt.plot(y_inner[:], I_corr_yz[:], label='Coriolis', color='blue', linestyle='-')
+    plt.plot(y_inner[:], visc_yz[:], label='Viscous', color='red', linestyle='-')
+    plt.plot(y_inner[:], -turb_yz[:], label='Rey Stress', color='orange', linestyle='-')
     plt.plot(y_inner[:], dwdt, label='Temporal', color='saddlebrown', linestyle='-')
     plt.plot(y_inner[:], tau_disp_yz[:], label='Total', color='black', linestyle='-')
-    ref_plot(plot_ref_smooth, y_s_p, -I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, I_corr_yz_s, color='blue', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.mean(visc_yz_s, axis=1), color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, -np.mean(Ryz_s, axis=1), color='orange', linestyle=SMOOTH_LS)
     # rough r1 (Re=1000) overlay — Method-2 terms, own inner units (y_r_p)
-    ref_plot(plot_ref_rough, y_r_p, -I_corr_yz_r, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, I_corr_yz_r, color='blue', linestyle=ROUGH_LS)
     ref_plot(plot_ref_rough, y_r_p, np.mean(visc_yz_r, axis=1), color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(Ryz_r, axis=1), color='orange', linestyle=ROUGH_LS)
-    mark_layers_multi(y_inner, [-I_corr_yz, visc_yz,
-                                turb_yz, dwdt, tau_disp_yz],
+    ref_plot(plot_ref_rough, y_r_p, -np.mean(Ryz_r, axis=1), color='orange', linestyle=ROUGH_LS)
+    mark_layers_multi(y_inner, [I_corr_yz, visc_yz,
+                                -turb_yz, dwdt, tau_disp_yz],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [-I_corr_yz_s, np.mean(visc_yz_s, axis=1),
-                              np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [I_corr_yz_s, np.mean(visc_yz_s, axis=1),
+                              -np.mean(Ryz_s, axis=1)], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')
     plt.xlabel(r'$z^{+}$')
@@ -1813,28 +1852,28 @@ if (1 == plotRes):
     # [PLOT 32] Shear stress $\tau_{zy}$
     plt.figure(figsize=(8, 6), dpi=300)
 
-    # Valley case (solid lines)
-    plt.plot(y_inner[:limity], -I_corr_yz[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
-    plt.plot(y_inner[:limity], -visc_yz[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
-    plt.plot(y_inner[:limity], turb_yz[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
+    # Valley case (solid lines) — STANDARD signs (see PLOT 31)
+    plt.plot(y_inner[:limity], I_corr_yz[:limity]/u_star**2, color='blue', linestyle='-', label='Coriolis')
+    plt.plot(y_inner[:limity], visc_yz[:limity]/u_star**2, color='red', linestyle='-', label='Viscous')
+    plt.plot(y_inner[:limity], -turb_yz[:limity]/u_star**2, color='orange', linestyle='-', label='Rey Stress')
     plt.plot(y_inner[:limity], dwdt[:limity]/u_star**2, color='saddlebrown', linestyle='-', label='Temporal')
     plt.plot(y_inner[:limity], tau_disp_yz[:limity]/u_star**2, color='black', linestyle='-', label='Total')
     # Smooth case (dashed)
-    ref_plot(plot_ref_smooth, y_s_p, -I_corr_yz_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, -np.mean(visc_yz_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, I_corr_yz_s/ustr_s1**2, color='blue', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, np.mean(visc_yz_s, axis=1)/ustr_s1**2, color='red', linestyle=SMOOTH_LS)
+    ref_plot(plot_ref_smooth, y_s_p, -np.mean(Ryz_s, axis=1)/ustr_s1**2, color='orange', linestyle=SMOOTH_LS)
     ref_plot(plot_ref_smooth, y_s_p, np.zeros(nys), color='saddlebrown', linestyle=SMOOTH_LS)
     # rough r1 — own inner units (ustr_r1)
-    ref_plot(plot_ref_rough, y_r_p, -I_corr_yz_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, -np.mean(visc_yz_r, axis=1)/ustr_r1**2, color='red', linestyle=ROUGH_LS)
-    ref_plot(plot_ref_rough, y_r_p, np.mean(Ryz_r, axis=1)/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, I_corr_yz_r/ustr_r1**2, color='blue', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, np.mean(visc_yz_r, axis=1)/ustr_r1**2, color='red', linestyle=ROUGH_LS)
+    ref_plot(plot_ref_rough, y_r_p, -np.mean(Ryz_r, axis=1)/ustr_r1**2, color='orange', linestyle=ROUGH_LS)
 
-    mark_layers_multi(y_inner, [-I_corr_yz/u_star**2, visc_yz/u_star**2,
-                                turb_yz/u_star**2, dwdt/u_star**2,
+    mark_layers_multi(y_inner, [I_corr_yz/u_star**2, visc_yz/u_star**2,
+                                -turb_yz/u_star**2, dwdt/u_star**2,
                                 tau_disp_yz/u_star**2],
                       _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [-I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
-                              np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
+    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [I_corr_yz_s/ustr_s1**2, np.mean(visc_yz_s, axis=1)/ustr_s1**2,
+                              -np.mean(Ryz_s, axis=1)/ustr_s1**2, np.zeros(nys)],
                       _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
     plt.title(r'Shear stress $\tau_{zy}$')
@@ -1954,12 +1993,45 @@ if (1 == plotRes):
     # %%###########################################################################
     # [PLOT 32r] Kostelecky & Ansorge (2024) figure-4 validation of Method 2:
     # integrated momentum budget (C, V, R, Total) for the smooth and rough r1
-    # reference cases, in inner (a,b) and outer (c,d) units.  Built transparently
-    # from eq. 4.2 (see plot_fig4_budget) so the Method-2 u* and the budget-term
-    # shapes can be checked against the paper.  Produced for both cases regardless
-    # of the overlay switches (these are dedicated validation figures).
-    plot_fig4_budget(smooth_nc_path, nu,       'smooth_Re500',    fig_dir)
-    plot_fig4_budget(rough_nc_path,  nu_rough, 'rough_r1_Re1000', fig_dir)
+    # reference cases, in inner (a,b) and outer (c,d) units.  Produced for both
+    # cases regardless of the overlay switches (dedicated validation figures).
+    # The budget is COMPUTED HERE, in the main script (paper eq. 4.2, directly
+    # from the horizontally-averaged profiles) — read_ekman_budget_profiles (IO)
+    # only loads, PlotField.plot_fig4_budget only draws what it is passed:
+    #     ⟨τ⟩_zi(z) = C + V + R            (temporal tendency ≈ 0, steady avg)
+    #     C_zx = f∫₀ᶻ(g₂−⟨v⟩)dz' ,  C_zy = f∫₀ᶻ(⟨u⟩−g₁)dz'    (f = 1)
+    #       (spanwise Coriolis integrand OPPOSITE in sign: ε₂ₖ₃ = −ε₁ₖ₃)
+    #     V = (1/Re_Λ) d⟨u_i⟩/dz ,  R = −⟨u_i'w'⟩
+    #     g = (g₁,g₂) read at fig4_top_frac·Ly (free stream, below the sponge);
+    #     u* = (T_zx_plat² + T_zy_plat²)^¼ over the fig4_plateau_lo…y_top window.
+    for _nc_ref, _nu_ref, _lbl_ref in ((smooth_nc_path, nu,       'smooth_Re500'),
+                                       (rough_nc_path,  nu_rough, 'rough_r1_Re1000')):
+        y_ref, u_ref, v_ref, Ruw_ref, Rvw_ref = read_ekman_budget_profiles(_nc_ref)
+        _top_ref = int(fig4_top_frac * y_ref.size)
+        g1_ref, g2_ref = u_ref[_top_ref], v_ref[_top_ref]   # geostrophic vector at BL top
+        G_ref = float(np.hypot(g1_ref, g2_ref))
+        C_zx_ref = cumtrapz0(g2_ref - v_ref, y_ref)         # Coriolis  f∫(g₂−⟨v⟩)
+        V_zx_ref = _nu_ref * np.gradient(u_ref, y_ref)      # viscous
+        R_zx_ref = -Ruw_ref                                 # Reynolds −⟨u'w'⟩
+        C_zy_ref = cumtrapz0(u_ref - g1_ref, y_ref)         # opposite-sign integrand
+        V_zy_ref = _nu_ref * np.gradient(v_ref, y_ref)
+        R_zy_ref = -Rvw_ref
+        # Display handedness: our tlab f-sign gives C_zy<0/R_zy>0 (mirror of K&A);
+        # negate the spanwise budget so the panel matches the paper & the standalone
+        # (Coriolis positive).  τ_zx, u*, and closure are untouched (τ_zy → −τ_zy).
+        if fig4_paper_spanwise_sign:
+            C_zy_ref, V_zy_ref, R_zy_ref = -C_zy_ref, -V_zy_ref, -R_zy_ref
+        T_zx_ref = C_zx_ref + V_zx_ref + R_zx_ref
+        T_zy_ref = C_zy_ref + V_zy_ref + R_zy_ref
+        _plw = (y_ref > fig4_plateau_lo * y_ref[_top_ref]) & (y_ref < y_ref[_top_ref])
+        ustar_ref = float((T_zx_ref[_plw].mean()**2 + T_zy_ref[_plw].mean()**2) ** 0.25)
+        veer_ref  = float(np.degrees(np.arctan2(g2_ref, g1_ref)))
+        plot_fig4_budget(y_ref * ustar_ref / _nu_ref, y_ref / ustar_ref,
+                         C_zx_ref, V_zx_ref, R_zx_ref, T_zx_ref,
+                         C_zy_ref, V_zy_ref, R_zy_ref, T_zy_ref,
+                         ustar_ref, G_ref, veer_ref, _lbl_ref, fig_dir)
+        print(f"  [Fig4 budget] {_lbl_ref}: Method-2 u* = {ustar_ref:.4f}  (G={G_ref:.3f}, "
+              f"τ_zx plateau={T_zx_ref[_plw].mean():.3e}, τ_zy plateau={T_zy_ref[_plw].mean():.3e})")
 
     # %%###########################################################################
     # Velocity profile

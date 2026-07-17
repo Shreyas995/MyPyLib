@@ -1133,3 +1133,70 @@ def plot2D_streamlines_vorticityZ(x, y, U, V, vorticity, title_prefix, xname, yn
     # **Save and Show Plot**
     plt.savefig(savename, dpi=300)
     plt.show()
+
+
+# ── PhAvg_rotated per-run plots (moved out of the main file for readability) ──
+def plot_wavenumber_field(mfld, savename, title, x_in, y_in, x_oro_in, y_oro_in,
+                          mask0, l_in, sponge_j, hill_hgt, fig_dir):
+    """Signed vertical-wavenumber field  m(x,z)·l_in  (inner units, fluid only)
+    with the IBM solid, crest and sponge markers.  `savename` is a bare filename
+    joined onto `fig_dir`."""
+    _lim = int(min(sponge_j, np.size(y_in) - 1))
+    _z   = y_in[:_lim]
+    _w   = (mfld[:_lim, :] * l_in) * mask0[:_lim, :]      # inner-unit, fluid only
+    _vmax = float(np.nanpercentile(np.abs(_w), 98))       # robust to node spikes
+    _vmax = _vmax if _vmax > 0 else 1.0
+    _lv  = np.linspace(-_vmax, _vmax, 200)
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+    _cf = ax.contourf(x_in, _z, np.clip(_w, -_vmax, _vmax),
+                      levels=_lv, cmap='RdBu_r', extend='both')
+    ax.fill(x_oro_in, y_oro_in, facecolor='black')        # IBM solid
+    ax.axhline(y_in[int(hill_hgt)], color='g', ls='--', lw=0.8, label='crest $h$')
+    ax.axhline(y_in[int(sponge_j)], color='m', ls=':',  lw=1.0, label='sponge')
+    plt.colorbar(_cf, ax=ax, label=r'$m\,\ell_{in}$  (sign: phase-line tilt)')
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$'); ax.set_title(title)
+    ax.legend(fontsize=8, loc='upper right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, savename), dpi=300)
+    plt.show()
+
+
+def plot_fig4_budget(zin, zout, C_zx, V_zx, R_zx, T_zx, C_zy, V_zy, R_zy, T_zy,
+                     ustar, G, veer_deg, label, fig_dir):
+    """Kostelecky & Ansorge (2024) figure-4 panels — PURE plotting.
+
+    Every quantity is COMPUTED BY THE CALLER (PhAvg[_rotated].py, PLOT 32r) and
+    passed in, so this function stays reusable for any budget profile set:
+      zin, zout            inner (z⁺) / outer (z⁻ = y/u*) wall-normal axes
+      (C,V,R,T)_zx, _zy    Coriolis / viscous / Reynolds / total budget terms
+      ustar, G             normalisation scales (inner /u*², outer ·10⁻³/G²)
+      veer_deg             geostrophic veer (deg), title annotation only
+    Panels mirror fig. 4: (a) τ_zx and (b) τ_zy inner; (c,d) the same in outer
+    units.  Saves Fig4_momentum_budget_{label}.png in fig_dir.
+    """
+    u2 = ustar**2; G2 = G**2
+
+    def _panel(ax, x, C, V, R, T, sc, xlim, title, ylab, xlab):
+        ax.plot(x, C/sc, color='blue',   label='Coriolis C')
+        ax.plot(x, V/sc, color='red',    label='Viscous V')
+        ax.plot(x, R/sc, color='orange', label='Reynolds R')
+        ax.plot(x, T/sc, color='black',  lw=2, label='Total ⟨τ⟩')
+        ax.axhline(0, color='grey', lw=0.5); ax.set_xlim(*xlim)
+        ax.set_title(title, fontsize=9); ax.set_ylabel(ylab); ax.set_xlabel(xlab)
+        ax.grid(alpha=0.3)
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 9), dpi=200)
+    _panel(axs[0, 0], zin, C_zx, V_zx, R_zx, T_zx, u2, (0, 100),
+           f'(a) $\\tau_{{zx}}$ inner — {label}', r'$\langle\tau\rangle^{+}_{zx}$', r'$z^{+}$')
+    _panel(axs[0, 1], zin, C_zy, V_zy, R_zy, T_zy, u2, (0, 100),
+           '(b) $\\tau_{zy}$ inner', r'$\langle\tau\rangle^{+}_{zy}$', r'$z^{+}$')
+    _panel(axs[1, 0], zout, C_zx, V_zx, R_zx, T_zx, G2*1e-3, (0, 1.2),
+           '(c) $\\tau_{zx}$ outer', r'$\langle\tau\rangle^{-}_{zx}\cdot10^{-3}$', r'$z^{-}$')
+    _panel(axs[1, 1], zout, C_zy, V_zy, R_zy, T_zy, G2*1e-3, (0, 1.2),
+           '(d) $\\tau_{zy}$ outer', r'$\langle\tau\rangle^{-}_{zy}\cdot10^{-3}$', r'$z^{-}$')
+    axs[0, 0].legend(fontsize=7, loc='upper right')
+    fig.suptitle(f'Integrated momentum budget (eq. 4.2) — {label}   '
+                 f'[Method-2 $u_*$ = {ustar:.4f}, geostrophic veer = {veer_deg:.1f}°]')
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
+    plt.show()

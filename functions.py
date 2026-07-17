@@ -13,6 +13,7 @@ import netCDF4 as nc
 from scipy.integrate import simpson
 from scipy.integrate import trapezoid
 from scipy.stats import linregress
+from scipy.optimize import curve_fit
 from scipy.interpolate import CubicSpline
 from scipy.interpolate import griddata
 from scipy.interpolate import make_interp_spline
@@ -196,11 +197,10 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
     # buoyancy ⟨b⟩ (tlab `rB`) is a DERIVED quantity (Gravity_Buoyancy ÷ froude);
     # this returns the raw scalar.  ≡0 in the neutral (ri00.00) reference; guarded.
     rs = (s1.variables['rs'][:]).T if 'rs' in s1.variables else None
-    # ── Geostrophic unit vector (g_x, g_z) from the SCALAR surface friction angle ──
-    # FrictionAngle is stored in DEGREES (smooth file).  The rough file stores none,
-    # so the surface shear-stress turning angle is taken from the near-wall velocity
-    # direction (same physical quantity).  G_x/G_z/G are SCALARS (|G|=1), so they
-    # broadcast cleanly against the 2-D (ny, nt) velocity fields.
+    # ── Geostrophic magnitude for inner scaling (|G|=1) ──────────────────────
+    # G_x/G_z/G below are the SCALAR magnitude used only to normalise U_p/W_p; the
+    # geostrophic VECTOR that enters the Coriolis integral is read from the profile
+    # top in the Method-2 block (do not confuse the two).  _fric_deg kept for info.
     if alpha_str is not None:
         _fric_deg = alpha_str                                          # stored FrictionAngle [deg]
     else:
@@ -224,16 +224,26 @@ def load_ekman_nc_case(nc_path, x_grid, nu, Re_lambda):
     case_v[:, :] = 4; case_v[0, 0] = 1; case_v[1, 0] = 2; case_v[2, 0] = 3
     case_v[-3, 0] = 5; case_v[-2, 0] = 6; case_v[-1, 0] = 7
     # ── Method 2: vertically integrated Ekman momentum balance ───────────────
-    cor_yx = -(-GblW + G_z)
+    # STANDARD shear-stress budget (see CLAUDE.md "Standard shear-stress budget
+    # formulation").  The geostrophic vector g=(g1,g2) is read from the mean wind
+    # at the BL TOP (0.8·domain height, below the sponge) — NOT hardcoded (1,0):
+    # a stored file may be in a rotated frame (e.g. the rough r1 case is stored
+    # with the geostrophic at ~18.7° off x → forcing (1,0) gave a spurious
+    # u*=0.125; reading g from the profile recovers 0.058 and closes the budget).
+    _gtop = int(0.8 * y.size)
+    g1, g2 = float(GblU[_gtop]), float(GblW[_gtop])        # (streamwise, spanwise) geostrophic
+    #   C_zx = ∫(g2 − ⟨w⟩) = −I_corr_yx ;  C_zy = ∫(⟨u⟩ − g1) = +I_corr_yz
+    #   R = −⟨u_i'v'⟩ ;  Total = C + V + R  (height-constant surface stress)
+    cor_yx = (GblW - g2)                                   # I_corr_yx = ∫(⟨w⟩ − g2)
     I_corr_yx = vIntegral(cor_yx, y.size, y)
     du_dy = diffu_dy((np.reshape(GblU, (y.size, 1))), y.size, 1, case_v, y, 1)
     visc_yx = (1 / Re_lambda) * du_dy
-    tau_yx = I_corr_yx + np.mean(visc_yx, axis=1) - np.mean(Rxy, axis=1)
-    cor_yz = (GblU - G_x)
+    tau_yx = -I_corr_yx + np.mean(visc_yx, axis=1) - np.mean(Rxy, axis=1)
+    cor_yz = (GblU - g1)                                   # I_corr_yz = ∫(⟨u⟩ − g1)
     I_corr_yz = vIntegral(cor_yz, y.size, y)
     dw_dy = diffu_dy((np.reshape(GblW, (y.size, 1))), y.size, 1, case_v, y, 1)
     visc_yz = (1 / Re_lambda) * dw_dy
-    tau_yz = -I_corr_yz + np.mean(visc_yz, axis=1) - np.mean(Ryz, axis=1)
+    tau_yz = I_corr_yz + np.mean(visc_yz, axis=1) - np.mean(Ryz, axis=1)
     # Method-2 friction-velocity profile and its constant-flux plateau scalar
     ustr_M2 = (tau_yx**2 + tau_yz**2) ** 0.25
     ustr_M2_plateau = plateau_value(ustr_M2, y)
@@ -294,6 +304,94 @@ def load_smooth_case(nc_path, x_grid, nu, Re_lambda):
         # new: Method-2 friction velocity for the smooth case (vs stored ustr_s1)
         'ustr_M2_s': d['ustr_M2'], 'ustr_M2_plateau_s': d['ustr_M2_plateau'],
     }
+
+
+def load_loglaw_nc(nc_path, nu, u_star_default=0.0618):
+    """MINIMAL log-law loader for a tlab avg_all.nc reference case.
+
+    Deliberately loads ONLY what the log-law needs — the mean streamwise velocity
+    profile (plus the tiny 1-D `y` grid needed for the inner-unit abscissa).  This
+    is NOT `load_ekman_nc_case`: the full budget / Reynolds stresses are never read.
+
+    Friction velocity: the log-law only needs a NORMALISING scale.  These rough
+    stable files store no `FrictionVelocity`, so u* falls back to `u_star_default`
+    (0.0618) — the stored value is used only if the file happens to carry one.
+
+    Memory-light per the intended use over a whole ladder of large files: `rU` is
+    reduced to a time-mean profile (`np.mean(rU, axis=1)`) and then freed.
+
+    Returns
+    -------
+    dict {'z_plus', 'u_plus', 'u_star', 'y'}  — z⁺ = y·u*/ν, u⁺ = ⟨ū⟩/u* (inner
+        units) — or **None** only if `rU` / `y` cannot be read.
+    """
+    ds = nc.Dataset(nc_path, 'r')
+    if 'FrictionVelocity' in ds.variables:                 # use it only if present
+        u_star = float(np.mean(ds.variables['FrictionVelocity'][:]))
+    else:
+        u_star = float(u_star_default)                     # log-law needs only a scale
+    y = np.asarray(ds.variables['y'][:], dtype=float)
+    rU = np.asarray(ds.variables['rU'][:], dtype=float).T   # → (ny, nt) like load_ekman_nc_case
+    ds.close()
+    U_mean = np.mean(rU, axis=1) if rU.ndim == 2 else rU   # time-mean profile ⟨ū⟩(y)
+    del rU                                                  # release memory
+    if not (np.isfinite(u_star) and u_star > 0):
+        return None
+    return {'z_plus': y * u_star / nu, 'u_plus': U_mean / u_star,
+            'u_star': u_star, 'y': y}
+
+
+def load_rough_ladder_loglaw(ladder_dir, nu, pattern='ri*_avg.nc',
+                             u_star_default=0.0618):
+    """Log-law overlay data for a whole rough Re=1000 stability ladder.
+
+    Globs `pattern` inside `ladder_dir` and, for EACH matching avg_all.nc, calls
+    `load_loglaw_nc` (mean `rU` only; u* = `u_star_default` since these files store
+    no FrictionVelocity — see there).  The bulk Richardson number and the sim tag
+    are parsed from the file name (`ri<NN.NN>_..._<tag>_avg.nc`) for labelling /
+    ordering.
+
+    Returns a list of per-case dicts sorted by increasing Ri:
+        {'ri', 'tag', 'label', 'path', 'z_plus', 'u_plus', 'u_star'}
+    An empty list is returned if the directory is absent (e.g. running in the
+    code-prep repo rather than on the machine that holds the data).
+    """
+    import glob as _glob
+    import re as _re
+    out = []
+    if not os.path.isdir(ladder_dir):
+        print('[rough-ladder] directory not found -> NO ladder curves plotted: %s'
+              % ladder_dir)
+        print('               (run on the machine that holds the data, or copy the '
+              'ri*_avg.nc files there.)')
+        return out
+    _files = sorted(_glob.glob(os.path.join(ladder_dir, pattern)))
+    if not _files:
+        print('[rough-ladder] directory found but NO files match %r in %s -> '
+              'NO ladder curves plotted.' % (pattern, ladder_dir))
+        return out
+    _skipped = 0
+    for p in _files:
+        d = load_loglaw_nc(p, nu, u_star_default=u_star_default)
+        _base = os.path.basename(p)
+        if d is None:
+            print('  [rough-ladder] skipped (rU/y unreadable): %s' % _base)
+            _skipped += 1
+            continue
+        _mri  = _re.search(r'ri(\d+\.\d+)', _base)
+        _mtag = _re.search(r'_([a-z]\d*[a-z]?)_avg\.nc$', _base)
+        d['ri']    = float(_mri.group(1)) if _mri else np.nan
+        d['tag']   = _mtag.group(1) if _mtag else ''
+        d['path']  = p
+        d['label'] = ('rough Ri=%.2f' % d['ri']) if np.isfinite(d['ri']) else _base
+        if d['tag']:
+            d['label'] += ' (%s)' % d['tag']
+        out.append(d)
+    print('[rough-ladder] %d/%d case(s) loaded from %s (u*=%.4f)%s'
+          % (len(out), len(_files), ladder_dir, u_star_default,
+             (' (%d skipped: rU/y unreadable)' % _skipped) if _skipped else ''))
+    out.sort(key=lambda e: (np.inf if not np.isfinite(e['ri']) else e['ri'], e['tag']))
+    return out
 
 
 bias_patterns = {
@@ -1413,79 +1511,20 @@ def ref_mark(flag, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
 
-def plot_fig4_budget(nc_path, nu_case, label, fig_dir, top_frac=0.8):
-    """Replicate Kostelecky & Ansorge (2024) figure 4 for a reference .nc case.
+def cumtrapz0(fvals, xvals):
+    """Cumulative trapezoidal integral of fvals over xvals, starting at 0.
 
-    Builds the vertically-integrated momentum budget (their eq. 4.2) DIRECTLY and
-    transparently from the horizontally-averaged profiles — this is the paper-correct
-    "Method 2", kept independent of the loader's tau_* sign conventions so it serves
-    as a validation reference:
+    Vectorised (O(n)) counterpart of the loop-based vIntegral2.  Used by the
+    Obukhov Ξ-integral wall-law fit and by the fig-4 momentum-budget
+    computation (PLOT 32r) in PhAvg[_rotated].py.
 
-        ⟨τ⟩_zi(z) = C + V + R           (temporal tendency T≈0 for these avg files)
-          C_zx = f ∫₀ᶻ (g₂ − ⟨v⟩) dz' ,   C_zy = f ∫₀ᶻ (g₁ − ⟨u⟩) dz'   (f = 1)
-          V    = (1/Re_Λ) d⟨u_i⟩/dz ,      R = −⟨u_i' w'⟩
-
-    g = (g₁, g₂) is the geostrophic UNIT vector read from the velocity at the BL top
-    (⟨u⟩, ⟨v⟩ at `top_frac`·domain height, below the Rayleigh sponge).  The Total of
-    each component is the (height-independent) surface stress; u* = (τ_zx² + τ_zy²)^¼.
-
-    Panels mirror fig. 4: (a) τ_zx and (b) τ_zy near-wall in inner units (z⁺, /u*²);
-    (c,d) the same in outer units (z⁻ = y/u*, ·10⁻³/G²).  Returns the Method-2 u*.
-    """
-    import matplotlib.pyplot as plt
-    ds = nc.Dataset(nc_path, 'r')
-    y  = np.asarray(ds.variables['y'][:], float)
-    su = np.asarray(ds.variables['fU'][:], float).T.mean(1)   # ⟨u⟩ streamwise
-    sv = np.asarray(ds.variables['fW'][:], float).T.mean(1)   # ⟨v⟩ spanwise (veer comp.)
-    Ruw = np.asarray(ds.variables['Rxy'][:], float).T.mean(1)  # ⟨u'w'⟩
-    Rvw = np.asarray(ds.variables['Ryz'][:], float).T.mean(1)  # ⟨v'w'⟩
-    ds.close()
-
-    def _cumtrap(fp):                                # cumulative ∫ from the wall
-        out = np.zeros_like(fp)
-        out[1:] = np.cumsum(0.5 * (fp[1:] + fp[:-1]) * np.diff(y))
-        return out
-
-    top = int(top_frac * y.size)
-    g1, g2 = su[top], sv[top]
-    G = float(np.hypot(g1, g2))
-    C_zx = _cumtrap(g2 - sv); V_zx = nu_case * np.gradient(su, y); R_zx = -Ruw
-    C_zy = _cumtrap(g1 - su); V_zy = nu_case * np.gradient(sv, y); R_zy = -Rvw
-    Tx = C_zx + V_zx + R_zx
-    Ty = C_zy + V_zy + R_zy
-    _pl = (y > 0.05 * y[top]) & (y < y[top])         # plateau window (below sponge)
-    ustar = float(((Tx[_pl].mean())**2 + (Ty[_pl].mean())**2) ** 0.25)
-    u2 = ustar**2; G2 = G**2
-    zin = y * ustar / nu_case                        # inner z+
-    zout = y / ustar                                 # outer z-
-
-    def _panel(ax, x, C, V, R, T, sc, xlim, title, ylab, xlab):
-        ax.plot(x, C/sc, color='blue',   label='Coriolis C')
-        ax.plot(x, V/sc, color='red',    label='Viscous V')
-        ax.plot(x, R/sc, color='orange', label='Reynolds R')
-        ax.plot(x, T/sc, color='black',  lw=2, label='Total ⟨τ⟩')
-        ax.axhline(0, color='grey', lw=0.5); ax.set_xlim(*xlim)
-        ax.set_title(title, fontsize=9); ax.set_ylabel(ylab); ax.set_xlabel(xlab)
-        ax.grid(alpha=0.3)
-
-    fig, axs = plt.subplots(2, 2, figsize=(12, 9), dpi=200)
-    _panel(axs[0, 0], zin, C_zx, V_zx, R_zx, Tx, u2, (0, 100),
-           f'(a) $\\tau_{{zx}}$ inner — {label}', r'$\langle\tau\rangle^{+}_{zx}$', r'$z^{+}$')
-    _panel(axs[0, 1], zin, C_zy, V_zy, R_zy, Ty, u2, (0, 100),
-           '(b) $\\tau_{zy}$ inner', r'$\langle\tau\rangle^{+}_{zy}$', r'$z^{+}$')
-    _panel(axs[1, 0], zout, C_zx, V_zx, R_zx, Tx, G2*1e-3, (0, 1.2),
-           '(c) $\\tau_{zx}$ outer', r'$\langle\tau\rangle^{-}_{zx}\cdot10^{-3}$', r'$z^{-}$')
-    _panel(axs[1, 1], zout, C_zy, V_zy, R_zy, Ty, G2*1e-3, (0, 1.2),
-           '(d) $\\tau_{zy}$ outer', r'$\langle\tau\rangle^{-}_{zy}\cdot10^{-3}$', r'$z^{-}$')
-    axs[0, 0].legend(fontsize=7, loc='upper right')
-    fig.suptitle(f'Integrated momentum budget (eq. 4.2) — {label}   '
-                 f'[Method-2 $u_*$ = {ustar:.4f}, geostrophic veer = {np.degrees(np.arctan2(g2, g1)):.1f}°]')
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
-    plt.show()
-    print(f"  [Fig4 budget] {label}: Method-2 u* = {ustar:.4f}  (G={G:.3f}, "
-          f"τ_zx plateau={Tx[_pl].mean():.3e}, τ_zy plateau={Ty[_pl].mean():.3e})")
-    return ustar
+    NOTE: the old mixed-role plot_fig4_budget (nc read + eq. 4.2 budget + u* +
+    panel drawing in one \"plotting\" function) was split per module role:
+    loading → IO.read_ekman_budget_profiles, computation → in-line in
+    PhAvg[_rotated].py PLOT 32r, drawing → PlotField.plot_fig4_budget."""
+    return np.concatenate(([0.0],
+                           np.cumsum(0.5 * (fvals[1:] + fvals[:-1])
+                                     * np.diff(xvals))))
 
 
 def mark_h(pos, orient='v', label=True, lblpos=0.04, ha='right', ax=None,
@@ -1721,3 +1760,237 @@ def terrain_follow_remap(field, y, y_surf_x, zeta=None, nzeta=None):
         _zcol = y - y_surf_x[i]                       # height above local surface
         out[:, i] = np.interp(zeta, _zcol, field[:, i], left=np.nan, right=np.nan)
     return out, zeta
+
+
+###############################################################################
+#  Obukhov (1971) stability-corrected surface-layer wind profile
+#  "Turbulence in an Atmosphere with a Non-Uniform Temperature",
+#   Bound.-Layer Meteorol. 2, 7-29.
+# -----------------------------------------------------------------------------
+#  Paper-faithful modified wall-law option (Obukhov Section-6 parametric surface-
+#  layer profile), used ALONGSIDE the neutral log law so the DNS mean wind can be
+#  fitted with the modified law and compared with the neutral log law.  Moved here
+#  from PhAvg_rotated.py (it is a self-contained set of helpers).
+#
+#  All quantities are NON-DIMENSIONAL (the DNS has g = 1, f = 1).
+#  Parametric substitution (eq 39, unified stable + unstable branches):
+#      xi  = z / L1 = 1/u' - u'^3            (u' = auxiliary parameter)
+#      eta = Ri/Ri_cr = 1 - u'^4
+#      phi(Ri) = sqrt(1 - eta) = u'^2       (eq 38)
+#    u' in (0,1]   -> xi >= 0  STABLE   (Ri > 0, phi < 1, mixing suppressed)
+#    u' in [1,inf) -> xi <= 0  UNSTABLE (Ri > 0, phi > 1, mixing enhanced)
+#  Wind gradient (eq 22):  sqrt(phi)*k*z*dv/dz = v*  ->  dv/dz = v*/(k z u'),
+#    v(z) = (v*/k) * psi(xi),   psi(xi) = int dxi / (xi u').
+###############################################################################
+# obu_kappa (the paper's fixed von Kármán constant, 0.4) lives in config so every
+# constant stays in one place; imported here as the default for the fit helpers.
+from config import obu_kappa
+
+# --- monotone lookup table over u' spanning xi in ~[-100, +1e4] --------------
+_OBU_U_LO, _OBU_U_HI = 1.0e-4, 4.5
+_OBU_U = np.concatenate([
+    np.linspace(_OBU_U_HI, 1.0, 4000, endpoint=False),   # unstable side (u'>1)
+    np.linspace(1.0, _OBU_U_LO, 12000)])                 # stable side  (u'<=1)
+_OBU_XI = 1.0 / _OBU_U - _OBU_U**3                        # ascending along grid
+
+# psi_hat(xi) = psi(xi) - ln|xi|  is finite through xi -> 0.
+#   d psi_hat / du' = (1 + 3u'^4)(u' - 1) / (u'^2 (1 - u'^4)) ; limit -1/2 at u'=1
+with np.errstate(divide='ignore', invalid='ignore'):
+    _OBU_DPSIH = (1.0 + 3.0*_OBU_U**4)*(_OBU_U - 1.0) / (_OBU_U**2 * (1.0 - _OBU_U**4))
+_OBU_DPSIH[~np.isfinite(_OBU_DPSIH)] = -0.5
+_OBU_I0 = int(np.argmin(np.abs(_OBU_U - 1.0)))
+_OBU_PSIH = np.zeros_like(_OBU_U)
+_OBU_PSIH[1:] = np.cumsum(0.5*(_OBU_DPSIH[1:] + _OBU_DPSIH[:-1])*np.diff(_OBU_U))
+_OBU_PSIH -= _OBU_PSIH[_OBU_I0]                           # psi_hat(xi=0) = 0
+
+
+def obu_up_of_xi(xi):
+    """Auxiliary parameter u'(xi), stable & unstable, via monotone interp."""
+    return np.interp(np.asarray(xi, float), _OBU_XI, _OBU_U)
+
+
+def obu_eta_of_xi(xi):
+    """eta(xi) = Ri/Ri_cr = 1 - u'^4  (Table III column 'eta')."""
+    return 1.0 - obu_up_of_xi(xi)**4
+
+
+def obu_psi(xi):
+    """Wind function psi(xi) = (k/v*) v = ln|xi| + psi_hat(xi)  (Table III 'psi').
+
+    Additive constant is arbitrary (it is absorbed by the fit's offset / z0);
+    as xi -> 0 psi -> ln|xi|, so the modified law reduces to the neutral log law
+    in the unstratified limit (L1 -> inf)."""
+    xi = np.asarray(xi, float)
+    psih = np.interp(xi, _OBU_XI, _OBU_PSIH)
+    with np.errstate(divide='ignore'):
+        return np.log(np.abs(xi)) + psih
+
+
+def obu_wind_profile(z, v_star, L1, offset, kappa=obu_kappa):
+    """Modified log-law wind  v(z) = (v*/k) psi(z/L1) + offset.
+    L1 > 0 stable, L1 < 0 unstable (sign of xi follows sign of L1)."""
+    return (v_star/kappa)*obu_psi(np.asarray(z, float)/L1) + offset
+
+
+def obu_K_unstable(z, u_flux, kappa=obu_kappa):
+    """Eq (40) unstable-branch asymptote  K(z) = k^(4/3) (g u)^(1/3) z^(4/3);
+    the dimensional group  g*u  -> non-dimensional buoyancy-flux magnitude."""
+    return kappa**(4.0/3.0)*np.abs(u_flux)**(1.0/3.0)*np.asarray(z, float)**(4.0/3.0)
+
+
+def fit_modified_loglaw(z, u, kappa=obu_kappa, L1_0=None):
+    """Nonlinear least-squares fit (scipy curve_fit) of the modified log law
+        u(z) = (v*/k) psi(z/L1) + offset
+    for (v_star, L1, offset).  Returns a dict (or None if too few points).
+    Sign of L1_0 seeds the stable(+)/unstable(-) branch."""
+    z = np.asarray(z, float); u = np.asarray(u, float)
+    good = np.isfinite(z) & np.isfinite(u) & (z > 0)
+    z, u = z[good], u[good]
+    if z.size < 4:
+        return None
+    if L1_0 is None:
+        L1_0 = 3.0*float(z.max())                        # weak-stratification seed
+    _d = obu_psi(z[-1]/L1_0) - obu_psi(z[0]/L1_0)
+    v0   = kappa*(u[-1] - u[0]) / (_d if abs(_d) > 1e-6 else 1e-6)
+    off0 = u[0] - (v0/kappa)*obu_psi(z[0]/L1_0)
+
+    def _model(zz, vs, L1, off):
+        return (vs/kappa)*obu_psi(np.asarray(zz, float)/L1) + off
+    try:
+        popt, pcov = curve_fit(_model, z, u, p0=[abs(v0), L1_0, off0], maxfev=20000)
+    except Exception as _e:
+        return {'ok': False, 'err': str(_e)}
+    resid  = u - _model(z, *popt)
+    ss_res = float(np.sum(resid**2)); ss_tot = float(np.sum((u - u.mean())**2))
+    r2 = (1.0 - ss_res/ss_tot) if ss_tot > 0 else float('nan')
+    return {'ok': True, 'v_star': float(popt[0]), 'L1': float(popt[1]),
+            'offset': float(popt[2]), 'r2': float(r2),
+            'perr': np.sqrt(np.diag(pcov)).tolist()}
+
+
+# Obukhov (1971) Table III — xi, eta(=Ri/Ri_cr), psi.  The printed xi=1.5 row
+# (psi = 5.230) breaks the monotone psi(xi) and is a transcription typo; dropped.
+OBU_TBL3 = np.array([
+ (0.05,0.055,1.600),(0.10,0.102,2.370),(0.15,0.144,2.742),(0.20,0.189,3.065),
+ (0.25,0.231,3.320),(0.30,0.278,3.500),(0.35,0.320,3.662),(0.40,0.359,3.803),
+ (0.45,0.398,3.928),(0.50,0.435,4.045),(0.55,0.470,4.157),(0.60,0.502,4.258),
+ (0.65,0.533,4.360),(0.70,0.565,4.450),(0.75,0.597,4.560),(0.80,0.626,4.608),
+ (0.85,0.650,4.695),(0.90,0.677,4.769),(0.95,0.700,4.839),(1.00,0.723,4.908),
+ (1.1,0.76,5.03),(1.2,0.80,5.16),(1.3,0.84,5.29),(1.4,0.86,5.41),(1.6,0.90,5.63),
+ (1.7,0.92,5.74),(1.8,0.93,5.85),(1.9,0.94,5.95),(2.0,0.95,6.06),(2.1,0.96,6.16),
+ (2.2,0.96,6.27),(2.3,0.97,6.37),(2.4,0.97,6.47),(2.5,0.98,6.57),(2.6,0.98,6.68),
+ (2.7,0.98,6.78),(2.8,0.98,6.88),(2.9,0.99,6.99),(3.0,0.99,7.09),(3.5,0.99,7.60),
+ (4.0,1.00,8.10),(4.5,1.00,8.60),(5.0,1.00,9.10),(5.5,1.00,9.60),(6.0,1.00,10.10)])
+
+
+def validate_obukhov_tableIII(verbose=True, tol_eta=0.02, tol_psi=0.06):
+    """Reproduce Obukhov (1971) Table III (eta and psi vs xi) from the solver.
+    Unit-independent (all quantities dimensionless in the paper).  psi carries an
+    arbitrary additive constant, so it is compared after a single best-fit shift
+    C (= Obukhov's integration constant, ~4.6)."""
+    xi, eta_t, psi_t = OBU_TBL3[:, 0], OBU_TBL3[:, 1], OBU_TBL3[:, 2]
+    eta_c = obu_eta_of_xi(xi)
+    psi_c = obu_psi(xi)
+    C     = float(np.mean(psi_t - psi_c))
+    e_eta = np.abs(eta_c - eta_t)
+    e_psi = np.abs(psi_c + C - psi_t)
+    ok = (e_eta.max() < tol_eta) and (float(np.sqrt(np.mean(e_psi**2))) < tol_psi)
+    if verbose:
+        print(f"[Obukhov Table III] eta(xi): max|err|={e_eta.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_eta**2)):.4f}")
+        print(f"[Obukhov Table III] psi(xi): shift C={C:.3f} max|err|={e_psi.max():.4f} "
+              f"RMS={np.sqrt(np.mean(e_psi**2)):.4f}")
+        print(f"[Obukhov Table III] {'PASS' if ok else 'FAIL'}  "
+              f"(k={obu_kappa}, stable+unstable parametric solver)")
+    return ok
+
+
+###############################################################################
+#  PhAvg_rotated helpers — interpolation / rotation / derivative bundles
+#  Explicit-argument versions of the former nested closures in PhAvg_rotated.py;
+#  the call sites wrap them in a zero-arg lambda for load_or_compute caching, so
+#  the numerics are byte-for-byte identical to the in-line closures they replace.
+###############################################################################
+def rotate_pair(a, b, cos_a, sin_a):
+    """Proper 2-D vector rotation by angle α (cos_a=cosα, sin_a=sinα):
+        a' = a·cosα − b·sinα ,  b' = a·sinα + b·cosα ."""
+    return a * cos_a - b * sin_a, a * sin_a + b * cos_a
+
+
+def compute_ghost_interp(x, y, nx, ny, eps, fields, ghost_depth, n_anchor, smooth_width):
+    """Ghost-cell fill each field in `fields`; return the flattened (Fi, Fj) pairs
+    in order  [f0_i, f0_j, f1_i, f1_j, …]  (the order the caller unpacks)."""
+    out = []
+    for f in fields:
+        fi, fj = interpolate_component(x, y, nx, ny, eps, f, ghost_depth=ghost_depth,
+                                       n_anchor=n_anchor, smooth_width=smooth_width)
+        out.extend((fi, fj))
+    return tuple(out)
+
+
+def compute_vel_derivs(cd, U_j, U_i, V_j, V_i, W_j, W_i, mask_intr, dy_method):
+    """(∂u/∂y, ∂u/∂x, ∂v/∂y, ∂v/∂x, ∂w/∂y, ∂w/∂x) — y via dy_method, masked."""
+    return (cd.ddy(U_j, method=dy_method) * mask_intr,
+            cd.ddx(U_i) * mask_intr,
+            cd.ddy(V_j, method=dy_method) * mask_intr,
+            cd.ddx(V_i) * mask_intr,
+            cd.ddy(W_j, method=dy_method) * mask_intr,
+            cd.ddx(W_i) * mask_intr)
+
+
+def compute_disp_derivs(cd, DU, DV, DW, mask_intr, dy_method):
+    """Dispersive-velocity gradients (dud_dy, dvd_dy, dwd_dy, dud_dx, dvd_dx, dwd_dx)."""
+    return (cd.ddy(DU, method=dy_method) * mask_intr,
+            cd.ddy(DV, method=dy_method) * mask_intr,
+            cd.ddy(DW, method=dy_method) * mask_intr,
+            cd.ddx(DU) * mask_intr,
+            cd.ddx(DV) * mask_intr,
+            cd.ddx(DW) * mask_intr)
+
+
+def compute_misc_derivs(cd, U_i, U_j, rey_uu, rey_uv, P_i, P_j, mask_intr, dy_method, d2y_method):
+    """(∂²ū/∂x², ∂²ū/∂y², ∂rey_uu/∂x, ∂rey_uv/∂y, ∂P/∂x, ∂P/∂y) — masked."""
+    return (cd.d2dx2(U_i) * mask_intr,
+            cd.d2dy2(U_j, method=d2y_method) * mask_intr,
+            cd.ddx(rey_uu) * mask_intr,
+            cd.ddy(rey_uv, method=dy_method) * mask_intr,
+            cd.ddx(P_i) * mask_intr,
+            cd.ddy(P_j, method=dy_method) * mask_intr)
+
+
+###############################################################################
+#  PhAvg_rotated research-diagnostic scale helpers (stratification / Goal 1,3)
+###############################################################################
+def obukhov_length(us, bs, kappa, flux_eps=1e-12):
+    """Obukhov length  L = -u*^3 / (kappa * B_s);  +inf in the neutral limit."""
+    if (not np.isfinite(bs)) or abs(bs) < flux_eps or us <= 0:
+        return float('inf')
+    return -us**3 / (kappa * bs)
+
+
+def local_obukhov_length(i, eps_hgt, ny, u_star_loc, vtheta_tot, kappa, flux_eps=1e-12):
+    """Physical local Obukhov length at x-column i (evaluated at the local BL top)."""
+    js = int(min(eps_hgt[i], ny - 1))
+    return obukhov_length(float(u_star_loc[i]), float(vtheta_tot[js, i]), kappa, flux_eps)
+
+
+def stability_class(ri, ri_b_bins):
+    """Stability-class label from a bulk/gradient Richardson number `ri`."""
+    if (not np.isfinite(ri)) or abs(ri) < 1e-6:
+        return 'neutral'
+    if ri < ri_b_bins[0]:
+        return 'weakly stable'
+    if ri < ri_b_bins[1]:
+        return 'intermediately stable'
+    return 'strongly stable'
+
+
+def bl_scales(us, f, L_x, H_phys, nu):
+    """Boundary-layer scale set for friction velocity `us`:
+    depth δ=us/f, Ψ=Lx/(2δ), H/δ, H⁺=H·us/ν, Lx⁺=Lx·us/ν."""
+    d = us / f
+    return {'u_star': float(us), 'delta': float(d),
+            'Psi':     float(L_x / (2.0 * d)),
+            'H_delta': float(H_phys / d),
+            'H_plus':  float(H_phys * us / nu),
+            'Lx_plus': float(L_x * us / nu)}

@@ -568,6 +568,11 @@ if (1 == cal_Avg):
     nscal     = None          # detected (1 or 2) from the first complete set
     good_sc   = None
     AvgScal2  = None
+    nflux     = None          # 0 or 3: avg_flux*.{1,2,3} present? (detected on first set)
+    good_flx  = None
+    # Exact velocity-scalar flux ⟨u_i·s⟩_z from avg_flux* (avg_phase.f90 /
+    # BuoyancyFlux3D.py), if present: components 0=u·s, 1=v·s (wall-normal), 2=w·s.
+    AvgFlux   = np.zeros((ny, nx, 3))
 
     # Discover all avg_flow*_*.1 files and extract the <srt>_<end> tokens.
     flow1_files = [fn for fn in os.listdir(cwd)
@@ -612,23 +617,34 @@ if (1 == cal_Avg):
         if os.path.exists(cwd + 'avg_scal' + tok + '.2'):
             scal_paths.append(cwd + 'avg_scal' + tok + '.2')
 
-        # Number of scalars must be consistent across all sets.
+        # Optional exact velocity-scalar flux ⟨u_i·s⟩_z (avg_flux*.{1,2,3}, from
+        # avg_phase.f90 or BuoyancyFlux3D.py). Present only when all three exist.
+        flux_paths = [cwd + 'avg_flux' + tok + '.' + str(c) for c in (1, 2, 3)]
+        this_nflux = 3 if all(os.path.exists(p) for p in flux_paths) else 0
+
+        # Number of scalars (and flux presence) must be consistent across all sets.
         this_nscal = len(scal_paths)
         if (nscal is None):
             nscal   = this_nscal
+            nflux   = this_nflux
             good_sc = np.zeros(nscal, dtype=np.int64)
+            if (nflux):
+                good_flx = np.zeros(3, dtype=np.int64)
             # Persistent bad-plane totals per component, summed over ALL sets.
-            tot_skip_nan = np.zeros(10 + nscal, dtype=np.int64)   # NaN/Inf in fluid
-            tot_skip_big = np.zeros(10 + nscal, dtype=np.int64)   # |val| > MAX_ABS in fluid
+            tot_skip_nan = np.zeros(10 + nscal + nflux, dtype=np.int64)   # NaN/Inf in fluid
+            tot_skip_big = np.zeros(10 + nscal + nflux, dtype=np.int64)   # |val| > MAX_ABS in fluid
             if (nscal == 2):
                 AvgScal2 = np.zeros((ny, nx))
-            print("Detected %d scalar field(s)." % nscal)
-        elif (this_nscal != nscal):
-            print("WARNING: set %s has %d scalar(s) but %d expected; skipping set."
-                  % (tok, this_nscal, nscal))
+            print("Detected %d scalar field(s); avg_flux %s."
+                  % (nscal, "present (3 components)" if nflux else "absent"))
+        elif (this_nscal != nscal) or (this_nflux != nflux):
+            print("WARNING: set %s has %d scalar(s)/%d flux but %d/%d expected; skipping set."
+                  % (tok, this_nscal, this_nflux, nscal, nflux))
             continue
 
         comp_paths = flow_paths + str_paths + [p_path] + scal_paths
+        if (nflux):
+            comp_paths = comp_paths + flux_paths
 
         # Sanity: all component files must exist.
         missing = [p for p in comp_paths if not os.path.exists(p)]
@@ -698,6 +714,10 @@ if (1 == cal_Avg):
             h.seek(off)
         skipped_nan = np.zeros(len(comp_paths), dtype=np.int64)
         skipped_big = np.zeros(len(comp_paths), dtype=np.int64)
+        # Component-index boundaries: 0..2 flow, 3..8 stress, 9 p,
+        # scal_lo..flux_lo-1 scalar(s), flux_lo.. flux (u·s, v·s, w·s).
+        scal_lo = 10
+        flux_lo = 10 + nscal
         try:
             for kpl in range(ndata):
                 cur = {}   # this iteration's good u/v/w/θ planes (for the flux cross-moments)
@@ -728,13 +748,19 @@ if (1 == cal_Avg):
                     elif (c == 9):
                         AvgP[:, :]           += plane
                         good_p               += 1
-                    elif (c == 10):
-                        AvgScal[:, :]        += plane
-                        good_sc[0]           += 1
-                        cur[10] = plane                     # θ (scalar 1 = buoyancy)
-                    else:                                   # c == 11 (second scalar)
-                        AvgScal2[:, :]       += plane
-                        good_sc[1]           += 1
+                    elif (c < flux_lo):                     # scalar(s): scal_lo..flux_lo-1
+                        sidx = c - scal_lo
+                        if (sidx == 0):
+                            AvgScal[:, :]    += plane
+                            good_sc[0]       += 1
+                            cur[10] = plane                 # θ (scalar 1 = buoyancy)
+                        else:                               # second scalar
+                            AvgScal2[:, :]   += plane
+                            good_sc[1]       += 1
+                    else:                                   # flux: c >= flux_lo (u·s,v·s,w·s)
+                        fidx = c - flux_lo
+                        AvgFlux[:, :, fidx]  += plane
+                        good_flx[fidx]       += 1
                 # Buoyancy-flux cross-moments: only when u,v,w AND θ were all good
                 # for THIS iteration (so the product is from one consistent snapshot).
                 if all(k in cur for k in (0, 1, 2, 10)):
@@ -764,11 +790,14 @@ if (1 == cal_Avg):
     # ------------------------------------------------------------------ #
     # Good / bad plane accounting (totals over ALL sets, per component).   #
     # ------------------------------------------------------------------ #
-    good_all = np.array(list(good_flow) + list(good_str) + [int(good_p)] + list(good_sc),
-                        dtype=np.int64)
+    good_list = list(good_flow) + list(good_str) + [int(good_p)] + list(good_sc)
     comp_labels = (['flow.1', 'flow.2', 'flow.3',
                     'stress.1', 'stress.2', 'stress.3', 'stress.4', 'stress.5', 'stress.6',
                     'p.1'] + ['scal.%d' % (s + 1) for s in range(nscal)])
+    if (nflux):
+        good_list  += list(good_flx)
+        comp_labels += ['flux.1', 'flux.2', 'flux.3']
+    good_all = np.array(good_list, dtype=np.int64)
     print("---------------------------------------------------------------")
     print("Plane accounting (good vs bad), summed over all iteration sets:")
     tot_good = 0
@@ -806,6 +835,9 @@ if (1 == cal_Avg):
     AvgScal[:,:] = (AvgScal[:,:]*mask_zero)/good_sc[0]
     if (nscal == 2):
         AvgScal2[:,:] = (AvgScal2[:,:]*mask_zero)/good_sc[1]
+    if (nflux):
+        for i in range(3):
+            AvgFlux[:,:,i] = (AvgFlux[:,:,i]*mask_zero)/good_flx[i]
 
     # Dispersive scalar  θ̃ = ⟨b̄⟩(x,z) − ⟨b̄⟩(z): the x-mean of the phase-averaged
     # scalar is removed, so θ̃ has zero x-mean by construction (parallels DispVel /
@@ -831,6 +863,19 @@ if (1 == cal_Avg):
         MeanUTheta = np.zeros((ny, nx)); MeanVTheta = np.zeros((ny, nx))
         MeanWTheta = np.zeros((ny, nx)); MeanThTh   = np.zeros((ny, nx))
         print("WARNING: no iteration had u,v,w AND θ all good; buoyancy flux = 0.")
+
+    # Prefer the EXACT ⟨u_i·s⟩_z from avg_flux* (spanwise mean of the true
+    # product) over the Route-C product-of-spanwise-means. This is a drop-in
+    # improvement of the SAME joint moment PhAvg_rotated.py subtracts against
+    # (MeanVTheta − AvgPhV·AvgScal), so the turbulent buoyancy flux becomes exact
+    # with no downstream change. MeanThTh (scalar variance) stays Route-C —
+    # avg_flux carries no s·s component.
+    if (nflux):
+        MeanUTheta = AvgFlux[:, :, 0].copy()
+        MeanVTheta = AvgFlux[:, :, 1].copy()
+        MeanWTheta = AvgFlux[:, :, 2].copy()
+        print("Using EXACT velocity-scalar flux from avg_flux* for Mean{U,V,W}Theta "
+              "(Route-C product-of-means overridden; MeanThTh stays Route-C).")
 
     # Report placement (solid vs fluid) of any non-finite values left in the
     # averaged fields. After skipping corrupt planes these should all be clean.
@@ -943,6 +988,12 @@ if (1 == save_avg):
     np.save('MeanVTheta.npy', MeanVTheta)
     np.save('MeanWTheta.npy', MeanWTheta)
     np.save('MeanThTh.npy',   MeanThTh)
+
+    # Exact phase-averaged velocity-scalar flux ⟨u_i·s⟩_z from avg_flux*, if present.
+    if (nflux):
+        np.save('AvgFluxUS.npy', AvgFlux[:, :, 0])
+        np.save('AvgFluxVS.npy', AvgFlux[:, :, 1])
+        np.save('AvgFluxWS.npy', AvgFlux[:, :, 2])
 
     np.save('VelGblU.npy', VelGbl[:,0])
     np.save('VelGblV.npy', VelGbl[:,1])

@@ -25,6 +25,11 @@ import sys
 # config.py / module overrides the master one; the master still supplies every
 # other module.  Falls back to the master config when no local copy exists.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Fallback: also expose the MyPyLib master dir (via realpath, following the
+# symlink) so master-only modules such as IO.py resolve even when a per-sim data
+# directory has not yet been re-linked by setup.sh.  Appended (not inserted at 0)
+# so a LOCAL config.py / module still takes precedence.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 # ─────────────────────────────────────────────────────────────────────────────
 import re
 import csv
@@ -46,8 +51,39 @@ import matplotlib.animation as animation
 import matplotlib.patches as mpatches
 from matplotlib import cm
 from config import *
+# ── Master-config backfill (stale per-case config guard) ─────────────────────
+# A per-simulation config.py (which SHADOWS the master via the sys.path
+# bootstrap above — by design, it carries per-case values such as Fr) can
+# predate constants later added to the master config (§13).  Backfill any
+# names the local config lacks from the MASTER config (the one next to this
+# script's realpath) so a stale case config prints a notice instead of
+# NameError-ing mid-run.  Names the local config DOES define keep their local
+# per-case values.
+import config as _cfg_local
+_cfg_master_dir = os.path.dirname(os.path.realpath(__file__))
+if os.path.dirname(os.path.realpath(_cfg_local.__file__)) != _cfg_master_dir:
+    import importlib.util as _ilu
+    _cfg_spec = _ilu.spec_from_file_location(
+        '_config_master', os.path.join(_cfg_master_dir, 'config.py'))
+    _cfg_master = _ilu.module_from_spec(_cfg_spec)
+    _cfg_spec.loader.exec_module(_cfg_master)
+    _cfg_backfill = {_k: _v for _k, _v in vars(_cfg_master).items()
+                     if not _k.startswith('_') and _k not in globals()}
+    if _cfg_backfill:
+        # Patch the LIVE config module (not just this script's globals) so that a
+        # downstream direct `from config import <name>` — e.g. functions.py's
+        # `from config import obu_kappa` — also sees the backfilled constants.
+        for _k, _v in _cfg_backfill.items():
+            setattr(_cfg_local, _k, _v)
+        globals().update(_cfg_backfill)
+        print(f'[config] local config.py is missing {len(_cfg_backfill)} newer '
+              f'master constant(s) — backfilled from the master config: '
+              f'{sorted(_cfg_backfill)}')
+    del _ilu, _cfg_spec, _cfg_master, _cfg_backfill
+del _cfg_local, _cfg_master_dir
+# ──────────────────────────────────────────────────────────────────────────────
 from functions import *
-from saveresults import *
+import IO   # var_names + array/pickle I/O (write_avg_arrays / read_avg_arrays / write_results_pickle)
 from functions import (        # simulation helper routines
     read_grid,
     epsfield,
@@ -61,9 +97,11 @@ from compact_derivatives import (
 # from geopotential import *
 
 
-# Reference-overlay helpers (ref_plot / ref_mark) and the Kostelecky & Ansorge
-# fig-4 momentum-budget reproducer (plot_fig4_budget) are shared, self-contained
-# routines that live in functions.py and arrive via `from functions import *`.
+# Reference-overlay helpers (ref_plot / ref_mark) are shared routines in
+# functions.py (`from functions import *`).  The Kostelecky & Ansorge fig-4
+# budget is split per module role: IO.read_ekman_budget_profiles loads the
+# reference profiles, the eq.-4.2 budget is computed IN THIS SCRIPT (PLOT 32r),
+# and PlotField.plot_fig4_budget only draws the passed-in terms.
 
 
 # %%
@@ -133,8 +171,13 @@ rf_ind = flk_wdt[int((len(flk_wdt))/2):]
 x_oro = x
 x_oro = np.append(0, x_oro)
 x_oro = np.append(x_oro, x[-1])
-dx = (2*np.pi/x[-1])
-y_oro = np.round((hill_hgt/(2**1))*(1 + np.cos(dx*(x))))
+# Fundamental streamwise wavenumber of the sinusoidal valley (2π / L_x); used
+# only to draw the orography outline y_oro.  NB: keep this SEPARATE from `dx`
+# (the grid spacing set above) — `dx` is pickled and consumed by results.py as
+# the streamwise grid spacing (its 2·dx⁺ Nyquist check), so it must NOT be
+# repurposed as a wavenumber here.
+kx0 = (2*np.pi/x[-1])
+y_oro = np.round((hill_hgt/(2**1))*(1 + np.cos(kx0*(x))))
 y_oro = y[y_oro.astype(int)]
 y_oro = np.append(0,y_oro)
 y_oro = np.append(y_oro, 0)
@@ -187,160 +230,12 @@ case_v_g = np.reshape(case_v[:,512].astype(int),((ny,1)))
 # intepolate(x, y, Nx, Ny, eps_s, eps_e, gapi, gapj, field):
 
 # %%
-###############################################################################
-#  Obukhov (1971) stability-corrected surface-layer wind profile
-#  "Turbulence in an Atmosphere with a Non-Uniform Temperature",
-#   Bound.-Layer Meteorol. 2, 7-29.
-# -----------------------------------------------------------------------------
-#  This is the SECOND, paper-faithful wall-law option, added ALONGSIDE (not
-#  replacing) the neutral log law and the earlier Xi-integral fit above.  It
-#  implements Obukhov's Section-6 parametric surface-layer profile so the DNS
-#  mean wind can be fitted with the modified law and compared, on the same plot,
-#  with the neutral log law.
-#
-#  All quantities are NON-DIMENSIONAL (the DNS has g = 1, f = 1).  None of the
-#  paper's dimensional constants (g = 981 cm/s^2, c_p, rho, ...) appear.  The
-#  paper's buoyancy-flux group  (g/T)*u  (u = -q/(c_p*rho*T)) maps directly onto
-#  the DNS surface wall-normal BUOYANCY FLUX  B_s = <w'b'>  already computed in
-#  the research-diagnostics block below (b is the scalar; g absorbed).  [FLAG:
-#  judgement call — see the fit block for the sign/normalisation discussion.]
-#
-#  Parametric substitution (eq 39, unified stable + unstable branches):
-#      xi  = z / L1 = 1/u' - u'^3            (u' = auxiliary parameter)
-#      eta = Ri/Ri_cr = 1 - u'^4
-#      phi(Ri) = sqrt(1 - eta) = u'^2       (eq 38)
-#    u' in (0,1]   -> xi >= 0  STABLE   (Ri > 0, phi < 1, mixing suppressed)
-#    u' in [1,inf) -> xi <= 0  UNSTABLE (Ri < 0, phi > 1, mixing enhanced)
-#  Wind gradient (eq 22):  sqrt(phi)*k*z*dv/dz = v*  ->  dv/dz = v*/(k z u'),
-#    v(z) = (v*/k) * psi(xi),   psi(xi) = int dxi / (xi u').
-#  Table III of the paper tabulates eta(xi) and psi(xi); validate_obukhov_
-#  tableIII() reproduces both from the solver below (they are already
-#  dimensionless in the paper, so this is a direct, unit-independent check).
-###############################################################################
-OBU_KAPPA = 0.4        # paper's von Karman constant — the ONE fixed empirical
-                       # constant of the modified fit.  [FLAG: config.kappa =
-                       # 0.42 and the neutral fit FITS kappa in kappa_bounds;
-                       # the paper/Table-III uses 0.4, so the modified law is
-                       # pinned to 0.4 per the paper.  v* scales as 1/k, so a
-                       # different k only rescales the reported v*, not L1.]
-
-# --- monotone lookup table over u' spanning xi in ~[-100, +1e4] --------------
-_OBU_U_LO, _OBU_U_HI = 1.0e-4, 4.5
-_OBU_U = np.concatenate([
-    np.linspace(_OBU_U_HI, 1.0, 4000, endpoint=False),   # unstable side (u'>1)
-    np.linspace(1.0, _OBU_U_LO, 12000)])                 # stable side  (u'<=1)
-_OBU_XI = 1.0 / _OBU_U - _OBU_U**3                        # ascending along grid
-
-# psi_hat(xi) = psi(xi) - ln|xi|  is finite through xi -> 0.
-#   d psi_hat / du' = (1 + 3u'^4)(u' - 1) / (u'^2 (1 - u'^4)) ; limit -1/2 at u'=1
-with np.errstate(divide='ignore', invalid='ignore'):
-    _OBU_DPSIH = (1.0 + 3.0*_OBU_U**4)*(_OBU_U - 1.0) / (_OBU_U**2 * (1.0 - _OBU_U**4))
-_OBU_DPSIH[~np.isfinite(_OBU_DPSIH)] = -0.5
-_OBU_I0 = int(np.argmin(np.abs(_OBU_U - 1.0)))
-_OBU_PSIH = np.zeros_like(_OBU_U)
-_OBU_PSIH[1:] = np.cumsum(0.5*(_OBU_DPSIH[1:] + _OBU_DPSIH[:-1])*np.diff(_OBU_U))
-_OBU_PSIH -= _OBU_PSIH[_OBU_I0]                           # psi_hat(xi=0) = 0
-
-
-def obu_up_of_xi(xi):
-    """Auxiliary parameter u'(xi), stable & unstable, via monotone interp."""
-    return np.interp(np.asarray(xi, float), _OBU_XI, _OBU_U)
-
-
-def obu_eta_of_xi(xi):
-    """eta(xi) = Ri/Ri_cr = 1 - u'^4  (Table III column 'eta')."""
-    return 1.0 - obu_up_of_xi(xi)**4
-
-
-def obu_psi(xi):
-    """Wind function psi(xi) = (k/v*) v = ln|xi| + psi_hat(xi)  (Table III 'psi').
-
-    Additive constant is arbitrary (it is absorbed by the fit's offset / z0);
-    as xi -> 0 psi -> ln|xi|, so the modified law reduces to the neutral log law
-    in the unstratified limit (L1 -> inf)."""
-    xi = np.asarray(xi, float)
-    psih = np.interp(xi, _OBU_XI, _OBU_PSIH)
-    with np.errstate(divide='ignore'):
-        return np.log(np.abs(xi)) + psih
-
-
-def obu_wind_profile(z, v_star, L1, offset, kappa=OBU_KAPPA):
-    """Modified log-law wind  v(z) = (v*/k) psi(z/L1) + offset.
-    L1 > 0 stable, L1 < 0 unstable (sign of xi follows sign of L1)."""
-    return (v_star/kappa)*obu_psi(np.asarray(z, float)/L1) + offset
-
-
-def obu_K_unstable(z, u_flux, kappa=OBU_KAPPA):
-    """Eq (40) unstable-branch asymptote  K(z) = k^(4/3) (g u)^(1/3) z^(4/3);
-    the dimensional group  g*u  -> non-dimensional buoyancy-flux magnitude."""
-    return kappa**(4.0/3.0)*np.abs(u_flux)**(1.0/3.0)*np.asarray(z, float)**(4.0/3.0)
-
-
-def fit_modified_loglaw(z, u, kappa=OBU_KAPPA, L1_0=None):
-    """Nonlinear least-squares fit (scipy curve_fit) of the modified log law
-        u(z) = (v*/k) psi(z/L1) + offset
-    for (v_star, L1, offset).  Returns a dict (or None if too few points).
-    Sign of L1_0 seeds the stable(+)/unstable(-) branch."""
-    z = np.asarray(z, float); u = np.asarray(u, float)
-    good = np.isfinite(z) & np.isfinite(u) & (z > 0)
-    z, u = z[good], u[good]
-    if z.size < 4:
-        return None
-    if L1_0 is None:
-        L1_0 = 3.0*float(z.max())                        # weak-stratification seed
-    _d = obu_psi(z[-1]/L1_0) - obu_psi(z[0]/L1_0)
-    v0   = kappa*(u[-1] - u[0]) / (_d if abs(_d) > 1e-6 else 1e-6)
-    off0 = u[0] - (v0/kappa)*obu_psi(z[0]/L1_0)
-
-    def _model(zz, vs, L1, off):
-        return (vs/kappa)*obu_psi(np.asarray(zz, float)/L1) + off
-    try:
-        popt, pcov = curve_fit(_model, z, u, p0=[abs(v0), L1_0, off0], maxfev=20000)
-    except Exception as _e:
-        return {'ok': False, 'err': str(_e)}
-    resid  = u - _model(z, *popt)
-    ss_res = float(np.sum(resid**2)); ss_tot = float(np.sum((u - u.mean())**2))
-    r2 = (1.0 - ss_res/ss_tot) if ss_tot > 0 else float('nan')
-    return {'ok': True, 'v_star': float(popt[0]), 'L1': float(popt[1]),
-            'offset': float(popt[2]), 'r2': float(r2),
-            'perr': np.sqrt(np.diag(pcov)).tolist()}
-
-
-# Obukhov (1971) Table III — xi, eta(=Ri/Ri_cr), psi.  The printed xi=1.5 row
-# (psi = 5.230) breaks the monotone psi(xi) and is a transcription typo; dropped.
-_OBU_TBL3 = np.array([
- (0.05,0.055,1.600),(0.10,0.102,2.370),(0.15,0.144,2.742),(0.20,0.189,3.065),
- (0.25,0.231,3.320),(0.30,0.278,3.500),(0.35,0.320,3.662),(0.40,0.359,3.803),
- (0.45,0.398,3.928),(0.50,0.435,4.045),(0.55,0.470,4.157),(0.60,0.502,4.258),
- (0.65,0.533,4.360),(0.70,0.565,4.450),(0.75,0.597,4.560),(0.80,0.626,4.608),
- (0.85,0.650,4.695),(0.90,0.677,4.769),(0.95,0.700,4.839),(1.00,0.723,4.908),
- (1.1,0.76,5.03),(1.2,0.80,5.16),(1.3,0.84,5.29),(1.4,0.86,5.41),(1.6,0.90,5.63),
- (1.7,0.92,5.74),(1.8,0.93,5.85),(1.9,0.94,5.95),(2.0,0.95,6.06),(2.1,0.96,6.16),
- (2.2,0.96,6.27),(2.3,0.97,6.37),(2.4,0.97,6.47),(2.5,0.98,6.57),(2.6,0.98,6.68),
- (2.7,0.98,6.78),(2.8,0.98,6.88),(2.9,0.99,6.99),(3.0,0.99,7.09),(3.5,0.99,7.60),
- (4.0,1.00,8.10),(4.5,1.00,8.60),(5.0,1.00,9.10),(5.5,1.00,9.60),(6.0,1.00,10.10)])
-
-
-def validate_obukhov_tableIII(verbose=True, tol_eta=0.02, tol_psi=0.06):
-    """Reproduce Obukhov (1971) Table III (eta and psi vs xi) from the solver.
-    Unit-independent (all quantities dimensionless in the paper).  psi carries an
-    arbitrary additive constant, so it is compared after a single best-fit shift
-    C (= Obukhov's integration constant, ~4.6)."""
-    xi, eta_t, psi_t = _OBU_TBL3[:, 0], _OBU_TBL3[:, 1], _OBU_TBL3[:, 2]
-    eta_c = obu_eta_of_xi(xi)
-    psi_c = obu_psi(xi)
-    C     = float(np.mean(psi_t - psi_c))
-    e_eta = np.abs(eta_c - eta_t)
-    e_psi = np.abs(psi_c + C - psi_t)
-    ok = (e_eta.max() < tol_eta) and (float(np.sqrt(np.mean(e_psi**2))) < tol_psi)
-    if verbose:
-        print(f"[Obukhov Table III] eta(xi): max|err|={e_eta.max():.4f} "
-              f"RMS={np.sqrt(np.mean(e_eta**2)):.4f}")
-        print(f"[Obukhov Table III] psi(xi): shift C={C:.3f} max|err|={e_psi.max():.4f} "
-              f"RMS={np.sqrt(np.mean(e_psi**2)):.4f}")
-        print(f"[Obukhov Table III] {'PASS' if ok else 'FAIL'}  "
-              f"(k={OBU_KAPPA}, stable+unstable parametric solver)")
-    return ok
+# ── Obukhov (1971) stability-corrected wall-law helpers ──────────────────────
+# The parametric surface-layer profile + its lookup table were moved to
+# functions.py (self-contained, arrive via `from functions import *`):
+#   obu_up_of_xi, obu_eta_of_xi, obu_psi, obu_wind_profile, obu_K_unstable,
+#   fit_modified_loglaw, validate_obukhov_tableIII.
+# The paper's fixed κ = 0.4 is now config.obu_kappa.
 
 
 # %%
@@ -377,7 +272,7 @@ if (1 == cal_Avg):
     for i in range(30):
         files = 0
         FilePath = []
-        base = 234500
+        base = avg_iter_base
         srt = base + 1 + restart * i
         end = base + restart * (i + 1)
         for j in range(11):
@@ -467,7 +362,7 @@ if(1 == verify_TimeAvg):
     for i in range(30):
         files = 0
         FilePath = []
-        base = 234500
+        base = avg_iter_base
         srt = base + 1 + restart * i 
         end = base + restart * (i + 1)
         pathi = cwd + 'avg_flow' + str(srt) + '_' + str(end) + '.' + str(1)
@@ -500,138 +395,15 @@ if(1 == verify_TimeAvg):
 # Write the required varaible in a file
 
 if (100 == save_avg):
-    np.save('uu_d.npy', uu_d)
-    np.save('uv_d.npy', uv_d)
-    np.save('uw_d.npy', uw_d)
-    np.save('vv_d.npy', vv_d)
-    np.save('vw_d.npy', vw_d)
-    np.save('ww_d.npy', ww_d)
-    
-    np.save('AvgStrUU.npy', AvgStress[:,:,0])
-    np.save('AvgStrUV.npy', AvgStress[:,:,1])
-    np.save('AvgStrUW.npy', AvgStress[:,:,2])
-    np.save('AvgStrVV.npy', AvgStress[:,:,3])
-    np.save('AvgStrVW.npy', AvgStress[:,:,4])
-    np.save('AvgStrWW.npy', AvgStress[:,:,5])
-    
-    np.save('uu_g.npy', uu_g)
-    np.save('uv_g.npy', uv_g)
-    np.save('uw_g.npy', uw_g)
-    np.save('vv_g.npy', vv_g)
-    np.save('vw_g.npy', vw_g)
-    np.save('ww_g.npy', ww_g)
-    
-    np.save('uu_t.npy', uu_t)
-    np.save('uv_t.npy', uv_t)
-    np.save('uw_t.npy', uw_t)
-    np.save('vv_t.npy', vv_t)
-    np.save('vw_t.npy', vw_t)
-    np.save('ww_t.npy', ww_t)
-    
-    np.save('AvgPhU.npy', AvgPh[:,:,0])
-    np.save('AvgPhV.npy', AvgPh[:,:,1])
-    np.save('AvgPhW.npy', AvgPh[:,:,2])
-    np.save('AvgP.npy', AvgP[:,:])
-    np.save('DispP.npy', DispP)
-    np.save('AvgScal.npy', AvgScal[:,:])
-    np.save('DispScal.npy', DispScal)
-
-    np.save('VelGblU.npy', VelGbl[:,0])
-    np.save('VelGblV.npy', VelGbl[:,1])
-    np.save('VelGblW.npy', VelGbl[:,2])
-    
-    np.save('DispVelU', DispVel[:,:,0])
-    np.save('DispVelV', DispVel[:,:,1])
-    np.save('DispVelW', DispVel[:,:,2])
-    
-    np.save('udug.npy', udug)
-    np.save('udvg.npy', udvg)
-    np.save('udwg.npy', udwg)
-    np.save('vdvg.npy', vdvg)
-    np.save('vdwg.npy', vdwg)
-    np.save('wdwg.npy', wdwg)
-    
-    np.save('ugud.npy', ugud)
-    np.save('ugvd.npy', ugvd)
-    np.save('ugwd.npy', ugwd)
-    np.save('vgvd.npy', vgvd)
-    np.save('vgwd.npy', vgwd)
-    np.save('wgwd.npy', wgwd)
+    IO.write_avg_arrays(globals())
 
 # load_arrays: restore pre-computed fields from .npy files (avoids rerunning averaging)
 # and load reference smooth-wall / rough-wall DNS data from NetCDF for comparison.
 if (1 == load_arrays):
-    # declares arrays to load
-    du_dt = np.zeros((ny,nx,dim))
-    ds_dt = np.zeros((ny,nx,scal))
-    
-    rey_uu = np.load('uu_d.npy')
-    rey_uv = np.load('uv_d.npy')
-    rey_uw = np.load('uw_d.npy')
-    rey_vv = np.load('vv_d.npy')
-    rey_vw = np.load('vw_d.npy')
-    rey_ww = np.load('ww_d.npy')
-    
-    AvgStrUU = np.load('AvgStrUU.npy')
-    AvgStrUV = np.load('AvgStrUV.npy')
-    AvgStrUW = np.load('AvgStrUW.npy')
-    AvgStrVV = np.load('AvgStrVV.npy')
-    AvgStrVW = np.load('AvgStrVW.npy')
-    AvgStrWW = np.load('AvgStrWW.npy')
-    
-    UU_G = np.load('uu_g.npy')
-    UV_G = np.load('uv_g.npy')
-    UW_G = np.load('uw_g.npy')
-    VV_G = np.load('vv_g.npy')
-    VW_G = np.load('vw_g.npy')
-    WW_G = np.load('ww_g.npy')
-    
-    UU_disp = np.load('uu_t.npy')
-    UV_disp = np.load('uv_t.npy')
-    UW_disp = np.load('uw_t.npy')
-    VV_disp = np.load('vv_t.npy')
-    VW_disp = np.load('vw_t.npy')
-    WW_disp = np.load('ww_t.npy')
-        
-    AvgPhU = np.load('AvgPhU.npy')
-    AvgPhV = np.load('AvgPhV.npy')
-    AvgPhW = np.load('AvgPhW.npy')
-    AvgP  = np.load('AvgP.npy')
-    DispP = np.load('DispP.npy')
-    AvgScal = np.load('AvgScal.npy')
-    DispScal = np.load('DispScal.npy')
-
-    VelGblU = np.load('VelGblU.npy')
-    VelGblV = np.load('VelGblV.npy')
-    VelGblW = np.load('VelGblW.npy')
-    
-    DispVelU = np.load('DispVelU.npy')
-    DispVelV = np.load('DispVelV.npy')
-    DispVelW = np.load('DispVelW.npy')
-    
-    udug = np.load('udug.npy')
-    udvg = np.load('udvg.npy')
-    udwg = np.load('udwg.npy')
-    vdvg = np.load('vdvg.npy')
-    vdwg = np.load('vdwg.npy')
-    wdwg = np.load('wdwg.npy')
-    
-    ugud = np.load('ugud.npy')
-    ugvd = np.load('ugvd.npy')
-    ugwd = np.load('ugwd.npy')
-    vgvd = np.load('vgvd.npy')
-    vgwd = np.load('vgwd.npy')
-    wgwd = np.load('wgwd.npy')
-    
-    # pdud2D = np.load('pdud2D.npy')
-    # pdvd2D = np.load('pdvd2D.npy')
-    # pdwd2D = np.load('pdwd2D.npy')
-
-    # dq_dt
-    # du_dt[:,:,0] = np.load('du_dt1.npy')
-    # du_dt[:,:,1] = np.load('du_dt2.npy')
-    # du_dt[:,:,2] = np.load('du_dt3.npy')
-    # ds_dt[:,:,0] = np.load('ds_dt.npy')
+    # Reload the saved .npy fields; globals().update keeps every array as a
+    # top-level, Spyder-inspectable name (rey_*, AvgStr*, UU_G/UU_disp, AvgPh*,
+    # DispVel*, cross terms, and zero-filled du_dt/ds_dt).  See IO.read_avg_arrays.
+    globals().update(IO.read_avg_arrays(ny, nx, dim, scal))
 
 # Postprocess
 # %%
@@ -655,20 +427,40 @@ if (1 == postprocess):
     # config.py (or delete the .npy files) to force fresh computation.
 
     # ── Ghost-cell interpolated fields ────────────────────────────────────────
-    def _compute_interp():
-        AvgPhU_i, AvgPhU_j = interpolate_component(x, y, nx, ny, eps, AvgPhU, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
-        AvgPhV_i, AvgPhV_j = interpolate_component(x, y, nx, ny, eps, AvgPhV, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
-        AvgPhW_i, AvgPhW_j = interpolate_component(x, y, nx, ny, eps, AvgPhW, ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
-        AvgP_i,   AvgP_j   = interpolate_component(x, y, nx, ny, eps, AvgP,   ghost_depth=ghost_depth, n_anchor=n_anchor, smooth_width=smooth_width)
-        return (AvgPhU_i, AvgPhU_j, AvgPhV_i, AvgPhV_j,
-                AvgPhW_i, AvgPhW_j, AvgP_i,   AvgP_j)
+    # compute_ghost_interp lives in functions.py; the lambda defers it for the
+    # load_or_compute .npy cache (recompute_derivatives / *_rot.npy).
     AvgPhU_i, AvgPhU_j, AvgPhV_i, AvgPhV_j, AvgPhW_i, AvgPhW_j, AvgP_i, AvgP_j = \
         load_or_compute(['AvgPhU_i', 'AvgPhU_j', 'AvgPhV_i', 'AvgPhV_j',
                          'AvgPhW_i', 'AvgPhW_j', 'AvgP_i',   'AvgP_j'],
-                        recompute_derivatives, _compute_interp,
+                        recompute_derivatives,
+                        lambda: compute_ghost_interp(x, y, nx, ny, eps,
+                                                     [AvgPhU, AvgPhV, AvgPhW, AvgP],
+                                                     ghost_depth, n_anchor, smooth_width),
                         label='ghost-cell interpolated fields (PCHIP)')
 
     # ══════════════════════════════════════════════════════════════════════════
+    # ╔══════════════════════════════════════════════════════════════════════════╗
+    # ║  🔒 LOCKED — VALIDATED DATA ORIENTATION.  DO NOT MODIFY THIS BLOCK.        ║
+    # ║  (Verified against K&A 2024 fig. 4 + stored FrictionVelocity/Angle;        ║
+    # ║   see CLAUDE.md "Standard shear-stress budget formulation".)               ║
+    # ╠══════════════════════════════════════════════════════════════════════════╣
+    # ║  WHAT THE PLOTTED DATA IS — rotation angle of the velocity & momentum      ║
+    # ║  (stress) tensors:                                                         ║
+    # ║  • Rotation angle:  α = config.alpha  (≈ −24.67° = −0.4305 rad, the        ║
+    # ║    geostrophic tilt).  Fields are rotated by α so the GEOSTROPHIC WIND     ║
+    # ║    aligns with +x (spanwise geostrophic → 0); u* is rotation-invariant.   ║
+    # ║  • VELOCITY (rank-1) rotates by ONE contraction (proper rotation):        ║
+    # ║        u' = u·cosα − w·sinα ,  w' = u·sinα + w·cosα   [functions.rotate_pair]║
+    # ║    applied to ⟨U⟩,⟨W⟩ (+ _i/_j interps) and the dispersive ũ,w̃.            ║
+    # ║  • MOMENTUM-FLUX pair (rey_uv,rey_vw)=(⟨u''v''⟩,⟨v''w''⟩): ONE index is on ║
+    # ║    the wall-normal rotation axis v, so the single rotate_pair IS the full  ║
+    # ║    tensor transform R_im R_jn τ_mn — rotates as a VECTOR.                  ║
+    # ║  • IN-PLANE stress (rey_uu,rey_uw,rey_ww): BOTH indices in the u–w plane → ║
+    # ║    full 2×2 rank-2 transform (trace-preserving; TKE & u* bit-unchanged).   ║
+    # ║  • Wall-normal V and rey_vv (axis indices) and scalar b (rank-0) are       ║
+    # ║    rotation-INVARIANT.  Reference .nc cases already carry their own frame  ║
+    # ║    (rough r1 stored at ~18.7° off x; smooth Re500 geostrophic-aligned).   ║
+    # ╚══════════════════════════════════════════════════════════════════════════╝
     # ░░  FRAME ROTATION  ░░  (this is the ONLY physics change vs PhAvg.py)
     # Rotate the horizontal components by `alpha` (config; the ~25° geostrophic
     # tilt) so the geostrophic wind aligns with x — the frame of the reference
@@ -679,7 +471,7 @@ if (1 == postprocess):
     # dispersive U,W; and the wall-normal momentum-flux pair (rey_uv=⟨u''v''⟩,
     # rey_vw=⟨v''w''⟩; TURBULENT, not the full Reynolds stress).  The latter have ONE
     # index on the rotation axis v (R_v·=δ), so
-    # the single _rotate_pair already IS the full tensor transform R_im R_jn τ_mn.
+    # the single rotate_pair already IS the full tensor transform R_im R_jn τ_mn.
     # Rotated as a rank-2 TENSOR (two R contractions): the in-plane stresses
     # rey_uu/uw/ww — both indices live in the rotated u–w plane, so they take the
     # full 2×2 transform (_rotate_inplane below).  It is a no-op at alpha=0 and
@@ -689,19 +481,17 @@ if (1 == postprocess):
     # Unchanged: wall-normal V (rotation axis); rey_vv (both indices on the axis).
     # The scalar AvgScal (potential temperature / buoyancy b) is a rank-0 tensor and
     # is therefore rotation-INVARIANT — its value at each (x,z) point is identical in
-    # both frames, so it is deliberately NOT passed through _rotate_pair (there is no
+    # both frames, so it is deliberately NOT passed through rotate_pair (there is no
     # second component to mix it with).  Rotation reaches buoyancy only THROUGH the
     # velocity: the horizontal heat-flux vector (e.g. ũb̃ = DispVelU·DispScal) rotates
     # because DispVelU does, while DispScal = AvgScal − ⟨b⟩ is unchanged.
     # u* = ‖τ_w‖ is rotation-invariant — only the τ_zx / τ_zy split changes.
-    _rc, _rs = np.cos(alpha), np.sin(alpha)
-    def _rotate_pair(a, b):
-        return a * _rc - b * _rs, a * _rs + b * _rc
-    AvgPhU,   AvgPhW   = _rotate_pair(AvgPhU,   AvgPhW)
-    AvgPhU_i, AvgPhW_i = _rotate_pair(AvgPhU_i, AvgPhW_i)
-    AvgPhU_j, AvgPhW_j = _rotate_pair(AvgPhU_j, AvgPhW_j)
-    DispVelU, DispVelW = _rotate_pair(DispVelU, DispVelW)
-    rey_uv,   rey_vw   = _rotate_pair(rey_uv,   rey_vw)
+    _rc, _rs = np.cos(alpha), np.sin(alpha)   # rotation cos/sin (functions.rotate_pair)
+    AvgPhU,   AvgPhW   = rotate_pair(AvgPhU,   AvgPhW,   _rc, _rs)
+    AvgPhU_i, AvgPhW_i = rotate_pair(AvgPhU_i, AvgPhW_i, _rc, _rs)
+    AvgPhU_j, AvgPhW_j = rotate_pair(AvgPhU_j, AvgPhW_j, _rc, _rs)
+    DispVelU, DispVelW = rotate_pair(DispVelU, DispVelW, _rc, _rs)
+    rey_uv,   rey_vw   = rotate_pair(rey_uv,   rey_vw,   _rc, _rs)
     # in-plane stress tensor τ'_ij = R_im R_jn τ_mn  (both indices in the u–w plane).
     # Tuple-assigned so the RHS sees the ORIGINAL uu/uw/ww; trace-preserving.
     _c2, _s2, _cs = _rc*_rc, _rs*_rs, _rc*_rs
@@ -745,54 +535,55 @@ if (1 == postprocess):
     # differentiates the accidental factor-2 dy step at the top of Zone 1 exactly,
     # avoiding the spurious tremble in the viscous shear stress (τ_zx) that the
     # η-space 'compact' metric produces there.
-    def _compute_vel_deriv():
-        return (cd.ddy(AvgPhU_j, method=DY_METHOD) * mask_intr,
-                cd.ddx(AvgPhU_i) * mask_intr,
-                cd.ddy(AvgPhV_j, method=DY_METHOD) * mask_intr,
-                cd.ddx(AvgPhV_i) * mask_intr,
-                cd.ddy(AvgPhW_j, method=DY_METHOD) * mask_intr,
-                cd.ddx(AvgPhW_i) * mask_intr)
     du_dy, du_dx, dv_dy, dv_dx, dw_dy, dw_dx = \
         load_or_compute(['du_dy_rot', 'du_dx_rot', 'dv_dy_rot', 'dv_dx_rot', 'dw_dy_rot', 'dw_dx_rot'],
-                        recompute_derivatives, _compute_vel_deriv,
+                        recompute_derivatives,
+                        lambda: compute_vel_derivs(cd, AvgPhU_j, AvgPhU_i, AvgPhV_j,
+                                                   AvgPhV_i, AvgPhW_j, AvgPhW_i,
+                                                   mask_intr, DY_METHOD),
                         label='velocity derivatives (rotated frame)')
 
     # ── Dispersive velocity gradients ─────────────────────────────────────────
-    def _compute_disp_deriv():
-        return (cd.ddy(DispVelU, method=DY_METHOD) * mask_intr,
-                cd.ddy(DispVelV, method=DY_METHOD) * mask_intr,
-                cd.ddy(DispVelW, method=DY_METHOD) * mask_intr,
-                cd.ddx(DispVelU) * mask_intr,
-                cd.ddx(DispVelV) * mask_intr,
-                cd.ddx(DispVelW) * mask_intr)
     dud_dy, dvd_dy, dwd_dy, dud_dx, dvd_dx, dwd_dx = \
         load_or_compute(['dud_dy_rot', 'dvd_dy_rot', 'dwd_dy_rot', 'dud_dx_rot', 'dvd_dx_rot', 'dwd_dx_rot'],
-                        recompute_derivatives, _compute_disp_deriv,
+                        recompute_derivatives,
+                        lambda: compute_disp_derivs(cd, DispVelU, DispVelV, DispVelW,
+                                                    mask_intr, DY_METHOD),
                         label='dispersive velocity derivatives (rotated frame)')
 
     # ── Second-order velocity derivatives and Reynolds/pressure gradients ─────
     # d2u_dy2 uses the D2Y_METHOD scheme (config.py; default 'compact').
-    def _compute_misc_deriv():
-        return (cd.d2dx2(AvgPhU_i) * mask_intr,                       # ∂²ū/∂x²
-                cd.d2dy2(AvgPhU_j, method=D2Y_METHOD) * mask_intr,    # ∂²ū/∂y²
-                cd.ddx(rey_uu) * mask_intr,                           # turbulent advection
-                cd.ddy(rey_uv, method=DY_METHOD) * mask_intr,
-                cd.ddx(AvgP_i) * mask_intr,                           # pressure gradients
-                cd.ddy(AvgP_j, method=DY_METHOD) * mask_intr)
     d2u_dx2, d2u_dy2, dreyuu_dx, dreyuv_dy, dP_dx, dP_dy = \
         load_or_compute(['d2u_dx2_rot', 'd2u_dy2_rot', 'dreyuu_dx_rot', 'dreyuv_dy_rot', 'dP_dx_rot', 'dP_dy_rot'],
-                        recompute_derivatives, _compute_misc_deriv,
+                        recompute_derivatives,
+                        lambda: compute_misc_derivs(cd, AvgPhU_i, AvgPhU_j, rey_uu, rey_uv,
+                                                    AvgP_i, AvgP_j, mask_intr,
+                                                    DY_METHOD, D2Y_METHOD),
                         label='second-order and stress/pressure derivatives')
 
     # Method 2 — friction velocity from the Ekman momentum-integral balance.
-    # Steady-state (∂/∂t = 0) intrinsic-averaged momentum equations:
-    #   τ_yx(y) = f∫₀ʸ ⟨w̃ − G_z⟩ dy'  +  (1/Re_Λ) ∂⟨ū⟩/∂y  − ⟨u'v'⟩
-    #   τ_yz(y) = −f∫₀ʸ ⟨ũ − G_x⟩ dy'  +  (1/Re_Λ) ∂⟨w̄⟩/∂y  − ⟨v'w'⟩
-    # u* = |τ_wall|^0.5 evaluated at y→0 (where τ profiles collapse to the surface stress).
-    # Momentum Balance to find u*
-    # Time derivative is zero
-    # $f \int_0^y \epsilon_{1 2 3}\left(\langle\bar{v}\rangle_k-g_v\right) \mathrm{d} y + \frac{1}{\operatorname{Re} e_{\Lambda}} \frac{\partial\langle\bar{u}\rangle}{\partial y}-\left\langle\overline{u^{\prime} w^{\prime}}\right\rangle $
-    # Turining angle is 23.29 degrees
+    # ╔══════════════════════════════════════════════════════════════════════════╗
+    # ║  🔒 LOCKED — STANDARD SHEAR-STRESS BUDGET FORMULA.  DO NOT MODIFY.         ║
+    # ║  Steady (∂/∂t=0), intrinsic (fluid-only) averaged, integrated Ekman        ║
+    # ║  momentum balance (K&A 2024 eq. 4.2). f=1. The sign combination below is   ║
+    # ║  the UNIQUE one that keeps Total = C+V+R height-constant (= surface stress);║
+    # ║  verified on smooth+rough .nc (u*/veer match stored values) & fig. 4.      ║
+    # ║    τ_zx(y) = C_zx + V_zx + R_zx                                             ║
+    # ║       C_zx = ∫₀ʸ(G_z − ⟨w⟩)dy' = −I_corr_yx    (I_corr_yx = ∫(⟨w⟩−G_z))     ║
+    # ║       V_zx = (1/Re_Λ) ∂⟨u⟩/∂y                                              ║
+    # ║       R_zx = −⟨u'v'⟩ = −(turb_yx + disp_yx)                                ║
+    # ║    τ_zy(y) = C_zy + V_zy + R_zy                                             ║
+    # ║       C_zy = ∫₀ʸ(⟨u⟩ − G_x)dy' = +I_corr_yz    (I_corr_yz = ∫(⟨u⟩−G_x))     ║
+    # ║       V_zy = (1/Re_Λ) ∂⟨w⟩/∂y                                              ║
+    # ║       R_zy = −⟨w'v'⟩ = −(turb_yz + disp_yz)                                ║
+    # ║  ⚠ Levi-Civita ε_{ik3}: the SPANWISE Coriolis is +I_corr_yz — the OPPOSITE ║
+    # ║    sign of the streamwise −I_corr_yx.  (v = wall-normal = engineering idx 1;║
+    # ║    ⟨u'v'⟩=rey_uv, ⟨w'v'⟩=rey_vw.)                                          ║
+    # ║  u* = (T_zx_plateau² + T_zy_plateau²)^¼  (rotation-invariant = ‖τ_wall‖^½). ║
+    # ║  DISPLAY ONLY: the τ_zy PANELS are negated for paper handedness via         ║
+    # ║  config.fig4_paper_spanwise_sign (see the Fig-4 assembly block); the        ║
+    # ║  physical total_tau_yz / u_star here are NOT negated.                       ║
+    # ╚══════════════════════════════════════════════════════════════════════════╝
     corr_yx = (AvgPhW - Gz)*mask0
     I_corr_yx = vIntegral(np.mean(corr_yx, axis=1), ny, y)
     visc_yx = (1/Re_lambda) * (avg_c(eps, du_dy, axis=1))
@@ -813,15 +604,14 @@ if (1 == postprocess):
     turb_yz = avg_c(eps, rey_vw, axis=1)                # turbulent ⟨v''w''⟩(z)
     disp_yz = avg_c(eps, VW_disp, axis=1)               # dispersive ṽw̃(z)
     rey_flux_yz = turb_yz + disp_yz                     # full Reynolds ⟨v'w'⟩(z)
-    # ROTATED-FRAME / Fig-4 convention: Reynolds enters with a MINUS sign,
-    #   Ty = C_zy + V_zy + R_zy   with   C_zy = -I_corr_yz,  V_zy = visc_yz,
-    #   R_zy = -(turb_yz + disp_yz).
-    # This matches the validated loader (functions.py: tau_yz = -I_corr_yz + visc_yz - Ryz)
-    # and plot_fig4_budget.  The unrotated PhAvg.py keeps the old +turb_yz plotting
-    # convention; here we correct it so u_star2 below is paper-consistent.
-    total_tau_yz = -I_corr_yz + visc_yz - turb_yz - disp_yz
-    # tau_disp_yz retained as an alias of the (now Fig-4-consistent) total for the τ_zy plots.
-    tau_disp_yz = total_tau_yz
+    # STANDARD shear-stress budget (see CLAUDE.md "Standard shear-stress budget
+    # formulation"):  Ty = C_zy + V_zy + R_zy   with
+    #   C_zy = +I_corr_yz = ∫(⟨u⟩−Gx),  V_zy = visc_yz,  R_zy = −(turb_yz + disp_yz).
+    # Levi-Civita ε_{ik3}: the spanwise Coriolis is +I_corr_yz, OPPOSITE the
+    # streamwise −I_corr_yx.  (Earlier code used −I_corr_yz — the old plot_fig4
+    # sign, corrected 2026-07-11 after the fig-4 reproduction verified +I_corr_yz
+    # is the sign that keeps Total height-constant and recovers the stored u*/veer.)
+    total_tau_yz = I_corr_yz + visc_yz - turb_yz - disp_yz
 
     # ── Alternative Coriolis integral: integrate per-column, THEN intrinsic avg ──
     # The existing I_corr_y* x-average (np.mean, EXTRINSIC over all nx columns)
@@ -873,7 +663,7 @@ if (1 == postprocess):
     # scaling (u_star) above is unchanged and still uses the original u_star2.
     # Full Reynolds flux (turb + disp) and the Fig-4 τ_zy sign, matching total_tau_* above.
     total_tau_yx_c = -I_corr_yx_c + visc_yx - turb_yx - disp_yx
-    total_tau_yz_c = -I_corr_yz_c + visc_yz - turb_yz - disp_yz
+    total_tau_yz_c = I_corr_yz_c + visc_yz - turb_yz - disp_yz
     u_star2_c = ((total_tau_yx_c**2 + total_tau_yz_c**2)**0.5)**0.5
     u_star_c  = np.mean(u_star2_c)
 
@@ -1003,16 +793,13 @@ if (1 == postprocess):
         _Ri_fit   = np.zeros_like(_z_fit)
         _phi_corr = np.ones_like(_z_fit)
 
-    def _cumtrapz0(fvals, xvals):
-        """Cumulative trapezoidal integral of fvals over xvals, starting at 0."""
-        return np.concatenate(([0.0],
-                               np.cumsum(0.5 * (fvals[1:] + fvals[:-1])
-                                         * np.diff(xvals))))
+    # cumtrapz0 (cumulative trapezoid from 0) lives in functions.py — shared by
+    # this Ξ-integral fit and the fig-4 budget computation (PLOT 32r).
 
     # Defaults (fallback if no valid κ found in constrained range)
-    kappa_loglaw = 0.41
-    d_m_loglaw   = 0.0
-    z0m_loglaw   = 0.068
+    kappa_loglaw = loglaw_kappa_default
+    d_m_loglaw   = loglaw_d_default
+    z0m_loglaw   = loglaw_z0m_default
     _best_r2     = -np.inf
 
     if _u_fit.size >= 3:
@@ -1022,7 +809,7 @@ if (1 == postprocess):
                 break
             # Stability-modified log abscissa Ξ; ≡ ln(z⁺−d⁺) in the neutral limit.
             if _stratified:
-                _x = np.log(_zs[0]) + _cumtrapz0(_phi_corr / _zs, _z_fit)
+                _x = np.log(_zs[0]) + cumtrapz0(_phi_corr / _zs, _z_fit)
             else:
                 _x = np.log(_zs)
             _slope, _intercept, _r, *_ = linregress(_x, _u_fit)
@@ -1051,7 +838,7 @@ if (1 == postprocess):
     # (Fr = np.inf) it is skipped entirely — only the original neutral log law
     # above runs — and v_star_mod/L1⁺/offset/R²/Ri_cr_implied stay NaN, so the
     # plot overlay, summary rows and pickle all fall back to "skipped".
-    #   u⁺(z⁺) = (v*/k) psi(z⁺/L1⁺) + offset          (k = OBU_KAPPA = 0.4)
+    #   u⁺(z⁺) = (v*/k) psi(z⁺/L1⁺) + offset          (k = obu_kappa = 0.4)
     # Free parameters: v* (in u_star units — v*≈1 ⇔ profile-implied friction
     # velocity equals Method-2 u_star), L1⁺ (dynamic-turbulence scale, wall
     # units; +stable/−unstable), and an additive offset (roughness/intercept).
@@ -1059,7 +846,7 @@ if (1 == postprocess):
     # collapse onto the neutral log law, so the two are directly comparable.
     # Fit window: fixed z⁺ ∈ [70, 150] (the log-law region for this flow), so the
     # modified-law parameters are fitted over a consistent, user-chosen band.
-    _mod_lo, _mod_hi = 70.0, 150.0
+    _mod_lo, _mod_hi = modlaw_zmin, modlaw_zmax
     obu_fit = None
     v_star_mod = L1_plus_mod = offset_mod = r2_mod = float('nan')
     if _stratified:                                     # finite Fr only
@@ -1386,8 +1173,6 @@ if (1 == postprocess):
         I_tau_xx2 += nu * 2 * trapezoid(y=du_dx[j_srt:j_end, i], x=y[j_srt:j_end])
     I_tau_xx_net = I_tau_xx1 - I_tau_xx2   # net streamwise normal-viscous on flanks
 
-    visc_yz_avg = visc_yz   # visc_yz is already the intrinsic x-averaged 1-D profile
-
     print("\n══ Method 2  components at z[94] ══════════════════════════════")
     print(f"  Coriolis-yx  −I_corr_yx : {-I_corr_yx[jc]:+.6f}")
     print(f"  Viscous-yx    visc_yx   : {visc_yx[jc]:+.6f}")
@@ -1395,7 +1180,7 @@ if (1 == postprocess):
     print(f"  total_tau_yx            : {total_tau_yx[jc]:+.6f}")
     print("  ---")
     print(f"  Coriolis-yz  +I_corr_yz : {I_corr_yz[jc]:+.6f}")
-    print(f"  Viscous-yz    visc_yz   : {visc_yz_avg[jc]:+.6f}")
+    print(f"  Viscous-yz    visc_yz   : {visc_yz[jc]:+.6f}")
     print(f"  Reynolds-yz  +rey_vw    : {rey_vw_avg[jc]:+.6f}")
     print(f"  total_tau_yz            : {total_tau_yz[jc]:+.6f}")
     print("  ---")
@@ -1455,9 +1240,9 @@ if (1 == postprocess):
     res_phavg_uv = np.sqrt(AvgPhU**2 + AvgPhV**2)
     
     # Monin-Obukhov Similarity Theory log-law: u⁺ = (1/κ) ln(z⁺) + B
-    d = 0.01*u_star
-    y0 = 5*u_star
-    u_most = (1/kappa)*np.log(y_inner) + 4.5
+    d = most_d_factor*u_star
+    y0 = most_y0_factor*u_star
+    u_most = (1/kappa)*np.log(y_inner) + most_B
     u_most[0] = 0
     u_most_v = (1/kappa)*np.log(((y-d)/(y0))/l_in)
     u_most_v[0] = 0
@@ -1513,7 +1298,7 @@ if (1 == postprocess):
     # meteorological "vertical" buoyancy flux ⟨w'θ'⟩ is the wall-normal ⟨v'θ'⟩.
     # ══════════════════════════════════════════════════════════════════════════
     _FLUX_EPS = 1e-12
-    G_mag = float(np.hypot(Gx, Gz))            # geostrophic magnitude (rotated → = Gx)
+    G_mag = float(G_inf)                       # pickled alias of the geostrophic magnitude G_inf (= √(Gx²+Gz²), rotated → = Gx); computed once above
 
     # ── Buoyancy field (scalar IS buoyancy b) and its double-average split ─────
     b_xmean  = avg_c(eps, AvgScal, axis=1)                       # ⟨b⟩(z), fluid-only
@@ -1573,19 +1358,14 @@ if (1 == postprocess):
     B_s    = float(Bflux[_j_surf_ref])                      # x-mean surface buoyancy flux
     b_star = (-B_s / u_star) if abs(u_star) > _FLUX_EPS else float('nan')
 
-    def _obukhov(us, bs):
-        """Obukhov length L = -u*^3 / (kappa * B_s); +∞ in the neutral limit."""
-        if (not np.isfinite(bs)) or abs(bs) < _FLUX_EPS or us <= 0:
-            return float('inf')
-        return -us**3 / (kappa * bs)
-
-    L_obukhov_col = _obukhov(u_star, B_s)                   # column (domain) Obukhov length
+    # obukhov_length / local_obukhov_length / stability_class / bl_scales → functions.py
+    L_obukhov_col = obukhov_length(u_star, B_s, kappa, _FLUX_EPS)  # column (domain) Obukhov length
     L_col_plus    = L_obukhov_col * u_star / nu             # in wall units
 
     # ── Ri_cr implied by the modified-log-law fit (Obukhov eqs 23a/26/27) ─────
     # Obukhov's dynamic-turbulence scale is  L1 = α·Ri_cr·v*³ / (k·|g u|), with
     # β = 1/(α·Ri_cr) and the buoyancy-flux group (g u) → the DNS surface flux
-    # B_s.  Inverting for Ri_cr, with α = K_T/K = 1/Pr_t and k = OBU_KAPPA:
+    # B_s.  Inverting for Ri_cr, with α = K_T/K = 1/Pr_t and k = obu_kappa:
     #     Ri_cr = L1_phys · k · |B_s| · Pr_t / v*_phys³.
     # CAREFUL with the two rescalings — they use DIFFERENT friction velocities:
     #   L1_phys  = L1⁺ · l_in ,  and  l_in = ν/u★_config  (config.u_star sets the
@@ -1603,7 +1383,7 @@ if (1 == postprocess):
             and np.isfinite(B_s) and abs(B_s) > _FLUX_EPS and u_star > 0):
         _L1_phys_ric = L1_plus_mod * l_in            # wall units → physical
         _v_phys_ric  = v_star_mod * u_star           # fit is in measured-u★ units
-        Ri_cr_implied = (_L1_phys_ric * OBU_KAPPA * abs(B_s) * Pr_t
+        Ri_cr_implied = (_L1_phys_ric * obu_kappa * abs(B_s) * Pr_t
                          / _v_phys_ric**3)
         _sign_ok = (L1_plus_mod > 0) == (B_s < 0)   # stable: L1>0 with downward flux
         print(f"Modified log-law → implied Ri_cr={Ri_cr_implied:+.4f} "
@@ -1615,34 +1395,22 @@ if (1 == postprocess):
     _tau_loc   = nu * np.sqrt(du_dy[_surf_j, np.arange(nx)]**2 + dw_dy[_surf_j, np.arange(nx)]**2)
     u_star_loc = np.sqrt(np.abs(_tau_loc))                  # per-column u*(x)
     _vtheta_tot = vtheta_disp + vtheta_temp
-    def _local_L(i):                                        # physical local Obukhov length
-        js = int(min(eps_hgt[i], ny - 1))
-        return _obukhov(float(u_star_loc[i]), float(_vtheta_tot[js, i]))
 
     # Stations: windward = left flank, floor = valley bottom, lee = right flank
     _stn  = {nm: int(fr * nx) for nm, fr in station_fracs.items()}
-    L_loc = {nm: (_local_L(i) * u_star / nu) for nm, i in _stn.items()}   # L⁺ per station
+    L_loc = {nm: (local_obukhov_length(i, eps_hgt, ny, u_star_loc, _vtheta_tot, kappa, _FLUX_EPS)
+                  * u_star / nu) for nm, i in _stn.items()}   # L⁺ per station
 
-    def _stab_class(ri):
-        if (not np.isfinite(ri)) or abs(ri) < 1e-6:        return 'neutral'
-        if ri < Ri_B_bins[0]:                              return 'weakly stable'
-        if ri < Ri_B_bins[1]:                              return 'intermediately stable'
-        return 'strongly stable'
-    stab_class    = _stab_class(Ri_B)
+    stab_class    = stability_class(Ri_B, Ri_B_bins)
     collapse_flag = bool(np.isfinite(L_col_plus) and abs(L_col_plus) < Lplus_collapse)
 
     # ──────────────────────────────────────────────────────────────────────────
     # GOAL 3 — u*, δ, Ψ, H/δ, H⁺ per run (3 friction-velocity methods, joint)
     # ──────────────────────────────────────────────────────────────────────────
     H_phys = float(y[hill_hgt])                             # valley crest height (physical)
-    def _scales(us):
-        d = us / f
-        return {'u_star': float(us), 'delta': float(d),
-                'Psi':     float(L_x / (2.0 * d)),
-                'H_delta': float(H_phys / d),
-                'H_plus':  float(H_phys * us / nu),
-                'Lx_plus': float(L_x * us / nu)}
-    scales   = {'M2': _scales(u_star), 'M1': _scales(u_star1), 'M3': _scales(u_star3)}
+    scales   = {'M2': bl_scales(u_star,  f, L_x, H_phys, nu),
+                'M1': bl_scales(u_star1, f, L_x, H_phys, nu),
+                'M3': bl_scales(u_star3, f, L_x, H_phys, nu)}
     Psi      = scales['M2']['Psi']                          # headline (Method 2)
     H_delta  = scales['M2']['H_delta']
     H_plus_r = scales['M2']['H_plus']
@@ -1664,7 +1432,7 @@ if (1 == postprocess):
     for nm, i in _stn.items():
         js = int(min(eps_hgt[i], ny - 1))
         zc = y[js:] - y[js]                                 # height above the local surface
-        Lloc = _local_L(i)
+        Lloc = local_obukhov_length(i, eps_hgt, ny, u_star_loc, _vtheta_tot, kappa, _FLUX_EPS)
         with np.errstate(divide='ignore', invalid='ignore'):
             phim = (kappa * zc / u_star) * du_dy[js:, i]
             zeta = (zc / Lloc) if np.isfinite(Lloc) else np.zeros_like(zc)
@@ -1742,7 +1510,7 @@ if (1 == postprocess):
         _mom[1:, :] &= _mb[:-1, :]; _mom[:-1, :] &= _mb[1:, :]  # y-neighbours
         _mom = _mom.astype(float)
 
-        _NK, _NV, _KP = 1, 5, 0        # N_KPLANES, NVARS, KPLANE_IDX (see animation block)
+        _NK, _NV, _KP = planesK_n_kplanes, planesK_nvars, planesK_kplane_idx  # planesK layout
         # Frame sources: planesK.* if present, otherwise z-plane 1 of the 3-D
         # velocity component files flow.*.1 (u) / flow.*.2 (v) — fall back to the
         # field files when planesK is unavailable (each snapshot tag = one frame).
@@ -1898,18 +1666,12 @@ if (1 == postprocess):
               'reflects topographic forcing, NOT a propagating internal gravity '
               'wave. The field is physically a wave wavenumber only for finite Fr.')
 
-    # Bundle all post-processed fields listed in var_names (defined in config) into a dict
-    # and pickle it so compile_results.py can assemble multi-case comparisons.
-    # save varaibels in library for compiling results.
-    # Skip names not yet in globals() (e.g. a diagnostic gated off or a reference
-    # absent on the cluster) so one missing key cannot drop the whole pickle;
-    # results.py already treats absent keys as None/NaN.
-    _missing = [name for name in var_names if name not in globals()]
-    if _missing:
-        print(f'[saveresults] pickle: {len(_missing)} var(s) absent, skipped: {_missing}')
-    sim1_results = {name: globals()[name] for name in var_names if name in globals()}
-    with open('sim1_results.pkl', 'wb') as f:
-        pickle.dump(sim1_results, f)
+    # Bundle every post-processed field listed in IO.var_names into sim1_results.pkl
+    # (consumed cross-case by results.py).  IO.write_results_pickle skips names not
+    # yet in globals() — a gated diagnostic or a cluster-absent reference — so one
+    # missing key cannot drop the whole pickle; results.py treats absent keys as
+    # None/NaN.
+    IO.write_results_pickle(globals())
         
     # delta_u_plus, B_s, B_r = calculate_roughness_function(y_s, U_s/u_star, y_in, u_plus_rot/u_star, 0.0618, 0.068, nu, 0.41)
     # phi = solve_compact_geopotential(PhAvgPU, PhAvgPV, x, y, nx, ny, eps, du_dx, dv_dy)
@@ -1960,8 +1722,7 @@ if (1 == postprocess):
 
     # ── Method-2 friction velocity for ALL cases (orographic / smooth / rough) ───
     # u* read as the constant-flux plateau of the Method-2 u*(z) profile.
-    ustr_M2_o          = u_star2                          # orographic profile (this run)
-    ustr_M2_plateau_o  = plateau_value(u_star2, y_inner)  # orographic plateau
+    ustr_M2_plateau_o  = plateau_value(u_star2, y_inner)  # orographic plateau (u_star2 = Method-2 profile)
     print("\n══ Method-2 friction velocity (Ekman momentum-integral) — all cases ══")
     print(f"  {'case':<26}{'u* (Method 2)':>14}{'reference':>16}")
     print(f"  {'orographic Re=500':<26}{ustr_M2_plateau_o:>14.5f}{'(u_star2 plateau)':>16}")
@@ -2184,72 +1945,10 @@ if (1 == postprocess):
     # ──────────────────────────────────────────────────────────────────────────
 
     # ══════════════════════════════════════════════════════════════════════════
-    # ═══  RESEARCH DIAGNOSTICS SUMMARY  (8 goals — Research.md:536-550)  ════════
-    # ══════════════════════════════════════════════════════════════════════════
-    def _Lfmt(Lp):                                          # Obukhov length (wall units)
-        return '+inf (neutral)' if not np.isfinite(Lp) else f'{Lp:.1f}'
-    def _trio(a, b, c, fmt='.5f'):                          # "M2 | M1 | M3" side by side
-        return f'{format(a, fmt)} | {format(b, fmt)} | {format(c, fmt)}'
-
-    # BL-averaged dispersive shares (surface→BL top), with empty-slice guard
-    _lo, _hi = _j_surf_ref, max(bl_top_j, _j_surf_ref + 1)
-    _share_mom_BL  = float(np.mean(disp_share_mom[_lo:_hi]))  if _hi > _lo else float('nan')
-    _share_buoy_BL = float(np.mean(disp_share_buoy[_lo:_hi])) if _hi > _lo else float('nan')
-    _wmom_pk = float(np.nanmax(np.abs(wave_mom_flux)))
-    _wbuo_pk = float(np.nanmax(np.abs(wave_buoy_flux)))
-    _g_crest = float(gamma_z[hill_hgt]) if gamma_z is not None else None
-    _g_bltop = float(gamma_z[bl_top_j]) if gamma_z is not None else None
-
-    print_summary_table('RESEARCH DIAGNOSTICS — per-run (cross-case in results.py)', [
-        ('section', 'Goal 1 — control translation'),
-        ('Buoyancy active in this run',          'yes' if _strat else 'no (neutral)', 's'),
-        ('Surface buoyancy B_0',                 B_0,                       '.5e'),
-        ('delta_neutral used (Ri_B)',            delta_neu_eff,             '.5f'),
-        ('Bulk Richardson Ri_B',                 Ri_B,                      '.5e'),
-        ('Surface buoyancy flux B_s',            B_s,                       '.5e'),
-        ('Obukhov length L_col (phys)',          (None if not np.isfinite(L_obukhov_col) else L_obukhov_col), '.5e'),
-        ('Obukhov length L_col+ (wall units)',   _Lfmt(L_col_plus),         's'),
-        ('Stability class',                      stab_class,                's'),
-        ('Collapse (L+ < %.0f)' % Lplus_collapse, 'yes' if collapse_flag else 'no', 's'),
-        ('Local L+ windward | floor | lee',
-            f"{_Lfmt(L_loc['windward'])} | {_Lfmt(L_loc['floor'])} | {_Lfmt(L_loc['lee'])}", 's'),
-        ('section', 'Goal 3 — scales per run (M2 | M1 | M3)'),
-        ('u* friction velocity',                 _trio(u_star, u_star1, u_star3),                                           's'),
-        ('delta = u*/f',                         _trio(scales['M2']['delta'],  scales['M1']['delta'],  scales['M3']['delta']),  's'),
-        ('Psi = Lx/(2 delta)',                   _trio(scales['M2']['Psi'],    scales['M1']['Psi'],    scales['M3']['Psi'],    '.3f'), 's'),
-        ('Blocking ratio H/delta',               _trio(scales['M2']['H_delta'],scales['M1']['H_delta'],scales['M3']['H_delta'],'.4f'), 's'),
-        ('H+ (inner)',                           _trio(scales['M2']['H_plus'], scales['M1']['H_plus'], scales['M3']['H_plus'], '.1f'), 's'),
-        ('Lx+ (inner)',                          _trio(scales['M2']['Lx_plus'],scales['M1']['Lx_plus'],scales['M3']['Lx_plus'],'.0f'), 's'),
-        ('section', 'Goal 4 — flux decomposition (dispersive share, BL mean)'),
-        ('Momentum dispersive share',            _share_mom_BL,             '.4f'),
-        ('Buoyancy dispersive share',            _share_buoy_BL,            '.4f'),
-        ('Turbulent buoyancy flux available',    'yes' if _have_flux else 'no (Route C cross-moments absent)', 's'),
-        ('section', 'Goal 5 — local similarity departure (RMS vs MOST)'),
-        ('phi_m dep. windward | floor | lee',
-            f"{phi_m_dep['windward']:.3f} | {phi_m_dep['floor']:.3f} | {phi_m_dep['lee']:.3f}", 's'),
-        ('phi_h dep. windward | floor | lee',
-            (f"{phi_h_dep['windward']:.3f} | {phi_h_dep['floor']:.3f} | {phi_h_dep['lee']:.3f}"
-             if _strat else 'n/a (neutral)'), 's'),
-        ('section', 'Goal 6 — intermittency gamma(z)'),
-        ('gamma at crest | BL top',
-            (f"{_g_crest:.3f} | {_g_bltop:.3f}" if gamma_z is not None
-             else 'skipped (set compute_intermittency=1)'), 's'),
-        ('omega0 = e_omega = omega_rms(delta)',
-            (f"{omega0:.4g}  (max gamma {float(np.nanmax(gamma_z)):.2f})"
-             if gamma_z is not None else 'n/a'), 's'),
-        ('section', 'Goal 7 — wave diagnostics'),
-        ('Peak |wave momentum flux|',            _wmom_pk,                  '.5e'),
-        ('Peak |wave buoyancy flux|',            _wbuo_pk,                  '.5e'),
-        ('BL top z+ | sponge z+',                f"{y_in[bl_top_j]:.1f} | {y_in[sponge_j]:.1f}", 's'),
-        ('Sponge reflection OK',                 'yes' if reflection_ok else 'no (flux grows aloft)', 's'),
-        ('section', 'Goal 8 — Reynolds robustness (inner vs outer)'),
-        ('Re_D | Re_tau',                        f"{int(Re)} | {Re_tau:.1f}", 's'),
-        ('Inner: H+ | Lx+',                      f"{H_plus_r:.1f} | {Lx_plus:.0f}", 's'),
-        ('Outer: H/delta | Psi',                 f"{H_delta:.4f} | {Psi:.3f}", 's'),
-        ('Status',                               re750_note,                's'),
-        ('section', 'Goal 2 — flat-wall stratified reference'),
-        ('Stratified reference loaded',          'yes' if strat_ref_available else 'no (data absent)', 's'),
-    ])
+    # ═══  RESEARCH DIAGNOSTICS SUMMARY  → IO.print_research_summary  ════════════
+    # (8 goals — Research.md:536-550; the reporting table + its _Lfmt/_trio format
+    #  helpers moved to IO.py.  Reads every quantity from globals().)
+    IO.print_research_summary(globals())
     # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -2330,7 +2029,6 @@ if (1 == plotRes):
     # Reference cases carry their own u* (ustr_s1, ustr_r1) and, with f = 1, their own
     # δ⁺ = u*²/ν, so their outer wall-normal coordinate is y_*_p / Re_tau_*.
     z_out    = y_in / Re_tau                     # z/δ  — outer wall-normal (valley)
-    G_out    = G_mag                             # outer velocity scale (≈ geostrophic)
     Re_tau_s = ustr_s1**2 / nu                   # smooth reference δ⁺ (= δ_s marker used below)
     z_out_s  = y_s_p / Re_tau_s
     Re_tau_r = ustr_r1**2 / nu_rough             # rough r1 reference δ⁺
@@ -2477,32 +2175,16 @@ if (1 == plotRes):
     # block above the pickle dump).  Plotted in inner units (m·l_in) on the crest→
     # sponge window; sign(m) (with the Hilbert-fixed k>0) gives the phase-line tilt.
     # [PLOT 26b] Wavenumber_m_DispV / _DispU / _compare
-    def _plot_wavenumber(mfld, savename, title):
-        _lim = int(min(sponge_j, ny - 1))
-        _z   = y_in[:_lim]
-        _w   = (mfld[:_lim, :] * l_in) * mask0[:_lim, :]     # inner-unit, fluid only
-        _vmax = float(np.nanpercentile(np.abs(_w), 98))      # robust to node spikes
-        _vmax = _vmax if _vmax > 0 else 1.0
-        _lv  = np.linspace(-_vmax, _vmax, 200)
-        fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
-        _cf = ax.contourf(x_in, _z, np.clip(_w, -_vmax, _vmax),
-                          levels=_lv, cmap='RdBu_r', extend='both')
-        ax.fill(x_oro_in, y_oro_in, facecolor='black')       # IBM solid
-        ax.axhline(y_in[int(hill_hgt)], color='g', ls='--', lw=0.8, label='crest $h$')
-        ax.axhline(y_in[int(sponge_j)], color='m', ls=':',  lw=1.0, label='sponge')
-        plt.colorbar(_cf, ax=ax, label=r'$m\,\ell_{in}$  (sign: phase-line tilt)')
-        ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$'); ax.set_title(title)
-        ax.legend(fontsize=8, loc='upper right')
-        plt.tight_layout()
-        plt.savefig(os.path.join(fig_dir, savename), dpi=300)
-        plt.show()
-
+    # plot_wavenumber_field lives in PlotField.py (per-run plotting moved out).
     _wave_note = ('' if np.isfinite(Fr)
                   else '  [Fr=inf: topographic forcing, not a propagating GW]')
-    _plot_wavenumber(m_dispV, 'Wavenumber_m_DispV.png',
-                     r'Vertical wavenumber $m(x,z)$ from $\widetilde{W}_y$' + _wave_note)
-    _plot_wavenumber(m_dispU, 'Wavenumber_m_DispU.png',
-                     r'Vertical wavenumber $m(x,z)$ from $\widetilde{U}_y$' + _wave_note)
+    _wave_args = (x_in, y_in, x_oro_in, y_oro_in, mask0, l_in, sponge_j, hill_hgt, fig_dir)
+    plot_wavenumber_field(m_dispV, 'Wavenumber_m_DispV.png',
+                          r'Vertical wavenumber $m(x,z)$ from $\widetilde{W}_y$' + _wave_note,
+                          *_wave_args)
+    plot_wavenumber_field(m_dispU, 'Wavenumber_m_DispU.png',
+                          r'Vertical wavenumber $m(x,z)$ from $\widetilde{U}_y$' + _wave_note,
+                          *_wave_args)
 
     # [PLOT 26c] explicit up/down energy-propagation map  sign(k·m) from DispVelV
     _limc = int(min(sponge_j, ny - 1))
@@ -2586,36 +2268,56 @@ if (1 == plotRes):
     plt.show()
 
     # %%###########################################################################
-    # ── Fig-4 convention assembly (single sign convention shared with plot_fig4_budget) ──
-    # In the ROTATED frame the geostrophic wind is g ∥ x = (Gx,Gz) = (1,0) for ALL three
-    # cases (orographic from config-rotation; smooth/rough from the loader, G_x=1,G_z=0).
-    # Each component's curves are built identically (meteorological u=streamwise, v=spanwise,
-    # z=wall-normal; Rxy=⟨u'w'⟩, Ryz=⟨v'w'⟩):
-    #     C = ∫₀ᶻ(g⊥ − vel) dz' = −I_corr_*     (Coriolis; small near wall, grows outward)
-    #     V = +ν d⟨vel⟩/dz                       (Viscous; ≈+1 at wall ÷u*², →0 by z+≈40–60)
-    #     R = −⟨flux⟩                            (Reynolds; +hump ≈0.6–0.8 at z+≈30–50)
-    #     T = C + V + R                          (Total; ≈const O(1) = surface-stress comp.)
-    #   τ_zx:  C_zx=∫(g2−v), V_zx=ν du/dz, R_zx=−Rxy ;  τ_zy:  C_zy=∫(g1−u), V_zy=ν dv/dz, R_zy=−Ryz
-    # This is the SAME convention validated against Kostelecky & Ansorge (2024) fig. 4
-    # (plots 33a–d).  u* = (T_zx_plateau² + T_zy_plateau²)^¼ is rotation-invariant.
+    # ╔══════════════════════════════════════════════════════════════════════════╗
+    # ║  🔒 LOCKED — VALIDATED FIG-4 ASSEMBLY + PLOTS 29–32.  DO NOT MODIFY.       ║
+    # ║  Signs = the LOCKED formula banner above (τ_zx: C=−I_corr_yx, R=−(turb+disp);║
+    # ║  τ_zy: C=+I_corr_yz, R=−(turb+disp)).  Data = the LOCKED rotation banner    ║
+    # ║  (α=config.alpha; velocity rank-1, momentum-flux rank-2 tensor rotation).   ║
+    # ║  The τ_zy plot aliases are negated for paper handedness under              ║
+    # ║  config.fig4_paper_spanwise_sign (DISPLAY ONLY — physical quantities and    ║
+    # ║  u_star untouched).  Verified vs K&A 2024 fig. 4.                           ║
+    # ╚══════════════════════════════════════════════════════════════════════════╝
+    # ── Fig-4 convention assembly (STANDARD shear-stress budget, shared with plot_fig4_budget) ──
+    # Orographic: rotated so g ∥ x = (Gx,Gz)=(1,0).  Smooth: stored g ∥ x.  Rough: the
+    # loader reads its geostrophic vector from the profile top (stored at ~18.7° off x),
+    # so its τ-split lives in that stored frame — the u* magnitude is frame-invariant, the
+    # τ_zx/τ_zy split for the rough overlay is not exactly co-framed with the orographic.
+    # Each component's curves (meteorological u=streamwise, v=spanwise, z=wall-normal;
+    # Rxy=⟨u'v'⟩, Ryz=⟨w'v'⟩):
+    #     C_zx = ∫(g2 − ⟨w⟩) = −I_corr_yx ;  C_zy = ∫(⟨u⟩ − g1) = +I_corr_yz  (Levi-Civita: opposite signs)
+    #     V = +ν d⟨vel⟩/dz    R = −⟨flux⟩    T = C + V + R  (≈const = surface-stress comp.)
+    # STANDARD (CLAUDE.md "Standard shear-stress budget formulation"), verified against
+    # Kostelecky & Ansorge (2024) fig. 4.  u* = (T_zx_plateau² + T_zy_plateau²)^¼ (rotation-invariant).
     # orographic (rotated; 1-D intrinsic profiles already).  The Reynolds flux −⟨flux⟩
     # is split into a TURBULENT curve (Rzx=−turb_yx) and a DISPERSIVE curve
     # (Dzx=−disp_yx); together C + V + R_turb + D_disp = T (Total now includes disp).
     Czx_o = -I_corr_yx; Vzx_o = visc_yx; Rzx_o = -turb_yx; Dzx_o = -disp_yx; Tzx_o = total_tau_yx
-    Czy_o = -I_corr_yz; Vzy_o = visc_yz; Rzy_o = -turb_yz; Dzy_o = -disp_yz; Tzy_o = total_tau_yz
+    Czy_o = I_corr_yz; Vzy_o = visc_yz; Rzy_o = -turb_yz; Dzy_o = -disp_yz; Tzy_o = total_tau_yz
     # Reynolds contribution (valley/orographic) = turbulent + dispersive = -(turb+disp).
     RYzx_o = Rzx_o + Dzx_o          # = -rey_flux_yx  (the full Reynolds shear term)
     RYzy_o = Rzy_o + Dzy_o          # = -rey_flux_yz
     # smooth reference (loader; collapse the (ny,nt)/(ny,1) arrays to 1-D profiles)
     Czx_s = -I_corr_yx_s; Vzx_s = np.mean(visc_yx_s, axis=1); Rzx_s = -np.mean(Rxy_s, axis=1)
     Tzx_s = Czx_s + Vzx_s + Rzx_s
-    Czy_s = -I_corr_yz_s; Vzy_s = np.mean(visc_yz_s, axis=1); Rzy_s = -np.mean(Ryz_s, axis=1)
+    Czy_s = I_corr_yz_s; Vzy_s = np.mean(visc_yz_s, axis=1); Rzy_s = -np.mean(Ryz_s, axis=1)
     Tzy_s = Czy_s + Vzy_s + Rzy_s
     # rough r1 reference (loader)
     Czx_r = -I_corr_yx_r; Vzx_r = np.mean(visc_yx_r, axis=1); Rzx_r = -np.mean(Rxy_r, axis=1)
     Tzx_r = Czx_r + Vzx_r + Rzx_r
-    Czy_r = -I_corr_yz_r; Vzy_r = np.mean(visc_yz_r, axis=1); Rzy_r = -np.mean(Ryz_r, axis=1)
+    Czy_r = I_corr_yz_r; Vzy_r = np.mean(visc_yz_r, axis=1); Rzy_r = -np.mean(Ryz_r, axis=1)
     Tzy_r = Czy_r + Vzy_r + Rzy_r
+    # ── Spanwise DISPLAY handedness (config.fig4_paper_spanwise_sign) ──────────
+    # Same flip as the PLOT 32r validation figures and fig4_smooth_standalone.py:
+    # our tlab f-sign gives the closing τ_zy budget as C_zy<0 / R_zy>0 — the exact
+    # MIRROR of K&A.  Negate the SPANWISE plot aliases (τ_zy → −τ_zy) for BOTH the
+    # orographic (…_o) and the smooth/rough references (…_s, …_r) so Coriolis reads
+    # positive like the paper.  τ_zx is untouched, and this touches ONLY these plot
+    # aliases — total_tau_yz / u_star / veer_oro (physical, pickled) are unchanged.
+    if fig4_paper_spanwise_sign:
+        Czy_o, Vzy_o, Rzy_o, Dzy_o, RYzy_o, Tzy_o = (
+            -Czy_o, -Vzy_o, -Rzy_o, -Dzy_o, -RYzy_o, -Tzy_o)
+        Czy_s, Vzy_s, Rzy_s, Tzy_s = -Czy_s, -Vzy_s, -Rzy_s, -Tzy_s
+        Czy_r, Vzy_r, Rzy_r, Tzy_r = -Czy_r, -Vzy_r, -Rzy_r, -Tzy_r
 
     # %%###########################################################################
     # Shear Stress XY  (Fig-4 convention: Coriolis +C, Viscous +V, Reynolds −⟨flux⟩, Total C+V+R)
@@ -2876,7 +2578,7 @@ if (1 == plotRes):
     # Each case in OUTER units (u*/G vs z/δ); the dotted vertical lines mark the
     # constant-flux plateau values.  Smooth/rough shown per the config switches.
     plt.figure(figsize=(8, 8), dpi=300)
-    plt.plot(ustr_M2_o[:]/G_mag, z_out[:],
+    plt.plot(u_star2[:]/G_mag, z_out[:],
              label=f'orographic Re=500 (plateau {ustr_M2_plateau_o:.4f})',
              color='blue', linestyle='-')
     ref_plot(plot_ref_smooth, ustr_M2_s, z_out_s,
@@ -2903,13 +2605,49 @@ if (1 == plotRes):
     # %%###########################################################################
     # [PLOT 32r] Kostelecky & Ansorge (2024) figure-4 validation of Method 2:
     # integrated momentum budget (C, V, R, Total) for the smooth and rough r1
-    # reference cases, in inner (a,b) and outer (c,d) units.  Built transparently
-    # from eq. 4.2 (see plot_fig4_budget) so the Method-2 u* and the budget-term
-    # shapes can be checked against the paper.  Produced for both cases regardless
-    # of the overlay switches (these are dedicated validation figures).
-    plot_fig4_budget(smooth_nc_path, nu,       'smooth_Re500',    fig_dir)
-    plot_fig4_budget(rough_nc_path,  nu_rough, 'rough_r1_Re1000', fig_dir)
-    
+    # reference cases, in inner (a,b) and outer (c,d) units.  Produced for both
+    # cases regardless of the overlay switches (dedicated validation figures).
+    # The budget is COMPUTED HERE, in the main script (paper eq. 4.2, directly
+    # from the horizontally-averaged profiles) — IO.read_ekman_budget_profiles
+    # only loads, PlotField.plot_fig4_budget only draws what it is passed:
+    #     ⟨τ⟩_zi(z) = C + V + R            (temporal tendency ≈ 0, steady avg)
+    #     C_zx = f∫₀ᶻ(g₂−⟨v⟩)dz' ,  C_zy = f∫₀ᶻ(⟨u⟩−g₁)dz'    (f = 1)
+    #       (the spanwise Coriolis integrand carries the OPPOSITE sign to the
+    #        streamwise one, ε₂ₖ₃ = −ε₁ₖ₃; with ∫(⟨u⟩−g₁) the total T_zy is
+    #        height-constant and u*/veer match the reference file's stored
+    #        FrictionVelocity/FrictionAngle)
+    #     V = (1/Re_Λ) d⟨u_i⟩/dz ,  R = −⟨u_i'w'⟩
+    #     g = (g₁,g₂) read at fig4_top_frac·Ly (free stream, below the sponge);
+    #     u* = (T_zx_plat² + T_zy_plat²)^¼ over the fig4_plateau_lo…y_top window.
+    for _nc_ref, _nu_ref, _lbl_ref in ((smooth_nc_path, nu,       'smooth_Re500'),
+                                       (rough_nc_path,  nu_rough, 'rough_r1_Re1000')):
+        y_ref, u_ref, v_ref, Ruw_ref, Rvw_ref = IO.read_ekman_budget_profiles(_nc_ref)
+        _top_ref = int(fig4_top_frac * y_ref.size)
+        g1_ref, g2_ref = u_ref[_top_ref], v_ref[_top_ref]   # geostrophic vector at BL top
+        G_ref = float(np.hypot(g1_ref, g2_ref))
+        C_zx_ref = cumtrapz0(g2_ref - v_ref, y_ref)         # Coriolis  f∫(g₂−⟨v⟩)
+        V_zx_ref = _nu_ref * np.gradient(u_ref, y_ref)      # viscous
+        R_zx_ref = -Ruw_ref                                 # Reynolds −⟨u'w'⟩
+        C_zy_ref = cumtrapz0(u_ref - g1_ref, y_ref)         # opposite-sign integrand
+        V_zy_ref = _nu_ref * np.gradient(v_ref, y_ref)
+        R_zy_ref = -Rvw_ref
+        # Display handedness: our tlab f-sign gives C_zy<0/R_zy>0 (mirror of K&A);
+        # negate the spanwise budget so the panel matches the paper & the standalone
+        # (Coriolis positive).  τ_zx, u*, and closure are untouched (τ_zy → −τ_zy).
+        if fig4_paper_spanwise_sign:
+            C_zy_ref, V_zy_ref, R_zy_ref = -C_zy_ref, -V_zy_ref, -R_zy_ref
+        T_zx_ref = C_zx_ref + V_zx_ref + R_zx_ref
+        T_zy_ref = C_zy_ref + V_zy_ref + R_zy_ref
+        _plw = (y_ref > fig4_plateau_lo * y_ref[_top_ref]) & (y_ref < y_ref[_top_ref])
+        ustar_ref = float((T_zx_ref[_plw].mean()**2 + T_zy_ref[_plw].mean()**2) ** 0.25)
+        veer_ref  = float(np.degrees(np.arctan2(g2_ref, g1_ref)))
+        plot_fig4_budget(y_ref * ustar_ref / _nu_ref, y_ref / ustar_ref,
+                         C_zx_ref, V_zx_ref, R_zx_ref, T_zx_ref,
+                         C_zy_ref, V_zy_ref, R_zy_ref, T_zy_ref,
+                         ustar_ref, G_ref, veer_ref, _lbl_ref, fig_dir)
+        print(f"  [Fig4 budget] {_lbl_ref}: Method-2 u* = {ustar_ref:.4f}  (G={G_ref:.3f}, "
+              f"τ_zx plateau={T_zx_ref[_plw].mean():.3e}, τ_zy plateau={T_zy_ref[_plw].mean():.3e})")
+
     # %%###########################################################################
     # Velocity profile
     # [PLOT 34] Velocity Profile
@@ -3215,27 +2953,155 @@ if (1 == plotRes):
         u_canopy_v    = _u_at_h_v * np.exp(alpha_canopy_v * (_z_can_v / h_inner_plus - 1.0))
         canopy_legend = rf'Canopy law ($\alpha$={alpha_canopy_v:.3f}, $z^+\!\leq\!20$)'
         print(f"→ Using canopy law (R²={r2_canopy:.4f} > power R²={r2_power:.4f})")
+# %%
+
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # MODIFIED LOG-LAW TEST BED — manual trial-and-error curve fitting
+    # ═════════════════════════════════════════════════════════════════════════
+    # Experiment with the Obukhov (1971) modified-log-law parameters by hand for
+    # the stratified runs (finite Fr = 1, 0.1, 0.01, …).  Each trial below is
+    # drawn next to the measured profile and the automatic curve_fit result, on
+    # BOTH a dedicated figure ([PLOT 36t] Modified_loglaw_testbed.png) and the
+    # velocity-profile comparison plot ([PLOT 36]).  Every trial is scored with
+    # an R² against the measured rotated profile over the trial window, so
+    # guesses can be ranked directly against the automatic fit (r2_mod).
+    #
+    # Model:  u⁺(z⁺) = (v*/κ)·ψ(z⁺/L1⁺) + offset      (obu_wind_profile)
+    #
+    # HOW TO USE — edit ONLY between the ▼▼▼ / ▲▲▲ markers and re-run this cell:
+    #   modlaw_testbed        1 = draw the trial curves, 0 = testbed off
+    #   modlaw_test_zlo/zhi   z⁺ window over which trials are DRAWN and SCORED
+    #                         (defaults to the auto-fit window [modlaw_zmin,zmax])
+    #   modlaw_trials         one dict per guess:
+    #     v_star : profile friction velocity in u_star units (auto fit: v_star_mod;
+    #              v*≈1 ⇔ profile-implied u★ equals the Method-2 u_star)
+    #     L1     : Obukhov dynamic scale L1⁺ in wall units; >0 stable, <0 unstable
+    #              (|L1|→∞ recovers the neutral log law; auto fit: L1_plus_mod)
+    #     offset : additive intercept / roughness constant (auto fit: offset_mod)
+    #     kappa  : OPTIONAL von Kármán constant (default config.obu_kappa = 0.4)
+
+    # ▼▼▼ EDIT HERE — trial parameters for the modified log-law ▼▼▼
+    modlaw_testbed  = 1                 # 1 = plot trial curves, 0 = off
+    modlaw_test_zlo = 50           # trial window low   (default = fit window)
+    modlaw_test_zhi = 120           # trial window high  (default = fit window)
+    modlaw_trials = [
+        # dict(v_star=0.30, L1=+300.0, offset=19.0),
+        dict(v_star=0.50, L1=+40.0, offset=17.0, kappa=0.4),
+        # dict(v_star=1.10, L1=-500.0, offset=19.0),     # unstable branch (L1 < 0)
+    ]
+    # ▲▲▲ EDIT HERE ▲▲▲
+
+    _tb_curves = []       # per trial: (z⁺, u⁺ in u_star units, legend label)
+    if modlaw_testbed and _stratified and modlaw_trials:
+        _tb_zlo = max(float(modlaw_test_zlo), float(y_in[1]))
+        _tb_zhi = float(modlaw_test_zhi)
+        _tb_z   = np.geomspace(_tb_zlo, _tb_zhi, 300)
+        _tb_msk = (y_in >= _tb_zlo) & (y_in <= _tb_zhi) & np.isfinite(u_h_plus)
+        print(f"Modified log-law TEST BED (z+ ∈ [{_tb_zlo:.0f},{_tb_zhi:.0f}]; "
+              f"auto fit: v*={v_star_mod:.4f} L1+={L1_plus_mod:+.3e} "
+              f"offset={offset_mod:.3f} R²={r2_mod:.4f}):")
+        for _it, _t in enumerate(modlaw_trials):
+            _kap   = float(_t.get('kappa', obu_kappa))
+            _u_mod = obu_wind_profile(_tb_z, _t['v_star'], _t['L1'],
+                                      _t['offset'], kappa=_kap)
+            # R² of this guess against the measured profile inside the window
+            _u_dat = u_h_plus[_tb_msk]
+            _u_hat = obu_wind_profile(y_in[_tb_msk], _t['v_star'], _t['L1'],
+                                      _t['offset'], kappa=_kap)
+            _sst   = float(np.sum((_u_dat - _u_dat.mean())**2))
+            _r2t   = (1.0 - float(np.sum((_u_dat - _u_hat)**2))/_sst
+                      if _sst > 0 else float('nan'))
+            print(f"  trial {_it+1}: v*={_t['v_star']:.3f}  L1+={_t['L1']:+.1f}  "
+                  f"offset={_t['offset']:.3f}  κ={_kap:.3f}  →  R²={_r2t:.4f}")
+            _tb_curves.append((_tb_z, _u_mod,
+                rf"trial {_it+1}: $v_*$={_t['v_star']:.2f}, "
+                rf"$L_1^+$={_t['L1']:+.0f}, off={_t['offset']:.2f} "
+                rf"($R^2$={_r2t:.3f})"))
+    elif modlaw_testbed and modlaw_trials and not _stratified:
+        print("Modified log-law TEST BED: skipped — neutral run (Fr=∞).")
+
+    _TB_COLORS = ['magenta', 'teal', 'purple', 'saddlebrown', 'olive', 'deeppink']
+
+    # [PLOT 36t] Dedicated test-bed figure (u_star units — the fit's own frame):
+    # measured profile + automatic curve_fit + every manual trial, window shaded.
+    if _tb_curves:
+        plt.figure(figsize=(8, 6), dpi=300)
+        plt.plot(y_in, u_h_plus, color='red', linestyle='-',
+                 label='Measured (rotated streamwise, $u/u_\\star$)')
+        if np.isfinite(v_star_mod) and np.isfinite(L1_plus_mod):
+            _z_auto = np.geomspace(max(_mod_lo, y_in[1]), _mod_hi, 300)
+            plt.plot(_z_auto,
+                     obu_wind_profile(_z_auto, v_star_mod, L1_plus_mod, offset_mod),
+                     color='darkorange', linestyle='-.', linewidth=2,
+                     label=(rf'auto fit: $v_*$={v_star_mod:.2f}, '
+                            rf'$L_1^+$={L1_plus_mod:+.0f}, off={offset_mod:.2f} '
+                            rf'($R^2$={r2_mod:.3f})'))
+        for _ic, (_tz, _tu, _tl) in enumerate(_tb_curves):
+            plt.plot(_tz, _tu, color=_TB_COLORS[_ic % len(_TB_COLORS)],
+                     linestyle='--', linewidth=1.5, label=_tl)
+        plt.axvspan(_tb_zlo, _tb_zhi, color='grey', alpha=0.12,
+                    label='trial window (drawn + scored)')
+        plt.xscale('log')
+        plt.xlabel(r'$z^+$')
+        plt.ylabel(r'$\langle \bar{u} \rangle / u_\star$')
+        plt.legend(fontsize=7)
+        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+        plt.title('Modified log-law (Obukhov 1971) — manual test bed')
+        plt.savefig(os.path.join(fig_dir, 'Modified_loglaw_testbed.png'), dpi=300)
+        plt.show()
+# %%
+
+
+    # Rough Re=1000 STABLE LADDER (ri00.00 → ri18.78) — LOG-LAW overlay only, drawn
+    # in each case's OWN inner units (z⁺ = y·u*/ν_rough, u⁺ = ⟨ū⟩/u*).  Gated on the
+    # config flag `plot_ref_rough_ladder`; the loader reads only mean rU + the stored
+    # FrictionVelocity per file (memory-light) and returns [] when the data directory
+    # is absent (e.g. this code-prep repo).  Colour = Ri gradient (viridis).
+    _rough_ladder = (load_rough_ladder_loglaw(rough_ladder_dir, nu_rough,
+                                              rough_ladder_pattern,
+                                              u_star_default=rough_ladder_ustar)
+                     if plot_ref_rough_ladder else [])
+    _ladder_colors = (plt.cm.viridis(np.linspace(0.12, 0.92, len(_rough_ladder)))
+                      if _rough_ladder else [])
+    # When the ladder is drawn, the log-law figure must also carry the smooth
+    # reference (the orographic/valley case is always drawn), so force the smooth
+    # curves on for PLOT 36 even if plot_ref_smooth is off.  Smooth data is loaded
+    # unconditionally (load_smooth_case above), so this cannot reference undefined
+    # variables.  Only PLOT 36 uses this gate; the other figures keep plot_ref_smooth.
+    _ll_show_smooth = bool(plot_ref_smooth) or bool(_rough_ladder)
 
     # [PLOT 36] Velocity Profile with and without Orography
     plt.figure(figsize=(8, 6), dpi=300)
     # Valley case (solid lines)
     plt.plot(y_in, _valley_u,          color='red',  linestyle='-')
     plt.plot(y_in, w_plus_rot/0.0617,  color='blue', linestyle='-')
-    # Smooth case (dashed grey)
-    ref_plot(plot_ref_smooth, y_s_p, _smooth_u,                   color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-    ref_plot(plot_ref_smooth, y_s_p, -np.mean(W_s_p, axis=1),     color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.4)
+    # Smooth case (dashed grey) — forced on when the ladder is drawn (_ll_show_smooth)
+    ref_plot(_ll_show_smooth, y_s_p, _smooth_u,                   color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
+    ref_plot(_ll_show_smooth, y_s_p, -np.mean(W_s_p, axis=1),     color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.4)
     # rough r1 (Re=1000) — own inner units (y_r_p), magnitude profiles
     ref_plot(plot_ref_rough, y_r_p, np.mean(U_r_p, axis=1),       color=ROUGH_COLOR, linestyle=ROUGH_LS)
     ref_plot(plot_ref_rough, y_r_p, -np.mean(W_r_p, axis=1),      color=ROUGH_COLOR, linestyle=ROUGH_LS, alpha=0.4)
+    # Rough Re=1000 STABLE LADDER — streamwise log-law u⁺(z⁺) per case, own inner
+    # units (colour = Ri gradient).  Only drawn when plot_ref_rough_ladder is on.
+    for _rc, _rcol in zip(_rough_ladder, _ladder_colors):
+        plt.plot(_rc['z_plus'], _rc['u_plus'], color=_rcol,
+                 linestyle='-', linewidth=0.8, alpha=0.75, zorder=2)
     # Valley log-law — extended 5 u+ units below fit-range start
     plt.plot(_z_vll_plot, u_loglaw_valley_plot, color='red', linestyle='dotted', linewidth=2)
     # Valley MODIFIED log-law (Obukhov 1971) — stability-corrected profile
     if u_mod_valley_plot.size > 0:
         plt.plot(_z_mod_plot, u_mod_valley_plot, color='darkorange',
                  linestyle='-.', linewidth=2)
+    # TEST BED trial curves (manual parameters — see the EDIT HERE block above);
+    # model curves are in u_star units, rescale by u_star/0.0617 like the auto fit.
+    for _ic, (_tz, _tu, _tl) in enumerate(_tb_curves):
+        plt.plot(_tz, _tu * (u_star / 0.0617),
+                 color=_TB_COLORS[_ic % len(_TB_COLORS)],
+                 linestyle='--', linewidth=1.5)
     # Smooth log-law — extended 5 u+ units below fit-range start
     if _z_sml_plot.size > 0:
-        ref_plot(plot_ref_smooth, _z_sml_plot, u_loglaw_smooth_plot, color=SMOOTH_COLOR, linestyle='dotted', linewidth=2)
+        ref_plot(_ll_show_smooth, _z_sml_plot, u_loglaw_smooth_plot, color=SMOOTH_COLOR, linestyle='dotted', linewidth=2)
     # Canopy fit (best of exponential vs power law), z+ ∈ [0, 20]
     plt.plot(_z_can_v, u_canopy_v, color='green', linestyle='--')
     plt.axvline(x=(Re_tau), color='black', linestyle='-', linewidth=1)
@@ -3244,12 +3110,12 @@ if (1 == plotRes):
     # the SAME u★ that scales y_s_p), so it lands at the true edge of the smooth
     # curve.  Gated/coloured with the smooth reference (grey dotted) to distinguish
     # it from the solid orographic δ_o and the dashed crest line 'h'.
-    if plot_ref_smooth:
+    if _ll_show_smooth:
         plt.axvline(x=ustr_s1**2/nu, color=SMOOTH_COLOR, linestyle=':', linewidth=1)
         plt.text(ustr_s1**2/nu, 0.5, r'$\delta_{s}$', rotation=90,
                  verticalalignment='center', horizontalalignment='right', color=SMOOTH_COLOR)
     mark_layers_multi(y_in, [_valley_u, w_plus_rot/0.0617], _LYR_ORO, filled=True)
-    ref_mark(plot_ref_smooth, mark_layers_multi, y_s_p, [_smooth_u, -np.mean(W_s_p, axis=1)], _LYR_SMO, filled=False)
+    ref_mark(_ll_show_smooth, mark_layers_multi, y_s_p, [_smooth_u, -np.mean(W_s_p, axis=1)], _LYR_SMO, filled=False)
     mark_h(y_in[h_idx], 'v')
 
     plt.xscale('log')
@@ -3269,8 +3135,16 @@ if (1 == plotRes):
                label=(rf'Obukhov (1971) mod. log-law '
                       rf'($v_*/u_\star$={v_star_mod:.2f}, $L_1^+$={L1_plus_mod:+.0f})'))
     ] if (u_mod_valley_plot.size > 0) else []) + [
+        Line2D([0], [0], color=_TB_COLORS[_ic % len(_TB_COLORS)], linestyle='--',
+               linewidth=1.5, label=_tl)
+        for _ic, (_tz, _tu, _tl) in enumerate(_tb_curves)
+    ] + [
         Line2D([0], [0], color='green',      linestyle='--',      label=canopy_legend),
     ]
+    if _rough_ladder:
+        legend_elements.append(
+            Line2D([0], [0], color=plt.cm.viridis(0.5), linestyle='-', linewidth=1.2,
+                   label=r'rough Re1000 stable ladder (own $u_\star$)'))
     # This is the reference plot for the layer-marker key (filled=oro, hollow=smooth).
     plt.legend(handles=legend_elements, fontsize=7)
     add_marker_legend()
@@ -4134,19 +4008,20 @@ if animate == 1:
     #
     # Labels below and throughout the script follow METEOROLOGICAL convention.
     # ---- user settings ------------------------------------------------
-    N_KPLANES  = 1     # k-planes saved per file  (kplanes%n in TLAB)
+    # planesK layout + animation window/render settings (all from config §13)
+    N_KPLANES  = planesK_n_kplanes    # k-planes saved per file  (kplanes%n in TLAB)
     # File variable order in tlab: u(streamwise)=0, v(wall-normal)=1, w(spanwise)=2, s1=3, p=4
-    NVARS      = 5
-    KPLANE_IDX = 0     # which k-plane to show (0-based)
-    NY_ANIM    = 430   # wall-normal points to include
-    FIRST_ITER = 262510
-    LAST_ITER  = 264500
-    STEP       = 10
-    FPS        = 10
+    NVARS      = planesK_nvars
+    KPLANE_IDX = planesK_kplane_idx   # which k-plane to show (0-based)
+    NY_ANIM    = anim_ny              # wall-normal points to include
+    FIRST_ITER = anim_first_iter
+    LAST_ITER  = anim_last_iter
+    STEP       = anim_iter_step
+    FPS        = anim_fps
     OUTPUT_MP4 = cwd + 'planesK_animation.mp4'
     # Frames where max|u| or max|v| (meteo: streamwise idx 0, spanwise idx 2) exceeds
     # this threshold are considered unphysical and are discarded before rendering.
-    VEL_MAX_THRESHOLD = 1.5
+    VEL_MAX_THRESHOLD = planesK_vel_max
     # Labels use meteorological convention:
     #   u' (tlab idx 0) = streamwise fluctuation
     #   w' (tlab idx 1) = wall-normal/vertical fluctuation  (tlab calls this v)
@@ -4329,14 +4204,14 @@ if animate == 1:
 if plot_spectra == 1:
     import glob as _glob
 
-    _SP_NK, _SP_NV, _SP_KP = 1, 5, 0    # N_KPLANES, NVARS, KPLANE_IDX (planesK layout)
-    _SP_VEL_MAX = 1.5                   # discard frames with |u|,|v| above this (unphysical)
+    _SP_NK, _SP_NV, _SP_KP = planesK_n_kplanes, planesK_nvars, planesK_kplane_idx  # planesK layout
+    _SP_VEL_MAX = planesK_vel_max       # discard frames with |u|,|v| above this (unphysical)
     _SP_COMPS = [(0, r"$E_{uu}$ (streamwise $u'$)",  'tab:blue'),
                  (1, r"$E_{ww}$ (wall-normal $w'$)", 'tab:green'),
                  (2, r"$E_{vv}$ (spanwise $v'$)",    'tab:red')]
     # Wall-normal heights (z+) at which to draw 1-D spectra — picked in the
     # log/inertial region, above the valley crest and below the Rayleigh sponge.
-    _SP_Z_TARGETS = [30.0, 60.0, 100.0, 150.0]
+    _SP_Z_TARGETS = spectra_z_targets
 
     # Frame sources, in order of preference.  Each descriptor yields one
     # instantaneous (ny, nx) plane per velocity component (tlab idx 0=u streamwise,
@@ -4370,8 +4245,8 @@ if plot_spectra == 1:
     if not _frames:
         print('[spectra] no planesK.* and no flow field found — -5/3 spectra skipped.')
     else:
-        # uniform streamwise grid spacing (NB: the global `dx` was overwritten to a
-        # wavenumber spacing earlier in the script, so recompute the grid step here)
+        # uniform streamwise grid spacing (== the global `dx`; recomputed locally
+        # as a float for the FFT frequency axis)
         dx_grid = float(x[1] - x[0])
         L_x     = nx * dx_grid
         kx      = 2.0 * np.pi * np.fft.rfftfreq(nx, d=dx_grid)   # rad / length, (nk,)
@@ -4533,268 +4408,11 @@ if plot_spectra == 1:
             print(f'[spectra] saved {_outC}')
 
     # %%###########################################################################
-    #  PLAIN-LANGUAGE SUMMARY (written at the END of execution)
-    # -----------------------------------------------------------------------------
-    #  The tables above use terse developer variable names.  This closing block
-    #  restates the run in self-explanatory, scientifically consistent language,
-    #  with every symbol defined and its units stated.  Three sections:
-    #     (1) friction velocity + boundary-layer parameters,
-    #     (2) Monin-Obukhov stability parameters (the length scales),
-    #     (3) curve-fit / wall-law results (classical + Obukhov 1971 modified).
-    #
-    #  Conventions.  All quantities are non-dimensional (DNS units: g = 1, f = 1).
-    #  The friction velocity quoted throughout is METHOD 2 ONLY — the plateau of
-    #  the vertically-integrated Ekman momentum balance, `ustr_M2_plateau_o`
-    #  (Kostelecky & Ansorge 2024, eq. 4.2).  In a rotating Ekman layer this is
-    #  the only height-independent estimate; Methods 1/3 are deliberately omitted.
-    #  "Wall units" (superscript +) denote inner scaling by the viscous length
-    #  l_in = nu/u*_cfg, i.e. z+ = z/l_in, where u*_cfg is the CONFIG friction
-    #  velocity used to build the grid — not necessarily the measured plateau.
-    #  Where the two differ that is stated explicitly.
+    #  PLAIN-LANGUAGE SUMMARY → IO.print_run_summary (console reporting).
+    #  The ~250-line report + its format helpers moved to IO.py for readability;
+    #  it reads every quantity from globals().  Kept at this location (inside the
+    #  plot_spectra block) so the run behaviour is unchanged.
     ###############################################################################
-    import textwrap as _tw
-
-    _NA = float('nan')
-
-    def _g(name, default=_NA):
-        """Fetch a possibly-unset diagnostic without raising."""
-        return globals().get(name, default)
-
-    def _sci(x, nd=4):
-        """Human-friendly number: 'n/a' for None/NaN, 'infinite' for +/-inf."""
-        if x is None:
-            return 'n/a'
-        try:
-            xf = float(x)
-        except (TypeError, ValueError):
-            return str(x)
-        if np.isnan(xf):
-            return 'n/a'
-        if np.isinf(xf):
-            return ('+' if xf > 0 else '-') + 'infinite'
-        ax = abs(xf)
-        if ax != 0 and (ax < 1e-3 or ax >= 1e5):
-            return f'{xf:.{nd}e}'
-        return f'{xf:.{nd}f}'
-
-    def _para(text):
-        print(_tw.fill(text, width=80, initial_indent='  ', subsequent_indent='  '))
-
-    def _kv(label, value, nd=4, unit=''):
-        """Aligned 'quantity (symbol) .... value unit' line."""
-        cell = _sci(value, nd) + (f' {unit}' if unit else '')
-        print(f'    {label:<54s}{cell:>22s}')
-
-    def _hdr(title):
-        print('\n  ' + title)
-        print('  ' + '-' * 76)
-
-    # Method-2 friction velocity — the single reference for the whole summary.
-    _ustar   = _g('ustr_M2_plateau_o')
-    _nu      = _g('nu'); _f = _g('f'); _lin = _g('l_in')
-    _delta   = _g('delta_run')                       # d = u*/f
-    _dplus   = _g('Re_tau')                          # u*^2/nu  ( = d+ since f = 1 )
-
-    print('\n' + '=' * 80)
-    print('  PLAIN-LANGUAGE SUMMARY OF THIS RUN')
-    print('  (all quantities non-dimensional; friction velocity = Method 2 only)')
-    print('=' * 80)
-
-    # ══ 1. Friction velocity and boundary-layer parameters ════════════════════
-    _hdr('1. Friction velocity and boundary-layer parameters')
-    _para('The friction velocity is obtained from the vertically-integrated Ekman '
-          'momentum balance (Method 2) and read as the constant-flux plateau of the '
-          'resulting u*(z) profile. In a rotating Ekman layer the direct total '
-          'stress is NOT height-constant (Coriolis drains momentum with height), so '
-          'a stress plateau would read artificially low; only the full '
-          'Coriolis+viscous+Reynolds balance is height-independent and equals the '
-          'surface stress. Methods 1 and 3 are omitted from this summary by design.')
-    print()
-    _kv('Friction velocity  u* (Method 2 plateau)', _ustar, 5)
-    _kv('Kinematic viscosity  nu', _nu, 3)
-    _kv('Viscous (inner) length  l_in = nu/u*_cfg', _lin, 3)
-    _kv('Coriolis parameter  f', _f, 3)
-    _kv('Friction Reynolds number  Re_tau = u*^2/nu', _dplus, 1)
-    _kv('Boundary-layer depth  delta = u*/f', _delta, 5)
-    _kv('Boundary-layer depth in wall units  delta+', _dplus, 1)
-    _kv('Geostrophic wind magnitude  |G|', _g('G_mag'), 4)
-    _kv('Surface stress veer (turning angle)', _g('veer_oro'), 2, 'deg')
-    print()
-    _kv('Valley crest height  H', _g('H_phys'), 5)
-    _kv('Crest height in wall units  H+', _g('H_plus_r'), 1)
-    _kv('Crest height / BL depth  H/delta', _g('H_delta'), 4)
-    _kv('Streamwise domain length in wall units  Lx+', _g('Lx_plus'), 1)
-    _kv('Topography-to-Ekman scale ratio  Psi = Lx/(2 delta)', _g('Psi'), 4)
-    _para(f'Interpretation: the boundary layer is {_sci(_dplus,0)} viscous lengths '
-          f'deep. The valley occupies a fraction H/delta = {_sci(_g("H_delta"),3)} of '
-          f'that depth. Psi = Lx/(2 delta) = {_sci(_g("Psi"),3)} compares the '
-          f'topographic wavelength with the rotation-limited Ekman depth: Psi >> 1 '
-          f'means the topography is wide compared with delta (weak Coriolis-'
-          f'topography coupling), Psi ~ 1 means the two scales interact. The surface '
-          f'stress vector is veered {_sci(_g("veer_oro"),1)} degrees from the '
-          f'geostrophic direction.')
-
-    # ══ 2. Monin-Obukhov stability parameters (the lengths) ═══════════════════
-    _hdr('2. Monin-Obukhov stability parameters')
-    _para('Buoyancy is the transported scalar b (g absorbed, so b IS the buoyancy). '
-          'The Obukhov length L = -u*^3/(kappa B_s) is the height at which buoyant '
-          'and shear production of turbulent kinetic energy balance: below |L| the '
-          'flow is shear-dominated, above it buoyancy dominates. B_s is the surface '
-          'wall-normal buoyancy flux <w\'b\'> (dispersive + temporal parts).')
-    print()
-    _kv('Froude number of the case  Fr', _g('Fr'), 3)
-    _kv('Surface buoyancy  B_0', _g('B_0'), 5)
-    _kv('Surface buoyancy flux  B_s = <w\'b\'>', _g('B_s'), 5)
-    _kv('Buoyancy scale  b* = -B_s/u*', _g('b_star'), 5)
-    _kv('Bulk Richardson number  Ri_B', _g('Ri_B'), 4)
-    _kv('Reference (neutral) depth used for Ri_B', _g('delta_neu_eff'), 5)
-    print()
-    _kv('Obukhov length  L (column)', _g('L_obukhov_col'), 5)
-    _kv('Obukhov length in wall units  L+', _g('L_col_plus'), 2)
-    _kv('Stability ratio  delta/L', (_delta / _g('L_obukhov_col'))
-        if np.isfinite(_g('L_obukhov_col')) and _g('L_obukhov_col') != 0 else _NA, 4)
-    _Lloc = _g('L_loc', {})
-    if isinstance(_Lloc, dict):
-        for _nm in ('windward', 'floor', 'lee'):
-            if _nm in _Lloc:
-                _kv(f'Local Obukhov length  L+ ({_nm})', _Lloc[_nm], 2)
-    print()
-    _para(f'Stability classification: "{_g("stab_class","n/a")}" (from Ri_B). '
-          + ('Turbulence-collapse warning: |L+| is below the configured threshold, '
-             'so the stratified surface layer may be intermittent or collapsed. '
-             if _g('collapse_flag', False) else
-             'No turbulence-collapse warning: |L+| exceeds the configured threshold. ')
-          + ('This run is neutral (Fr = infinite): there is no surface buoyancy '
-             'flux, L is infinite, and buoyancy never competes with shear.'
-             if not _stratified else
-             'Buoyancy actively suppresses mixing above z ~ |L|.'))
-
-    # ══ 3. Curve fits and wall laws ═══════════════════════════════════════════
-    _hdr('3. Curve fits and wall-law data')
-
-    print('  (a) Classical logarithmic law of the wall')
-    _para('Fitted form  U+ = (1/kappa) ln(z+ - d+) + B, equivalently '
-          'U+ = (1/kappa) ln((z+ - d+)/z0m+), by ordinary least squares with the '
-          'zero-plane displacement d+ obtained from a grid search maximising R^2. '
-          'This baseline ignores buoyancy and is fitted for every case.')
-    print()
-    _kv('Fit window (lower bound)  z+_min', _g('loglaw_zmin'), 1)
-    _kv('Fit window (upper bound)  z+_max', _g('loglaw_zmax'), 1)
-    _kv('von Karman constant  kappa', _g('kappa_loglaw'), 4)
-    _kv('Zero-plane displacement  d+', _g('d_m_loglaw'), 3)
-    _kv('Aerodynamic roughness length  z0m+', _g('z0m_loglaw'), 5)
-    _kv('Coefficient of determination  R^2', _g('_best_r2'), 4)
-    print()
-    _kv('Valley log-law kappa (plot fit)', _g('kappa_vll'), 4)
-    _kv('Smooth-wall log-law kappa (plot fit)', _g('kappa_sml'), 4)
-
-    print('\n  (b) Roughness / canopy sublayer')
-    _kv('Power law prefactor  A   (U+ = A z+^n)', _g('A_power'), 4)
-    _kv('Power law exponent  n', _g('n_power'), 4)
-    _kv('Power law  R^2', _g('r2_power'), 4)
-    _kv('Canopy attenuation coefficient  alpha', _g('alpha_canopy_v'), 4)
-    _kv('Canopy law  R^2', _g('r2_canopy'), 4)
-
-    print('\n  (c) Obukhov (1971) stability-corrected logarithmic law')
-    if not _stratified:
-        _para('Not fitted for this run. The surface layer is neutral (Fr = infinite), '
-              'so there is no surface buoyancy flux to bend the mean-wind profile away '
-              'from the classical log line, and Obukhov\'s modified law is undefined '
-              '(it reduces identically to the classical log law above). The modified '
-              'law is fitted only for the stratified cases (finite Fr).')
-    elif not (np.isfinite(_g('v_star_mod')) and np.isfinite(_g('L1_plus_mod'))):
-        _para('The stability-corrected fit did not converge for this run (too few '
-              'points inside the fit window, or the optimiser failed). See the '
-              '"Modified log-law ... FAILED" line printed earlier. The classical log '
-              'law in (a) still applies.')
-    else:
-        _vsm  = _g('v_star_mod'); _L1p = _g('L1_plus_mod')
-        _vphy = _vsm * _ustar if np.isfinite(_ustar) else _NA
-        _L1ph = _L1p * _lin if np.isfinite(_lin) else _NA
-        _L1od = (_L1ph / _delta) if (np.isfinite(_delta) and _delta != 0) else _NA
-        _para('Following Obukhov (1971), "Turbulence in an Atmosphere with a '
-              'Non-Uniform Temperature", Bound.-Layer Meteorol. 2, 7-29, the mean '
-              'wind is fitted to the stability-corrected surface-layer profile '
-              'V(z) = (v*/kappa) psi(z/L1) + offset. Here psi is Obukhov\'s universal '
-              'wind function (his Sec. 6 / Table III), obtained by integrating '
-              'sqrt(phi(Ri)) kappa z dV/dz = v* with the energy-balance universal '
-              'function phi(Ri) = sqrt(1 - Ri/Ri_cr) (his eq. 38). psi reduces to '
-              'ln(z) as the stratification vanishes, so the modified law degenerates '
-              'to the classical log law in the neutral limit.')
-        print()
-        _kv('von Karman constant (fixed at paper value)  kappa', OBU_KAPPA, 2)
-        _kv('Fit window (lower bound)  z+_min', _g('_mod_lo'), 1)
-        _kv('Fit window (upper bound)  z+_max', _g('_mod_hi'), 1)
-        _kv('Fitted friction velocity ratio  v*/u*', _vsm, 4)
-        _kv('Fitted friction velocity  v*', _vphy, 5)
-        _kv('Dynamic-turbulence length  L1+ (wall units)', _L1p, 3)
-        _kv('Dynamic-turbulence length  L1', _L1ph, 5)
-        _kv('L1 / boundary-layer depth  L1/delta', _L1od, 4)
-        _kv('Additive offset (roughness term)', _g('offset_mod'), 3)
-        _kv('Coefficient of determination  R^2', _g('r2_mod'), 4)
-        _kv('Critical Richardson number implied  Ri_cr', _g('Ri_cr_implied'), 4)
-        _kv('Critical Richardson number prescribed  Ri_cr', _g('Ri_cr'), 3)
-        print()
-        _para(f'Friction velocity: the profile-implied v* is '
-              f'{_sci(100.0*_vsm,1)}% of the independently measured Method-2 '
-              f'u* = {_sci(_ustar,5)}. A ratio near unity confirms that the '
-              f'stability-corrected profile and the Ekman momentum integral agree; a '
-              f'large departure indicates an unsuitable fit window or a genuinely '
-              f'non-logarithmic profile.')
-        _para(f'Dynamic-turbulence length: L1 = {_sci(_L1p,1)} wall units '
-              f'({_sci(_L1od,3)} of the boundary-layer depth delta). L1 is the '
-              f'thickness of the near-wall sub-layer in which turbulence is governed '
-              f'by shear rather than buoyancy; above z ~ L1 the mean wind departs '
-              f'from the straight log line and, in a stable layer, Ri approaches its '
-              f'critical value asymptotically. The fitted sign is '
-              + ('positive, i.e. a STABLE surface layer (Ri > 0, buoyancy suppresses '
-                 'mixing).' if _L1p > 0 else
-                 'negative, i.e. an UNSTABLE surface layer (Ri < 0, buoyancy enhances '
-                 'mixing).')
-              + (f' Note L1/delta = {_sci(_L1od,2)} > 1, meaning the stratification '
-                 f'signal is weak over the fit window and L1 is only loosely '
-                 f'constrained.' if (np.isfinite(_L1od) and _L1od > 1) else ''))
-        if np.isfinite(_g('Ri_cr_implied')):
-            _para(f'Critical Richardson number: inverting L1 = alpha Ri_cr v*^3 / '
-                  f'(kappa |B_s|) with the surface buoyancy flux B_s = '
-                  f'{_sci(_g("B_s"),5)} and a turbulent Prandtl number Pr_t = '
-                  f'{_sci(_g("Pr_t"),3)} (heat/momentum eddy-diffusivity ratio '
-                  f'alpha = K_T/K = 1/Pr_t) gives Ri_cr = '
-                  f'{_sci(_g("Ri_cr_implied"),4)}, against the prescribed '
-                  f'{_sci(_g("Ri_cr"),3)}. Caveat: if the temporal buoyancy '
-                  f'cross-moments (Mean*Theta) were absent, B_s contains only the '
-                  f'dispersive contribution and this Ri_cr is a lower bound.')
-            _Lobu  = _g('L_obukhov_col')
-            _kap   = _g('kappa')                    # config kappa used to build L
-            _L1oL  = (_L1ph / _Lobu) if (np.isfinite(_Lobu) and _Lobu != 0) else _NA
-            _xchk  = (_g('Pr_t') * _L1oL * OBU_KAPPA / _kap
-                      if (np.isfinite(_L1oL) and np.isfinite(_kap) and _kap != 0) else _NA)
-            _kv('Ratio of the two length scales  L1/L', _L1oL, 5)
-            _kv('Cross-check  Pr_t (L1/L) (kappa_obu/kappa)', _xchk, 5)
-            _para(f'Cross-check: the column Obukhov length is built as '
-                  f'L = -u*^3/(kappa B_s) with the CONFIG kappa = {_sci(_kap,3)}, '
-                  f'whereas Obukhov\'s L1 = alpha Ri_cr v*^3/(kappa_obu |B_s|) uses '
-                  f'the paper value kappa_obu = {_sci(OBU_KAPPA,2)}. Eliminating '
-                  f'|B_s| between them gives the identity '
-                  f'Ri_cr = Pr_t (L1/L) (kappa_obu/kappa) whenever v* = u*. Here that '
-                  f'evaluates to {_sci(_xchk,5)}, which must agree with the implied '
-                  f'Ri_cr = {_sci(_g("Ri_cr_implied"),5)} above. Agreement is an '
-                  f'independent confirmation that the fitted L1, the measured '
-                  f'buoyancy flux B_s and the wall-unit scaling l_in are mutually '
-                  f'consistent; a mismatch by a constant factor points to a friction '
-                  f'velocity or kappa used inconsistently between the two. Note '
-                  f'L1 << L implies a correspondingly small Ri_cr.')
-        _xi_t  = _OBU_TBL3[:, 0]
-        _e_eta = float(np.max(np.abs(obu_eta_of_xi(_xi_t) - _OBU_TBL3[:, 1])))
-        _psi_c = obu_psi(_xi_t)
-        _e_psi = float(np.sqrt(np.mean(
-            (_psi_c + np.mean(_OBU_TBL3[:, 2] - _psi_c) - _OBU_TBL3[:, 2]) ** 2)))
-        _para(f'Solver provenance: the psi(z/L1) machinery reproduces Obukhov\'s '
-              f'Table III to a maximum error of {_sci(_e_eta,4)} in Ri/Ri_cr and an '
-              f'RMS error of {_sci(_e_psi,4)} in psi (after the single arbitrary '
-              f'additive constant), confirming the universal function is implemented '
-              f'as published.')
-
-    print('=' * 80 + '\n')
+    IO.print_run_summary(globals())
 
     # %%
