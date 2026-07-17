@@ -129,6 +129,18 @@ def read_full_field(path, nx, ny, nz, dtype_out=np.float32):
     return field
 
 
+def field_flaws(fld, max_abs):
+    """(n_nan, n_inf, n_big): counts of NaN, of Inf, and of finite |value|>max_abs
+    in a 3-D field.  Any nonzero count means the field is corrupt — a single NaN/Inf
+    anywhere poisons the spanwise mean, which (like avg_phase.f90) is taken over ALL
+    k, so the whole snapshot is skipped.  Mirrors the plane-corruption rule in
+    PhAvgAllPlanes.py (NaN/Inf → skip; |val|>MAX_ABS → skip)."""
+    nan = int(np.isnan(fld).sum())
+    inf = int(np.isinf(fld).sum())
+    big = int((np.isfinite(fld) & (np.abs(fld) > max_abs)).sum())
+    return nan, inf, big
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Snapshot discovery — (u, v, w, scalar, tag) quintuples, one per usable snapshot
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,12 +226,19 @@ def compute(args):
             print(f"      [skip] unreadable field: {e}")
             continue
 
-        # Drop the WHOLE snapshot if any component is corrupt (keeps u,v,w,s
-        # time-consistent and stops inf/NaN poisoning the spanwise mean).
-        bad = next((nm for nm, fld in (('u', u), ('v', v), ('w', w), ('s', sc))
-                    if not np.isfinite(fld).all() or np.abs(fld).max() > args.max_abs), None)
-        if bad is not None:
-            print(f"      [skip] snapshot {tag} — field {bad} non-finite or |val|>{args.max_abs:.0e}.")
+        # NaN/Inf guard — drop the WHOLE snapshot if ANY component holds a NaN,
+        # an Inf, or a finite |value|>max_abs. One non-finite cell poisons the
+        # spanwise mean (taken over all k), and skipping the whole snapshot keeps
+        # u,v,w,s from the same instant time-consistent for the products.
+        skip = False
+        for nm, fld in (('u', u), ('v', v), ('w', w), ('s', sc)):
+            nan, inf, big = field_flaws(fld, args.max_abs)
+            if nan or inf or big:
+                print(f"      [skip] snapshot {tag} — field {nm} has "
+                      f"{nan} NaN, {inf} Inf, {big} |val|>{args.max_abs:.0e}.")
+                skip = True
+                break
+        if skip:
             continue
 
         # Space average = spanwise (z, axis 2) mean over ALL k, matching the
@@ -236,8 +255,27 @@ def compute(args):
         sys.exit("ERROR: every snapshot was corrupt/unreadable — nothing to write.")
     print(f"Averaged over {n_used} clean snapshot(s): {', '.join(used_tags)}")
 
-    # File range token — must match the case's avg_flow<range> so PhAvgAllPlanes pairs them.
-    rng = args.range if args.range else f"{used_tags[0]}_{used_tags[-1]}"
+    # File range token — it MUST match the case's avg_flow<range> token, else
+    # PhAvgAllPlanes.py (which discovers tokens from avg_flow*.1 and then looks for
+    # avg_flux<token>.{1,2,3}) will not pair the flux.  So when --range is omitted,
+    # auto-adopt the directory's avg_flow token; fall back to the snapshot iteration
+    # tags only when no avg_flow* is present.
+    if args.range:
+        rng = args.range
+    else:
+        flow_toks = sorted({re.fullmatch(r'avg_flow(\d+_\d+)\.1', f).group(1)
+                            for f in os.listdir(workdir)
+                            if re.fullmatch(r'avg_flow\d+_\d+\.1', f)})
+        if len(flow_toks) == 1:
+            rng = flow_toks[0]
+            print(f"  [range] adopting avg_flow token {rng} → pairs with PhAvgAllPlanes.py.")
+        elif len(flow_toks) > 1:
+            sys.exit(f"ERROR: several avg_flow tokens present {flow_toks}; pass --range "
+                     f"START_END to say which window this flux belongs to.")
+        else:
+            rng = f"{used_tags[0]}_{used_tags[-1]}"
+            print(f"  [range] no avg_flow*.1 found; using snapshot tags → {rng}. Set "
+                  f"--range to match the case's avg_flow token if you add one later.")
     if not re.fullmatch(r'\d+_\d+', rng):
         sys.exit(f"ERROR: --range '{rng}' must be START_END (e.g. 501_1000).")
 
