@@ -568,8 +568,15 @@ if (1 == cal_Avg):
     nscal     = None          # detected (1 or 2) from the first complete set
     good_sc   = None
     AvgScal2  = None
-    nflux     = None          # 0 or 3: avg_flux*.{1,2,3} present? (detected on first set)
-    good_flx  = None
+    # avg_flux*.{1,2,3} presence is decided PER SET (they were introduced partway
+    # through the run, so early sets lack them and later sets have them). Its
+    # presence must NOT gate whether a set is averaged — flow/stress/p/scal are
+    # always accumulated; the flux accumulator simply collects from whichever sets
+    # carry the files, normalised by its own good-plane counter.
+    good_flx  = np.zeros(3, dtype=np.int64)   # always allocated; per-set optional
+    any_flux  = False        # True once ANY set contributed avg_flux planes
+    n_flux_sets = 0          # number of sets that carried avg_flux (for reporting)
+    n_used_sets = 0          # number of sets actually accumulated (for reporting)
     # Exact velocity-scalar flux ⟨u_i·s⟩_z from avg_flux* (avg_phase.f90 /
     # BuoyancyFlux3D.py), if present: components 0=u·s, 1=v·s (wall-normal), 2=w·s.
     AvgFlux   = np.zeros((ny, nx, 3))
@@ -626,24 +633,29 @@ if (1 == cal_Avg):
         this_nscal = len(scal_paths)
         if (nscal is None):
             nscal   = this_nscal
-            nflux   = this_nflux
             good_sc = np.zeros(nscal, dtype=np.int64)
-            if (nflux):
-                good_flx = np.zeros(3, dtype=np.int64)
-            # Persistent bad-plane totals per component, summed over ALL sets.
-            tot_skip_nan = np.zeros(10 + nscal + nflux, dtype=np.int64)   # NaN/Inf in fluid
-            tot_skip_big = np.zeros(10 + nscal + nflux, dtype=np.int64)   # |val| > MAX_ABS in fluid
+            # Persistent bad-plane totals per component, summed over ALL sets. The
+            # 3 trailing slots are RESERVED for the flux components (always last in
+            # comp_paths when present) so per-set counts map by index even when a
+            # set carries no flux — see the tot_skip_* accumulation below.
+            tot_skip_nan = np.zeros(10 + nscal + 3, dtype=np.int64)   # NaN/Inf in fluid
+            tot_skip_big = np.zeros(10 + nscal + 3, dtype=np.int64)   # |val| > MAX_ABS in fluid
             if (nscal == 2):
                 AvgScal2 = np.zeros((ny, nx))
-            print("Detected %d scalar field(s); avg_flux %s."
-                  % (nscal, "present (3 components)" if nflux else "absent"))
-        elif (this_nscal != nscal) or (this_nflux != nflux):
-            print("WARNING: set %s has %d scalar(s)/%d flux but %d/%d expected; skipping set."
-                  % (tok, this_nscal, this_nflux, nscal, nflux))
+            print("Detected %d scalar field(s); avg_flux presence is checked per set."
+                  % nscal)
+        elif (this_nscal != nscal):
+            print("WARNING: set %s has %d scalar(s) but %d expected; skipping set."
+                  % (tok, this_nscal, nscal))
             continue
 
+        # avg_flux is optional and decided per set — its absence never skips a set.
+        if (this_nflux):
+            any_flux     = True
+            n_flux_sets += 1
+
         comp_paths = flow_paths + str_paths + [p_path] + scal_paths
-        if (nflux):
+        if (this_nflux):
             comp_paths = comp_paths + flux_paths
 
         # Sanity: all component files must exist.
@@ -781,9 +793,13 @@ if (1 == cal_Avg):
                       % (os.path.basename(p), skipped_nan[c] + skipped_big[c], ndata,
                          skipped_nan[c], skipped_big[c], MAX_ABS))
 
-        # Accumulate this set's bad-plane counts into the run totals.
-        tot_skip_nan += skipped_nan
-        tot_skip_big += skipped_big
+        # Accumulate this set's bad-plane counts into the run totals. A set without
+        # flux has a SHORTER skipped_* array (no trailing 3 flux slots); since flux
+        # is always last in comp_paths, indexing the leading slice maps every
+        # component to its fixed total slot and leaves the flux slots untouched.
+        n_used_sets += 1
+        tot_skip_nan[:len(skipped_nan)] += skipped_nan
+        tot_skip_big[:len(skipped_big)] += skipped_big
 
     print('Avg stress calculation')
 
@@ -794,7 +810,7 @@ if (1 == cal_Avg):
     comp_labels = (['flow.1', 'flow.2', 'flow.3',
                     'stress.1', 'stress.2', 'stress.3', 'stress.4', 'stress.5', 'stress.6',
                     'p.1'] + ['scal.%d' % (s + 1) for s in range(nscal)])
-    if (nflux):
+    if (any_flux):
         good_list  += list(good_flx)
         comp_labels += ['flux.1', 'flux.2', 'flux.3']
     good_all = np.array(good_list, dtype=np.int64)
@@ -835,7 +851,7 @@ if (1 == cal_Avg):
     AvgScal[:,:] = (AvgScal[:,:]*mask_zero)/good_sc[0]
     if (nscal == 2):
         AvgScal2[:,:] = (AvgScal2[:,:]*mask_zero)/good_sc[1]
-    if (nflux):
+    if (any_flux):
         for i in range(3):
             AvgFlux[:,:,i] = (AvgFlux[:,:,i]*mask_zero)/good_flx[i]
 
@@ -870,12 +886,19 @@ if (1 == cal_Avg):
     # (MeanVTheta − AvgPhV·AvgScal), so the turbulent buoyancy flux becomes exact
     # with no downstream change. MeanThTh (scalar variance) stays Route-C —
     # avg_flux carries no s·s component.
-    if (nflux):
+    if (any_flux):
         MeanUTheta = AvgFlux[:, :, 0].copy()
         MeanVTheta = AvgFlux[:, :, 1].copy()
         MeanWTheta = AvgFlux[:, :, 2].copy()
         print("Using EXACT velocity-scalar flux from avg_flux* for Mean{U,V,W}Theta "
-              "(Route-C product-of-means overridden; MeanThTh stays Route-C).")
+              "(Route-C product-of-means overridden; MeanThTh stays Route-C). "
+              "avg_flux present in %d of %d averaged set(s)." % (n_flux_sets, n_used_sets))
+        if (n_flux_sets < n_used_sets):
+            print("   NOTE: avg_flux covers only part of the run, so the exact "
+                  "⟨u_i·s⟩_z is averaged over a SMALLER iteration window than the "
+                  "means (AvgPhV, AvgScal) it is differenced against downstream "
+                  "(MeanVTheta − v̄·θ̄). Valid if the flow is statistically "
+                  "stationary over the averaging window.")
 
     # Report placement (solid vs fluid) of any non-finite values left in the
     # averaged fields. After skipping corrupt planes these should all be clean.
@@ -989,8 +1012,9 @@ if (1 == save_avg):
     np.save('MeanWTheta.npy', MeanWTheta)
     np.save('MeanThTh.npy',   MeanThTh)
 
-    # Exact phase-averaged velocity-scalar flux ⟨u_i·s⟩_z from avg_flux*, if present.
-    if (nflux):
+    # Exact phase-averaged velocity-scalar flux ⟨u_i·s⟩_z from avg_flux*, if any set
+    # carried them.
+    if (any_flux):
         np.save('AvgFluxUS.npy', AvgFlux[:, :, 0])
         np.save('AvgFluxVS.npy', AvgFlux[:, :, 1])
         np.save('AvgFluxWS.npy', AvgFlux[:, :, 2])
