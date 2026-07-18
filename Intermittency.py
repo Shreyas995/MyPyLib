@@ -65,6 +65,27 @@ plane's other two dimensions keep their real structure:
     # skip the scalar path even if scal.* is present (velocity γ only, faster):
     python3 Intermittency.py --workdir . --skip-scalar
 
+── γ FROM THE tlab PLANE FILES (planesK.*/planesJ.*) — the PhAvg_rotated.py port.
+A separate, cheaper source than the scarce 3-D flow.* triplets above: the solver
+saves planesK.<it> (fixed-z, x–y) and planesJ.<it> (fixed-y, x–z) at MANY
+iterations → a long ensemble for eq. 4.1's time-average.  Each slice can resolve
+only its ONE in-plane vorticity component, so this is a 2-D-per-plane γ, exactly
+like PhAvg_rotated.py's block (NOT the full |ω| of the 3-D path):
+    K-plane (x,y): ω_z' = ∂v'/∂x − ∂u'/∂y, high-pass = remove ⟨·⟩_x  (sets ω₀ at δ)
+    J-plane (x,z): ω_y' = ∂u'/∂z − ∂w'/∂x, high-pass = remove ⟨·⟩_z  (REUSES K's ω₀)
+No destructive field averaging: the only averages are forming the fluctuation and
+the eq. 4.1 time-average of the pointwise Heaviside indicator (the definition of γ).
+    # K-plane γ(x,y) at k-slot 0 and J-plane γ(x,z) at j-slots 0,2 in one call;
+    # --pj-ynodes gives each J-slot's wall-normal grid index for terrain masking
+    # (omit if the plane is above the valley crest → all-fluid):
+    python3 Intermittency.py --workdir /path/to/case \\
+            --from-planesK 0 --from-planesJ 0,2 --pj-ynodes 120,300
+    # writes  <prefix>_planesK_kNNNN.npz  and  <prefix>_planesJ_jNNNN.npz
+    # layout (nvars, n_kplanes/n_jplanes) is inferred from the file size assuming
+    # --pk-nvars/--pj-nvars (default 5 = u,v,w,s1,p); override if PLANES_LOG added
+    # log(enstrophy)/log(grad s) columns.  --omega0 lets J run without a K in the
+    # same call.  Plot locally the same way: --plot <prefix>_planesK_k0000.npz
+
 Coordinates (tlab engineering): axis0 = y wall-normal, axis1 = x streamwise
 (periodic), axis2 = z spanwise (periodic).  Velocity components on disk:
 1 = u streamwise, 2 = v wall-normal, 3 = w spanwise  (flow.<tag>.1/2/3).
@@ -520,6 +541,281 @@ def _parse_idx_list(s):
     return [int(v) for v in s.split(',') if v.strip() != '']
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Intermittency from the tlab plane files (planesK.* / planesJ.*)
+# ─────────────────────────────────────────────────────────────────────────────
+# A separate, cheaper data source than the scarce 3-D flow.*.1/2/3 triplets: the
+# solver saves planesK.<it> (fixed-z, x–y slices) and planesJ.<it> (fixed-y, x–z
+# slices) at MANY iterations, giving a long ensemble for the time-average in
+# eq. 4.1.  Logic is the port of PhAvg_rotated.py's intermittency block — the
+# high-pass (Reynolds-fluctuation) vorticity magnitude thresholded at
+# ω₀ = factor·ω_rms(δ) — restricted to the ONE in-plane vorticity component each
+# slice can resolve (a K-plane has no ∂/∂z, a J-plane no ∂/∂y):
+#   • K-plane (x,y):  ω_z' = ∂v'/∂x − ∂u'/∂y,  high-pass = remove the x-row mean
+#                     (exactly PhAvg_rotated.py; x is the in-plane homogeneous dir)
+#   • J-plane (x,z):  ω_y' = ∂u'/∂z − ∂w'/∂x,  high-pass = remove the z (spanwise,
+#                     homogeneous) mean
+# NO destructive spanwise/field averaging is ever applied to the raw data: the
+# only averages are (a) subtracting a mean to FORM the fluctuation and (b) the
+# eq. 4.1 time-average of the pointwise Heaviside indicator — the definition of γ.
+# The threshold ω₀ is fixed once from the K-plane at δ and REUSED for the
+# J-planes (single consistent threshold; the components differ, so J is read
+# against the K-plane's ω_z-based ω₀ by explicit choice).
+_PLANE_ITER_RE = {'planesK': re.compile(r'^planesK\.(\d+)$'),
+                  'planesJ': re.compile(r'^planesJ\.(\d+)$')}
+
+
+def _glob_plane_files(workdir, kind):
+    """Sorted list of real planesK.<it>/planesJ.<it> data files (numeric suffix
+    only — drops planesK_animation.*, *.npy, *.gif and other glob debris)."""
+    rex = _PLANE_ITER_RE[kind]
+    hits = []
+    for p in glob.glob(os.path.join(workdir, f'{kind}.*')):
+        m = rex.match(os.path.basename(p))
+        if m:
+            hits.append((int(m.group(1)), p))
+    return [p for _, p in sorted(hits)]
+
+
+def _infer_nplanes(path, plane_cells, nvars, kind):
+    """Solve n_planes from the file size: size = plane_cells·n_planes·nvars·4."""
+    size = os.path.getsize(path)
+    denom = plane_cells * nvars * 4
+    if size % denom != 0:
+        raise ValueError(
+            f"{os.path.basename(path)}: size {size}B not divisible by "
+            f"plane_cells·nvars·4 = {denom} — check --{'pk' if kind=='planesK' else 'pj'}-nvars.")
+    return size // denom
+
+
+def read_planesK_frame(path, nx, ny, nk, nvars, kslot):
+    """(u, v, w) each (ny, nx) from ONE k-slot of a planesK file.  Layout
+    (planes.f90): data_k(imax, jmax, nvars·n_kplanes), variable blocks slowest,
+    so var vi / k-slot occupies 3rd-dim index vi·nk + kslot.  Read-only."""
+    data = np.fromfile(path, dtype=np.float32)          # opens read-only
+    expect = nx * ny * nk * nvars
+    if data.size != expect:
+        raise ValueError(f"{os.path.basename(path)}: {data.size} floats, "
+                         f"expected {expect} (nx·ny·nk·nvars).")
+    arr = data.reshape((nx, ny, nvars * nk), order='F')
+    return (arr[:, :, 0 * nk + kslot].T,                # u  (ny,nx)
+            arr[:, :, 1 * nk + kslot].T,                # v
+            arr[:, :, 2 * nk + kslot].T)                # w
+
+
+def read_planesJ_frame(path, nx, nz, nj, nvars, jslot):
+    """(u, w) each (nx, nz) from ONE j-slot of a planesJ file.  Layout
+    (planes.f90): data_j(imax, nvars·n_jplanes, kmax), variable blocks in the
+    MIDDLE dim, so var vi / j-slot occupies 2nd-dim index vi·nj + jslot.
+    Read-only."""
+    data = np.fromfile(path, dtype=np.float32)
+    expect = nx * nz * nj * nvars
+    if data.size != expect:
+        raise ValueError(f"{os.path.basename(path)}: {data.size} floats, "
+                         f"expected {expect} (nx·nz·nj·nvars).")
+    arr = data.reshape((nx, nvars * nj, nz), order='F')
+    return (arr[:, 0 * nj + jslot, :],                  # u  (nx,nz)
+            arr[:, 2 * nj + jslot, :])                  # w
+
+
+def _ddp(f, d, axis):
+    """Central periodic ∂/∂(uniform axis)."""
+    return (np.roll(f, -1, axis) - np.roll(f, 1, axis)) * (0.5 / d)
+
+
+def _jplane_mask(eps, jnode, nz):
+    """Interior-fluid mask (nx, nz) for a J-plane at wall-normal grid index
+    jnode.  eps(ny,nx) is z-independent (2-D valley), so the solid footprint at
+    that height is eps[jnode,:] over x, broadcast over z; eroded one cell in x
+    (periodic) to drop the IBM interface ring."""
+    m = (eps[jnode, :] < 0.5)                           # fluid = True
+    er = m & np.roll(m, 1) & np.roll(m, -1)             # x-neighbours (periodic)
+    return np.broadcast_to(er[:, None].astype(np.float64), (er.size, nz)).copy()
+
+
+def gamma_from_planesK(files, x, y, kslot, nk, nvars, mask_er,
+                       factor, delta, vel_max):
+    """Two-pass γ(x,y) on one k-slot: pass 1 → ω_rms(y), δ, ω₀ = factor·ω_rms(δ);
+    pass 2 → γ = ⟨H(|ω_z'| − ω₀)⟩_t.  Returns a result dict."""
+    ny, nx = y.size, x.size
+    dx = float(x[1] - x[0])
+    mask = mask_er if mask_er is not None else np.ones((ny, nx))
+
+    def _omega(fp):
+        u, v, w = read_planesK_frame(fp, nx, ny, nk, nvars, kslot)
+        if vel_max and (np.abs(u).max() > vel_max or np.abs(v).max() > vel_max):
+            return None, None                           # diverged frame
+        up = u - u.mean(axis=1, keepdims=True)          # remove x-row mean
+        vp = v - v.mean(axis=1, keepdims=True)
+        oz = _ddp(vp, dx, 1) - np.gradient(up, y, axis=0)   # ω_z' = ∂v'/∂x − ∂u'/∂y
+        if not np.isfinite(oz).all():
+            return None, None
+        return oz, (u, w)
+
+    # pass 1 — ω_rms(y) and the mean wind (for auto δ)
+    sumsq = np.zeros((ny, nx)); n = 0
+    uacc = np.zeros(ny); wacc = np.zeros(ny)
+    omega_inst = None
+    for fp in files:
+        try:
+            oz, uw = _omega(fp)
+        except (ValueError, OSError):
+            continue
+        if oz is None:
+            continue
+        if n == 0:
+            omega_inst = oz * mask                       # first clean frame (Fig-2 look)
+        sumsq += oz * oz
+        uacc += uw[0].mean(axis=1); wacc += uw[1].mean(axis=1)
+        n += 1
+    if n == 0:
+        raise RuntimeError("no clean planesK frames (all unreadable/diverged/non-finite)")
+    num = np.sum(sumsq * mask, axis=1)
+    den = n * np.sum(mask, axis=1)
+    omega_rms = np.sqrt(_safe_divide(num, den))
+
+    if delta is not None:
+        j_delta = int(np.searchsorted(y, delta))
+    else:                                                # δ₉₅ from the ensemble mean wind
+        umag = np.sqrt((uacc / n) ** 2 + (wacc / n) ** 2)
+        j_delta = int(np.argmax(umag >= 0.95 * umag.max()))
+    j_delta = min(max(j_delta, 0), ny - 1)
+    e_omega = float(omega_rms[j_delta])
+    omega0 = factor * e_omega
+
+    # pass 2 — γ(x,y)
+    acc = np.zeros((ny, nx)); n2 = 0
+    for fp in files:
+        try:
+            oz, _ = _omega(fp)
+        except (ValueError, OSError):
+            continue
+        if oz is None:
+            continue
+        acc += (np.abs(oz) > omega0).astype(np.float64)
+        n2 += 1
+    gamma_field = (acc / n2) * mask
+    gden = np.sum(mask, axis=1)
+    gamma_profile = _safe_divide(np.sum(gamma_field, axis=1), gden)
+    print(f"    [planesK k={kslot}] {n2} frame(s); δ at j={j_delta}, "
+          f"z={float(y[j_delta]):.4g}; e_ω=ω_rms(δ)={e_omega:.4g}; "
+          f"ω₀={factor:g}·e_ω={omega0:.4g}; max γ={float(np.nanmax(gamma_profile)):.2f}")
+    return {'gamma': gamma_field, 'gamma_profile': gamma_profile,
+            'omega_hp': omega_inst, 'omega0': omega0, 'e_omega': e_omega,
+            'j_delta': j_delta, 'omega_rms': omega_rms, 'n_used': n2}
+
+
+def gamma_from_planesJ(files, x, z, jslot, nj, nvars, omega0, mask_row, vel_max):
+    """Single-pass γ(x,z) on one j-slot with a REUSED ω₀ (from the K-plane).
+    ω_y' = ∂u'/∂z − ∂w'/∂x, high-pass = remove the spanwise (z) mean."""
+    nx, nz = x.size, z.size
+    dx = float(x[1] - x[0]); dz = float(z[1] - z[0])
+    mask = mask_row if mask_row is not None else np.ones((nx, nz))
+
+    acc = np.zeros((nx, nz)); n = 0
+    omega_inst = None
+    for fp in files:
+        try:
+            u, w = read_planesJ_frame(fp, nx, nz, nj, nvars, jslot)
+        except (ValueError, OSError):
+            continue
+        if vel_max and (np.abs(u).max() > vel_max or np.abs(w).max() > vel_max):
+            continue
+        up = u - u.mean(axis=1, keepdims=True)          # remove spanwise (z) mean
+        wp = w - w.mean(axis=1, keepdims=True)
+        oy = _ddp(up, dz, 1) - _ddp(wp, dx, 0)          # ω_y' = ∂u'/∂z − ∂w'/∂x
+        if not np.isfinite(oy).all():
+            continue
+        if n == 0:
+            omega_inst = oy * mask
+        acc += (np.abs(oy) > omega0).astype(np.float64)
+        n += 1
+    if n == 0:
+        raise RuntimeError("no clean planesJ frames (all unreadable/diverged/non-finite)")
+    gamma_field = (acc / n) * mask
+    print(f"    [planesJ j={jslot}] {n} frame(s); ω₀={omega0:.4g} (reused from K); "
+          f"mean γ={float(np.nanmean(np.where(mask > 0, gamma_field, np.nan))):.2f}")
+    return {'gamma': gamma_field, 'omega_hp': omega_inst, 'omega0': omega0,
+            'n_used': n}
+
+
+def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
+    """Compute γ on the requested K- and/or J-plane slots from planesK.*/planesJ.*.
+    The K path sets ω₀; the J path reuses it (or an explicit --omega0)."""
+    nx, ny, nz = x.size, y.size, z.size
+    kslots = _parse_idx_list(args.from_planesK)
+    jslots = _parse_idx_list(args.from_planesJ)
+    omega0 = args.omega0                                 # explicit override (optional)
+    prefix = args.out_prefix
+
+    # ── K-planes (x, y) ──────────────────────────────────────────────────────
+    if kslots:
+        kfiles = _glob_plane_files(workdir, 'planesK')
+        if not kfiles:
+            sys.exit("ERROR: --from-planesK given but no planesK.<iter> files found.")
+        nk = args.pk_nplanes or _infer_nplanes(kfiles[0], nx * ny, args.pk_nvars, 'planesK')
+        print(f"  planesK: {len(kfiles)} file(s); layout nvars={args.pk_nvars}, "
+              f"n_kplanes={nk}")
+        for ks in kslots:
+            if ks >= nk:
+                print(f"  [skip] k-slot {ks} >= n_kplanes {nk}.")
+                continue
+            res = gamma_from_planesK(kfiles, x, y, ks, nk, args.pk_nvars, mask_er,
+                                     args.factor, args.delta, args.vel_max)
+            if omega0 is None:
+                omega0 = res['omega0']                   # first K-slot fixes the reused ω₀
+            meta = {'source': 'planesK', 'k_slot': ks, 'omega0': res['omega0'],
+                    'e_omega': res['e_omega'], 'factor': args.factor,
+                    'j_delta': res['j_delta'], 'n_used': res['n_used'],
+                    'component': "omega_z' = dv'/dx - du'/dy"}
+            out = os.path.join(workdir, f'{prefix}_planesK_k{ks:04d}.npz')
+            fields = {'gamma': res['gamma']}
+            if res['omega_hp'] is not None:
+                fields['omega_hp'] = res['omega_hp']
+            write_plane_npz(out, fields, x, y, 'x', 'z (wall-normal)', meta)
+
+    # ── J-planes (x, z) ──────────────────────────────────────────────────────
+    if jslots:
+        if omega0 is None:
+            sys.exit("ERROR: --from-planesJ needs a threshold — also request a "
+                     "--from-planesK (to derive ω₀ at δ) or pass --omega0 explicitly.")
+        jfiles = _glob_plane_files(workdir, 'planesJ')
+        if not jfiles:
+            sys.exit("ERROR: --from-planesJ given but no planesJ.<iter> files found.")
+        nj = args.pj_nplanes or _infer_nplanes(jfiles[0], nx * nz, args.pj_nvars, 'planesJ')
+        print(f"  planesJ: {len(jfiles)} file(s); layout nvars={args.pj_nvars}, "
+              f"n_jplanes={nj}; ω₀={omega0:.4g} (reused from K).")
+        ynodes = _parse_idx_list(args.pj_ynodes)
+        for i, js in enumerate(jslots):
+            if js >= nj:
+                print(f"  [skip] j-slot {js} >= n_jplanes {nj}.")
+                continue
+            mask_row = None
+            if ynodes and i < len(ynodes):
+                if eps is None:
+                    print(f"  [warn] --pj-ynodes given but no eps — j-slot {js} unmasked.")
+                else:
+                    mask_row = _jplane_mask(eps, ynodes[i], nz)
+            elif eps is not None:
+                print(f"  [note] no --pj-ynode for j-slot {js} — terrain mask skipped "
+                      "(valid if this plane is above the valley crest).")
+            res = gamma_from_planesJ(jfiles, x, z, js, nj, args.pj_nvars,
+                                     omega0, mask_row, args.vel_max)
+            meta = {'source': 'planesJ', 'j_slot': js, 'omega0': omega0,
+                    'omega0_origin': 'planesK (reused)', 'n_used': res['n_used'],
+                    'y_node': ynodes[i] if (ynodes and i < len(ynodes)) else None,
+                    'component': "omega_y' = du'/dz - dw'/dx"}
+            out = os.path.join(workdir, f'{prefix}_planesJ_j{js:04d}.npz')
+            # store as (v=z_span, h=x): transpose the (nx,nz) fields to (nz,nx)
+            fields = {'gamma': res['gamma'].T}
+            if res['omega_hp'] is not None:
+                fields['omega_hp'] = res['omega_hp'].T
+            write_plane_npz(out, fields, x, z, 'x', 'z (spanwise)', meta)
+
+    if not kslots and not jslots:
+        print("  [note] neither --from-planesK nor --from-planesJ requested.")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -550,6 +846,33 @@ def main():
     ap.add_argument('--planesJ', default=None,
                     help='comma-separated y-index (J, wall-normal) planes to write RAW '
                          '-- each an (x, z-spanwise) plane')
+    # --- γ directly from the tlab plane files (planesK.*/planesJ.*) ----------
+    ap.add_argument('--from-planesK', default=None,
+                    help='compute γ(x,y) from planesK.<iter> files at the given '
+                         'comma-separated k-slot index(es) — ω_z, x-mean high-pass '
+                         '(PhAvg_rotated.py logic). Sets ω₀ for the J-planes.')
+    ap.add_argument('--from-planesJ', default=None,
+                    help='compute γ(x,z) from planesJ.<iter> files at the given '
+                         'comma-separated j-slot index(es) — ω_y, spanwise-mean '
+                         'high-pass; reuses the K-plane ω₀ (or --omega0).')
+    ap.add_argument('--pk-nvars', type=int, default=5,
+                    help='planesK variables per slot (u,v,w,s1,p) [5]')
+    ap.add_argument('--pk-nplanes', type=int, default=None,
+                    help='planesK k-slots per file [inferred from size]')
+    ap.add_argument('--pj-nvars', type=int, default=5,
+                    help='planesJ variables per slot [5]')
+    ap.add_argument('--pj-nplanes', type=int, default=None,
+                    help='planesJ j-slots per file [inferred from size]')
+    ap.add_argument('--pj-ynodes', default=None,
+                    help='wall-normal grid index of each --from-planesJ slot '
+                         '(comma list, same order) for terrain masking; omit if '
+                         'the plane is above the valley crest (all-fluid).')
+    ap.add_argument('--omega0', type=float, default=None,
+                    help='explicit threshold (bypasses δ); lets --from-planesJ run '
+                         'without a --from-planesK in the same call.')
+    ap.add_argument('--vel-max', type=float, default=1.5,
+                    help='reject a plane frame whose |u|,|v|,|w| exceeds this '
+                         '(diverged/unphysical) [1.5]')
     ap.add_argument('--save-full', action='store_true',
                     help='also save the whole 3-D field(s) (big; stays on cluster)')
     ap.add_argument('--from-full', default=None,
@@ -573,6 +896,13 @@ def main():
     mask_er = interior_fluid_mask(1.0 - eps) if eps is not None else None
     if eps is not None:
         print("  eps loaded → IBM interface ring eroded from stats/output.")
+
+    # ---- γ from the tlab plane files (planesK.*/planesJ.*) ------------------
+    # A distinct, cheaper source from the 3-D flow.* path below: it consumes the
+    # frequently-saved plane slices directly, mirroring PhAvg_rotated.py.
+    if args.from_planesK is not None or args.from_planesJ is not None:
+        run_plane_intermittency(args, workdir, x, y, z, eps, mask_er)
+        return
 
     # ---- field(s): recompute, or slice a previously saved velocity gamma ----
     if args.from_full:
