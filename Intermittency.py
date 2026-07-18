@@ -739,23 +739,31 @@ def gamma_from_planesJ(files, x, z, jslot, nj, nvars, omega0, mask_row, vel_max)
             'n_used': n}
 
 
+def _slots(spec, nplanes):
+    """Slot spec → list of indices. 'all' (case-insensitive) → every slot in the
+    file; otherwise a comma-separated index list (e.g. '0,2,5')."""
+    if spec is not None and spec.strip().lower() == 'all':
+        return list(range(nplanes))
+    return _parse_idx_list(spec)
+
+
 def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
     """Compute γ on the requested K- and/or J-plane slots from planesK.*/planesJ.*.
-    The K path sets ω₀; the J path reuses it (or an explicit --omega0)."""
+    The K path sets ω₀; the J path reuses it (or an explicit --omega0).
+    Slot spec is a comma list or 'all' (every slot in the file)."""
     nx, ny, nz = x.size, y.size, z.size
-    kslots = _parse_idx_list(args.from_planesK)
-    jslots = _parse_idx_list(args.from_planesJ)
     omega0 = args.omega0                                 # explicit override (optional)
     prefix = args.out_prefix
 
     # ── K-planes (x, y) ──────────────────────────────────────────────────────
-    if kslots:
+    if args.from_planesK is not None:
         kfiles = _glob_plane_files(workdir, 'planesK')
         if not kfiles:
             sys.exit("ERROR: --from-planesK given but no planesK.<iter> files found.")
         nk = args.pk_nplanes or _infer_nplanes(kfiles[0], nx * ny, args.pk_nvars, 'planesK')
+        kslots = _slots(args.from_planesK, nk)
         print(f"  planesK: {len(kfiles)} file(s); layout nvars={args.pk_nvars}, "
-              f"n_kplanes={nk}")
+              f"n_kplanes={nk}; k-slots={kslots}")
         for ks in kslots:
             if ks >= nk:
                 print(f"  [skip] k-slot {ks} >= n_kplanes {nk}.")
@@ -775,7 +783,7 @@ def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
             write_plane_npz(out, fields, x, y, 'x', 'z (wall-normal)', meta)
 
     # ── J-planes (x, z) ──────────────────────────────────────────────────────
-    if jslots:
+    if args.from_planesJ is not None:
         if omega0 is None:
             sys.exit("ERROR: --from-planesJ needs a threshold — also request a "
                      "--from-planesK (to derive ω₀ at δ) or pass --omega0 explicitly.")
@@ -783,8 +791,9 @@ def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
         if not jfiles:
             sys.exit("ERROR: --from-planesJ given but no planesJ.<iter> files found.")
         nj = args.pj_nplanes or _infer_nplanes(jfiles[0], nx * nz, args.pj_nvars, 'planesJ')
+        jslots = _slots(args.from_planesJ, nj)
         print(f"  planesJ: {len(jfiles)} file(s); layout nvars={args.pj_nvars}, "
-              f"n_jplanes={nj}; ω₀={omega0:.4g} (reused from K).")
+              f"n_jplanes={nj}; j-slots={jslots}; ω₀={omega0:.4g} (reused from K).")
         ynodes = _parse_idx_list(args.pj_ynodes)
         for i, js in enumerate(jslots):
             if js >= nj:
@@ -811,9 +820,6 @@ def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
             if res['omega_hp'] is not None:
                 fields['omega_hp'] = res['omega_hp'].T
             write_plane_npz(out, fields, x, z, 'x', 'z (spanwise)', meta)
-
-    if not kslots and not jslots:
-        print("  [note] neither --from-planesK nor --from-planesJ requested.")
 
 
 def main():
@@ -849,12 +855,12 @@ def main():
     # --- γ directly from the tlab plane files (planesK.*/planesJ.*) ----------
     ap.add_argument('--from-planesK', default=None,
                     help='compute γ(x,y) from planesK.<iter> files at the given '
-                         'comma-separated k-slot index(es) — ω_z, x-mean high-pass '
-                         '(PhAvg_rotated.py logic). Sets ω₀ for the J-planes.')
+                         "k-slot index(es) — a comma list or 'all' — ω_z, x-mean "
+                         'high-pass (PhAvg_rotated.py logic). Sets ω₀ for the J-planes.')
     ap.add_argument('--from-planesJ', default=None,
                     help='compute γ(x,z) from planesJ.<iter> files at the given '
-                         'comma-separated j-slot index(es) — ω_y, spanwise-mean '
-                         'high-pass; reuses the K-plane ω₀ (or --omega0).')
+                         "j-slot index(es) — a comma list or 'all' — ω_y, spanwise-"
+                         'mean high-pass; reuses the K-plane ω₀ (or --omega0).')
     ap.add_argument('--pk-nvars', type=int, default=5,
                     help='planesK variables per slot (u,v,w,s1,p) [5]')
     ap.add_argument('--pk-nplanes', type=int, default=None,
