@@ -9,7 +9,6 @@ Created on Mon Nov  4 11:13:16 2024
 import os
 import re
 import sys
-import glob as _glob
 import csv
 import struct
 import math
@@ -62,6 +61,14 @@ try:
     from config import Pr_t as PR_T
 except Exception:
     PR_T = 0.85
+
+# Ansorge (2017) stability-class bin edges (weak | intermediate | strong) used by
+# the cross-case stability axis (Goal 1 / P72), mirroring PhAvg_rotated.py's R5.
+# WITHOUT-config.py fallback = the config default (0.05, 0.15).
+try:
+    from config import Ri_B_bins as RI_B_BINS
+except Exception:
+    RI_B_BINS = (0.05, 0.15)
 
 ###############################################################################
 ############################## Function defintion #############################
@@ -1776,10 +1783,10 @@ def _print_run_summary():
         print('  inputs : pickle=%s  per_case_grid=%s'
               % (_has, _pv.get('per_case_grid', False)))
         if _pv.get('inst'):
-            print('           inst planes read : %s'
+            print('           inst planes (from pickle) : %s'
                   % ', '.join('%s=%s' % (k, v) for k, v in _pv['inst'].items()))
         if _pv.get('inst_skip'):
-            print('           inst planes SKIPPED (truncated/corrupt): %s'
+            print('           inst planes MISSING from pickle: %s'
                   % ', '.join('%s=%s' % (k, v) for k, v in _pv['inst_skip'].items()))
         if not _has:
             print('  (no pickle — case skipped in all diagnostics)')
@@ -1936,6 +1943,7 @@ cwd2 = _base + '1056x672x1056/EkRe500Fr1/'       # Strat        Fr = 1    (valle
 cwd3 = _base + '1056x672x1056/EkRe500Fr0.1/'     # Strat        Fr = 0.1  (valley present)
 cwd4 = _base + '1056x672x1056/EkRe500Fr0.01/'    # Strat        Fr = 0.01 (valley present)
 cwd5 = _base + '1056x672x1056/EkRe500Fr0.0015/'  # Strat        Fr = 0.0015 (valley present)
+cwd6 = _base + '1056x672x1056/EkRe500Fr0.0013/'  # Strat        Fr = 0.0013 (valley present)
 # Reference grid + IBM geometry come from the NEUTRAL case (cwd1): the central
 # examples/ root holds no grid of its own, and the valley geometry (eps, nx, ny,
 # hill_hgt) used for the 2-D orographic plots is the neutral-case grid.
@@ -1998,6 +2006,7 @@ ACTIVE_CASES = {
     'fr_0p1_oro',   # Strat,       Fr = 0.1
     'fr_0p01_oro',  # Strat,       Fr = 0.01
     'fr_0p0015_oro',# Strat,       Fr = 0.0015
+    'fr_0p0013_oro',# Strat,       Fr = 0.0013
 }
 ###############################################################################
 
@@ -2015,6 +2024,7 @@ CASES = [
     {'name': 'fr_0p1_oro',  'label': r'$Fr=0.1$',                   'color': '#2E7D32', 'ls': ':',       'marker': 'D'},
     {'name': 'fr_0p01_oro', 'label': r'$Fr=0.01$',                  'color': '#E65100', 'ls': (0,(5,2)), 'marker': 'v'},
     {'name': 'fr_0p0015_oro','label': r'$Fr=0.0015$',               'color': '#6A1B9A', 'ls': (0,(3,1,1,1)), 'marker': 'P'},
+    {'name': 'fr_0p0013_oro','label': r'$Fr=0.0013$',               'color': '#AD1457', 'ls': (0,(1,1)), 'marker': '*'},
 ]
 
 SIM_DIRS = {
@@ -2023,6 +2033,7 @@ SIM_DIRS = {
     'fr_0p1_oro':  cwd3,
     'fr_0p01_oro': cwd4,
     'fr_0p0015_oro': cwd5,
+    'fr_0p0013_oro': cwd6,
 }
 
 # Per-case Froude number — the switch that selects the wall-law form fitted to
@@ -2036,6 +2047,7 @@ SIM_FR = {
     'fr_0p1_oro':    0.1,
     'fr_0p01_oro':   0.01,
     'fr_0p0015_oro': 0.0015,
+    'fr_0p0013_oro': 0.0013,
 }
 
 # Per-case override for the intermittency .npz directory ONLY.  A case absent from
@@ -2197,83 +2209,38 @@ _ustar_ref = ustr_s1 if os.path.exists(_nc_smooth) else u_star
 ###############################################################################
 for _name, _sd in sims.items():
     if 'rey_uv' in _sd and 'du_dy' in _sd:
+        # Production P = -⟨u'v'⟩·∂⟨u⟩/∂z is a single elementwise product of two
+        # already-pickled fields (cheap combining, not a derivative build) — kept
+        # here so it need not round-trip through the pickle.
         _sd['P'] = -_sd['rey_uv'] * _sd['du_dy']
-    if 'TKE' in _sd and 'AvgPhU' in _sd and 'AvgPhV' in _sd:
-        # Each pickle is self-contained: use THIS case's own grid + eps (saved by
-        # saveresults.py) so cases on a different grid than the neutral reference
-        # (the stratified runs are 1056x672x1056) are differentiated correctly.
-        # Fall back to the neutral globals only if a (legacy) pickle lacks them.
-        _eps = _sd.get('eps', eps)
-        _nx  = _sd.get('nx',  nx)
-        _ny  = _sd.get('ny',  ny)
-        _xg  = _sd.get('x',   x)
-        if _sd['TKE'].shape == _eps.shape:
-            _sd['dTKE_dx'] = diffu_dx(_sd['TKE'], _ny, _nx, _eps, _xg)
-            _sd['dTKE_dy'] = diffu_dy(_sd['TKE'], _ny, _nx, _eps, _xg)
-            _sd['Adv']     = _sd['AvgPhU'] * _sd['dTKE_dx'] + _sd['AvgPhV'] * _sd['dTKE_dy']
-        else:
-            print(f'Note: {_name} TKE shape {_sd["TKE"].shape} != its eps grid '
-                  f'{_eps.shape}; skipping TKE-advection (grid/eps inconsistent).')
+    # TKE-advection fields (dTKE_dx, dTKE_dy, Adv) are computed ONCE in
+    # PhAvg_rotated.py (stage b, compact-derivative scheme) and pickled; stage c
+    # (this file) only READS them — no derivative field is rebuilt in results.py
+    # (pipeline rule).  A legacy pickle lacking 'Adv' is reported and its
+    # TKE-advection panels are skipped, not recomputed.
+    if 'TKE' in _sd and 'Adv' not in _sd:
+        print(f'Note: {_name} pickle carries no Adv/dTKE_d* (legacy/stale — '
+              f'regenerate with the current PhAvg_rotated.py); its TKE-advection '
+              f'panels will be skipped.')
 
 ###############################################################################
-# Load instantaneous plane data (flow.*.1-3, scal.*.1) for each rough-wall case.
-# Each downloaded file contains a complete binary header (offset bytes read via
-# read_header) followed by the first x-y plane as Nx*Ny float64 values.
-# Turbulent fluctuation = plane minus x-averaged profile (function of y only),
-# then solid region zeroed with mask0.
+# Instantaneous fluctuation planes (inst_u/v/w/scal) — READ from the pickle.
+# u'ᵢ = uᵢ − ⟨uᵢ⟩ₓ (one x–y plane) is the ONLY pipeline quantity derived from a
+# RAW record (flow.*/scal.*).  That raw-record read now lives in PhAvg_rotated.py
+# (stage b), which pickles inst_*; stage c (this file) therefore NEVER opens
+# flow.*/scal.* — it just notes which inst_* each pickle carries, for the P19–P22
+# snapshot panels and the end-of-run summary.  A legacy pickle predating these
+# keys simply lacks them and the affected snapshot panel is skipped.
 ###############################################################################
-# Use each file's OWN header dimensions (read_header returns nx, ny) so a case on
-# a different grid than the neutral reference is read at the right shape, and mask
-# the solid region with THAT case's own pickled mask0 (falling back to the neutral
-# mask0 only for a legacy pickle that lacks it / matches the neutral grid).
-def _inst_fluct(_path, _mask):
-    _ihdr, _inx, _iny, *_ = read_header(_path)
-    if _ihdr is None or _inx is None or _iny is None:
-        return None
-    # The downloaded field files are deliberately truncated (~30 MB) so only the
-    # header + first x-y plane are guaranteed present.  readplane() reshapes to
-    # (ny, nx) and would crash on an incomplete plane, so confirm the file really
-    # holds the whole first plane (offset + nx*ny*8 bytes) before reading it.
-    _need = int(_ihdr) + int(_inx) * int(_iny) * 8
-    try:
-        _have = os.path.getsize(_path)
-    except OSError:
-        return None
-    if _have < _need:
-        print(f'  Skip {os.path.basename(_path)}: {_have} B present < {_need} B '
-              f'needed for the first {_inx}x{_iny} plane (truncated download).')
-        return None
-    try:
-        _ipl = readplane(_path, _inx, _iny, 1, _ihdr)
-    except Exception as _e:
-        print(f'  Skip {os.path.basename(_path)}: could not read first plane ({_e}).')
-        return None
-    _fluc = _ipl - _ipl.mean(axis=1, keepdims=True)
-    if _mask is not None and _fluc.shape == _mask.shape:
-        _fluc = _fluc * _mask
-    # Store in float32 (halves RAM; a fluctuation plane is only ever plotted).
-    return _fluc.astype(np.float32)
-
-for _iname, _idir in SIM_DIRS.items():
-    if _iname not in sims:
-        sims[_iname] = {}
-    _mask = sims[_iname].get('mask0', mask0)
-    # Each component glob is iteration-number agnostic (flow.<iter>.{1,2,3} /
-    # scal.<iter>.1); the last match is used.  Record which file was read or
-    # skipped-as-truncated per case for the end-of-run summary.
-    for _comp, _ikey in [('1', 'inst_u'), ('2', 'inst_v'), ('3', 'inst_w'),
-                         ('scal', 'inst_scal')]:
-        _pat = (_idir + 'scal.*.1') if _comp == 'scal' else (_idir + 'flow.*.' + _comp)
-        _hits = sorted(_glob.glob(_pat))
-        if not _hits:
-            continue
-        _src = _hits[-1]
-        _f = _inst_fluct(_src, _mask)
-        if _f is not None:
-            sims[_iname][_ikey] = _f
-            _prov[_iname]['inst'][_ikey] = os.path.basename(_src)
+for _iname in SIM_DIRS:
+    _sd = sims.get(_iname)
+    if not _sd:
+        continue
+    for _ikey in ('inst_u', 'inst_v', 'inst_w', 'inst_scal'):
+        if _sd.get(_ikey) is not None:
+            _prov[_iname]['inst'][_ikey] = 'pickled'
         else:
-            _prov[_iname]['inst_skip'][_ikey] = os.path.basename(_src)
+            _prov[_iname]['inst_skip'][_ikey] = 'absent (regenerate pickle)'
 
 # Plot results
 if (1 == plotRes):
@@ -2590,8 +2557,14 @@ if (1 == plotRes):
             print(f'P24d2: {_cname} du_dy shape {_dudy.shape} != eps {_epsc.shape}; skipped.')
             continue
         _yg = sims[_cname].get('y', y)
-        _nyc, _nxc = _dudy.shape
-        _d2 = diffu_dy(_dudy, _nyc, _nxc, _epsc, _yg)
+        # ∂²⟨u⟩/∂z² is computed once in PhAvg_rotated.py (stage b, compact D2Y
+        # scheme) and pickled; stage c reads it (pipeline rule: no derivative
+        # rebuilt here).  A legacy pickle predating the d2u_dy2 key falls back to a
+        # one-off diffu_dy(du_dy) so old pickles still plot.
+        _d2 = gv('d2u_dy2', _cname)
+        if _d2 is None or getattr(_d2, 'shape', None) != _dudy.shape:
+            _nyc, _nxc = _dudy.shape
+            _d2 = diffu_dy(_dudy, _nyc, _nxc, _epsc, _yg)
         _xc, _yc, _xo, _yo = _case_grid(_cname, use_inner=True)
         _jl = _clip_rows(_yc, _zI_lim_in)
         _d2_panels.append((_clbl, _xc, _yc[:_jl], _d2[:_jl, :] * _sc_d2u,
@@ -2780,7 +2753,7 @@ if (1 == plotRes):
 
     # (Req 1) Neutral-only streamline/vorticity figures removed — this script
     # only produces combined all-simulation plots; the single-case streamline
-    # maps live in PhAvg_rotated.py's fig_rotated/.
+    # maps live in PhAvg_rotated.py's fig/ (all plots now share one fig/ folder).
 
     # TKE shear production — smooth (if loaded) + all active rough cases (subplots)
     # Smooth panel mirrors the advection panel P24: the flat-wall .nc IS x-homogeneous,
@@ -4098,9 +4071,10 @@ if (1 == plotRes):
     # ░░  SECTION 5 — CHAPTER-6 IMMEDIATELY-ACHIEVABLE DIAGNOSTICS (all Fr)  ░░
     # Research.md "Immediately achievable from existing data" (lines 568-610) +
     # the medium-priority items computable from the existing phase-averaged 2-D
-    # fields and the first-plane snapshots.  EVERY plot here is a cross-case
-    # visualization (all simulations overlaid / side-by-side panels) — never an
-    # individual per-case figure (those stay in PhAvg_rotated.py's fig_rotated/).
+    # fields and the first-plane snapshots.  Most plots here are cross-case
+    # visualizations (all simulations overlaid / side-by-side panels); the few
+    # per-case figures (e.g. the D19 velocity-field maps) and all plots now share
+    # the single fig/ folder with PhAvg_rotated.py.
     # Each block is gated: a case missing a required field is skipped, not crashed.
     # Reduced numbers are collected in _ch6 for the end-of-run summary.  Scaling
     # is single-reference (u_star / l_in / Re_tau); grids/eps/geometry per-case.
@@ -4451,6 +4425,37 @@ if (1 == plotRes):
                  r'Terrain-following streamwise stress $\nu\partial\bar{u}/\partial z-\overline{u^\prime w^\prime}$ — all Fr',
                  'RdBu_r', 'P71_Ch6_tauzxTF_allFr.png', zmax_plus=800)
 
+    # ── D19. 3-component velocity FIELD maps (mirror of PhAvg_rotated.py's named
+    #         [PLOT 06]/[PLOT 11] plot_phavg_velocity_3D figures) ──────────────
+    # The per-run figure is a 3-panel map of a velocity triad: in-plane (u,v)
+    # streamlines over a spanwise-velocity contour, the out-of-plane yaw angle,
+    # and the 3-D speed.  It has no cross-case panel form (streamline overlays
+    # don't tile cleanly), so we reproduce it here per case for BOTH the
+    # phase-averaged MEAN velocity ⟨ū_i⟩ (P91) and the DISPERSIVE velocity ũ_i
+    # (P92), each figure NAMED via the title arg + a per-case filename.  A case
+    # missing the components is skipped (graceful).
+    def _vel3D_field_per_case(keys, title_root, fname_prefix):
+        _kU, _kV, _kW = keys
+        for case, lbl in zip(SIM_NAMES, SIM_LABELS):
+            _U = gv(_kU, case); _V = gv(_kV, case); _W = gv(_kW, case)
+            if _U is None or _V is None or _W is None:
+                continue
+            _xp, _yp, _xo, _yo = _case_grid(case, use_inner=True)
+            _t = min(limity, len(_yp), np.shape(_U)[0])
+            plot_phavg_velocity_3D(_xp, _yp[:_t],
+                                   np.asarray(_U)[:_t, :], np.asarray(_V)[:_t, :],
+                                   np.asarray(_W)[:_t, :], geps(case)[:_t, :], 1000,
+                                   _xo, _yo,
+                                   cwd + 'fig/' + fname_prefix + case + '.png',
+                                   title=title_root + '  —  ' + lbl)
+    _vel3D_field_per_case(('AvgPhU', 'AvgPhV', 'AvgPhW'),
+                          r'Phase-averaged mean velocity field  '
+                          r'$\langle\overline{u}_i\rangle(x^+,z^+)$',
+                          'P91_MeanVel3D_')
+    _vel3D_field_per_case(('DispVelU', 'DispVelV', 'DispVelW'),
+                          r'Dispersive velocity field  $\widetilde{u}_i(x^+,z^+)$',
+                          'P92_DispVel3D_')
+
     # [console table, no figure] ── D6. Wall-normal pressure equilibrium ∂P/∂z (#6) ─
     print('\n  [D6] Wall-normal pressure equilibrium  |∂P/∂z|  (IBM band vs outer):')
     print(f"    {'case':<14}{'max|dP/dz| IBM':>18}{'mean|dP/dz| outer':>20}")
@@ -4537,7 +4542,7 @@ if (1 == plotRes):
     # for any case whose pickle lacks them.
     # ═══════════════════════════════════════════════════════════════════════
     _FR = {'nu_oro': np.inf, 'fr_1_oro': 1.0, 'fr_0p1_oro': 0.1,
-           'fr_0p01_oro': 0.01, 'fr_0p0015_oro': 0.0015}
+           'fr_0p01_oro': 0.01, 'fr_0p0015_oro': 0.0015, 'fr_0p0013_oro': 0.0013}
     _xc = [c for c in CASES
            if c['name'] in sims and gv('Ri_B', c['name']) is not None]
     if len(_xc) == 0:
@@ -4571,11 +4576,18 @@ if (1 == plotRes):
             return float(np.mean(vals)) if vals else np.nan
 
         # ── [X1] Stability axis: each Fr at its measured Ri_B + bins ──
+        # Cross-case mirror of PhAvg_rotated.py's per-run Research_stability_axis.png
+        # (R5): the weak | intermediate | strong bins are the Ansorge (2017) edges
+        # config.Ri_B_bins (not hardcoded), labelled bands as in the per-run figure;
+        # each Fr case is placed at its measured Ri_B (one marker per case instead of
+        # the single run's vertical line).  _hi matches R5's upper limit so the band
+        # extents agree between the per-run and cross-case views.
         fig, ax = plt.subplots(figsize=(9, 3.6), dpi=300)
-        _hi = max(0.2, float(np.nanmax(np.abs(_RiB))) * 1.3)
-        ax.axvspan(0,    0.05, color='green',  alpha=0.10)
-        ax.axvspan(0.05, 0.15, color='orange', alpha=0.10)
-        ax.axvspan(0.15, _hi,  color='red',    alpha=0.10)
+        _b0, _b1 = float(RI_B_BINS[0]), float(RI_B_BINS[1])
+        _hi = max(_b1 * 2.0, float(np.nanmax(np.abs(_RiB))) * 1.3, _b1 + 0.05)
+        ax.axvspan(0,   _b0, color='green',  alpha=0.12, label='weak')
+        ax.axvspan(_b0, _b1, color='orange', alpha=0.12, label='intermediate')
+        ax.axvspan(_b1, _hi, color='red',    alpha=0.12, label='strong')
         for i, n in enumerate(_nm):
             ax.scatter(_RiB[i], 0.0, color=_col[i], marker=_mk[i], s=90, zorder=5, label=_lab[i])
         ax.set_yticks([]); ax.set_xlim(0, _hi)
@@ -4756,6 +4768,46 @@ if (1 == plotRes):
             figR.savefig(_figdir_x + 'P85_Xcase_flux_split.png', dpi=300, bbox_inches='tight'); plt.show()
         else:
             plt.close(figR)
+
+        # ── [X8b] Buoyancy-flux VECTOR components vs z⁺ (Goal 4 / R1b) ─────────
+        # Mirror of Research_flux_components.png: the three components of the
+        # x-averaged phase-averaged buoyancy flux ⟨u_i'b'⟩(z) — streamwise
+        # ⟨u'b'⟩ (left), wall-normal/vertical ⟨v'b'⟩ (centre, = the Bflux of X8),
+        # spanwise ⟨w'b'⟩ (right) — each split into turbulent (solid) and
+        # dispersive (dashed), one colour per case.  Rotated (geostrophic-aligned)
+        # frame, consistent with the per-run figure.  Needs Uflux_*/Wflux_* which
+        # are pickled by PhAvg_rotated.py (IO.var_names); a case predating those
+        # keys, or the neutral run (buoyancy ≈ 0), is skipped/flat (graceful).
+        figC, _axC = plt.subplots(1, 3, figsize=(15, 6), dpi=300, sharey=True)
+        _comp = (('Uflux_temp', 'Uflux_disp', r"streamwise $\langle u'b'\rangle$"),
+                 ('Bflux_temp', 'Bflux_disp', r"wall-normal $\langle v'b'\rangle$"),
+                 ('Wflux_temp', 'Wflux_disp', r"spanwise $\langle w'b'\rangle$"))
+        _anyc = False
+        for _ax, (_kt, _kd, _ttl) in zip(_axC, _comp):
+            for c in _xc:
+                n = c['name']; _zi = gy_in(n)
+                if _zi is None:
+                    continue
+                _tmp = gv(_kt, n); _dsp = gv(_kd, n)
+                if _tmp is None or _dsp is None:
+                    continue
+                _t = min(limity, len(_zi), len(_tmp), len(_dsp))
+                _ax.plot(np.asarray(_tmp)[:_t], _zi[:_t], color=c['color'], ls='-',
+                         label=c['label'])
+                _ax.plot(np.asarray(_dsp)[:_t], _zi[:_t], color=c['color'], ls='--')
+                _anyc = True
+            _ax.axvline(0.0, color='0.6', lw=0.6)
+            _ax.set_xlabel(_ttl); _ax.grid(True, ls='--', lw=0.5)
+        if _anyc:
+            _axC[0].set_ylim(0, _row_to_height(limity, use_inner=True))
+            _axC[0].set_ylabel(r'$z^+$')
+            _axC[0].legend(fontsize=7, title='solid: turbulent   dashed: dispersive')
+            figC.suptitle('Buoyancy-flux vector components vs $z^+$ — all Fr '
+                          r'(neutral $\approx$ 0)')
+            figC.tight_layout()
+            figC.savefig(_figdir_x + 'P90_Xcase_flux_components.png', dpi=300, bbox_inches='tight'); plt.show()
+        else:
+            plt.close(figC)
 
         # ── [X9] Dispersive FLUX SHARE profiles vs z⁺ (Goal 4 / R2) ────────────
         # Mirror of Research_dispersive_share.png: |disp| / (|disp| + |turb|) for

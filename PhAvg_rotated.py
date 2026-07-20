@@ -6,9 +6,9 @@
 # ghost-cell interpolation and BEFORE the derivatives, so the geostrophic wind is
 # aligned with x — matching the frame of the Kostelecky & Ansorge reference .nc
 # cases.  Everything else (derivatives, Method-2 budget, plots) runs unchanged.
-# Outputs go to fig_rotated/ and derivative caches use a *_rot suffix, so this
-# script never clobbers the unrotated PhAvg.py run.  See the "FRAME ROTATION"
-# block for the exact transformation.
+# Figures go to the shared fig/ folder; derivative caches use a *_rot suffix, so
+# the caches never clobber the unrotated PhAvg.py run (the figures now merge into
+# one folder by request).  See the "FRAME ROTATION" block for the transformation.
 # ============================================================================
 # Phase-averaging postprocessor for DNS of rotating (Ekman layer) flow over a sinusoidal valley.
 # Computes friction velocity via two independent methods:
@@ -116,8 +116,87 @@ from compact_derivatives import (
 # Grid & differential operators
 # ─────────────────────────────────────────────────────────────────────────────
 cwd = str(os.path.dirname(__file__) + '/' )
-# All figures/plots are written to <data dir>/fig_rotated/ (rotated-frame variant).
-fig_dir = os.path.join(cwd, 'fig_rotated')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reynolds (→ Re_lambda) and Froude numbers — taken from the run's tlab.ini
+# ─────────────────────────────────────────────────────────────────────────────
+# The run's own tlab.ini is the source of truth for the two case-defining
+# parameters, overriding the values imported via `from config import *` above:
+#   • Reynolds → Re_lambda  (tlab's parameter = 1/nu = 0.5·Re_D²).  nu, Re (= Re_D)
+#     and the inner scalings (Re_tau, l_visc/l_in/wall_units) are RE-DERIVED from it
+#     here so the whole script is self-consistent.  These l_* are preliminary
+#     (config's prescribed u_star); the per-case Method-2 u_star measured from the
+#     data later re-refreshes l_in/y_in (see the "Refresh inner/outer scalings"
+#     block), but nu is fixed HERE and is what that refresh uses.
+#   • Froude → Fr.  A finite Fr is a STRATIFIED run (Obukhov wall law, the
+#     `_stratified = np.isfinite(Fr)` gate); if 'Froude=' is absent the input
+#     carries no buoyancy forcing ⇒ Fr = ∞ (neutral, classical log law).
+# tlab.ini MUST be present (it defines the run) — its absence stops the script.
+# Format (INI, one key=value per line, no spaces):
+#     [Parameters]
+#     Reynolds=125000
+#     Schmidt=1.0
+#     Rossby=1.0
+#     Froude=1
+_tlab_ini = os.path.join(cwd, 'tlab.ini')
+if not os.path.isfile(_tlab_ini):
+    raise SystemExit('[PhAvg_rotated] tlab.ini not found in %s — cannot determine '
+                     'the Reynolds/Froude numbers; stopping execution.' % cwd)
+with open(_tlab_ini, 'r') as _fh:
+    _tlab_lines = _fh.readlines()
+
+def _tlab_value(_key, _lines=_tlab_lines):
+    """Token written after the literal '<key>' (e.g. 'Froude=') in tlab.ini; None
+    if the key never appears.  Takes the first whitespace token and drops any
+    inline #/; comment.  (_lines bound as a default at def-time so the later
+    `del _tlab_lines` does not affect it.)"""
+    for _ln in _lines:
+        _i = _ln.find(_key)
+        if _i == -1:
+            continue
+        _tok = _ln[_i + len(_key):].strip()
+        _tok = _tok.split()[0] if _tok.split() else ''
+        return _tok.split('#')[0].split(';')[0].strip()
+    return None
+
+# Reynolds → Re_lambda (+ the derived nu / Re / preliminary inner scalings)
+_re_str = _tlab_value('Reynolds=')
+if _re_str is None:
+    print('[config] tlab.ini has no "Reynolds=" — keeping config Re_lambda = %s' % Re_lambda)
+else:
+    try:
+        Re_lambda = float(_re_str)
+    except ValueError:
+        raise SystemExit('[PhAvg_rotated] could not parse the Reynolds value %r from '
+                         'tlab.ini; stopping execution.' % _re_str)
+    nu         = 1.0 / Re_lambda            # tlab Re_lambda = 1/nu
+    Re         = np.sqrt(2.0 * Re_lambda)   # Re_D = sqrt(2·Re_lambda)
+    Re_tau     = (u_star**2) / nu           # preliminary (config u_star); refreshed post-fit
+    l_visc     = nu / u_star
+    l_in       = l_visc
+    wall_units = l_visc
+    print('[config] Reynolds from tlab.ini: Re_lambda = %s  (nu = %.3e, Re_D = %.2f)'
+          % (Re_lambda, nu, Re))
+
+# Froude → Fr  (finite ⇒ stratified; 'Froude=' absent ⇒ neutral, Fr = inf)
+_fr_str = _tlab_value('Froude=')
+if _fr_str is None:
+    Fr = np.inf
+    print('[config] tlab.ini has no "Froude=" → neutral run (Fr = inf)')
+else:
+    try:
+        Fr = float(_fr_str)
+    except ValueError:
+        raise SystemExit('[PhAvg_rotated] could not parse the Froude value %r from '
+                         'tlab.ini; stopping execution.' % _fr_str)
+    print('[config] Froude from tlab.ini: Fr = %s  (stratified)' % Fr)
+del _tlab_ini, _tlab_lines, _tlab_value, _re_str, _fr_str
+
+# All figures/plots are written to a SINGLE <data dir>/fig/ folder (shared with
+# PhAvg.py and results.py) — the rotated-frame variant no longer isolates its
+# output in fig_rotated/. Derivative caches still use the *_rot.npy suffix, so the
+# rotated and unrotated runs remain cache-isolated even though the figures merge.
+fig_dir = os.path.join(cwd, 'fig')
 os.makedirs(fig_dir, exist_ok=True)
 x, y, z = read_grid(cwd)               # x: streamwise (periodic), y: wall-normal, z: spanwise
 nx = np.size(x)
@@ -1322,21 +1401,45 @@ if (1 == postprocess):
         print("[research] Mean*Theta.npy absent — turbulent buoyancy flux = 0 "
               "(run PhAvgAllPlanes.py with save_avg=1 to generate them).")
 
-    # Wall-normal (v = meteorological vertical) buoyancy flux ⟨w'θ'⟩ components:
-    #   dispersive (form-induced)  ṽ·b̃          — exact, from the mean fields
-    #   temporal   (Route C)       ⟨v̄·θ̄⟩_t − v̄·θ̄  — resolved / wave-scale covariance
-    vtheta_disp = DispVelV * dispScal
-    utheta_disp = DispVelU * dispScal                       # rotated streamwise (DispVelU already rotated)
+    # Frame-consistency of the HORIZONTAL flux components: MeanUTheta/MeanWTheta are
+    # the raw products ⟨u·s⟩/⟨w·s⟩ loaded AFTER the frame rotation, so they are still
+    # in the unrotated frame while AvgPhU/AvgPhW are already rotated. The products are
+    # LINEAR in the velocity and s is a rotation-invariant scalar, so the horizontal
+    # buoyancy-flux vector rotates EXACTLY like the velocity — apply the SAME
+    # rotate_pair (_rc,_rs) used on AvgPhU/AvgPhW (LOCKED block above) so the turbulent
+    # split below is differenced against consistently-rotated means. The wall-normal
+    # ⟨v·s⟩ is the rotation axis → invariant, left untouched.
     if _have_flux:
+        MeanUTheta, MeanWTheta = rotate_pair(MeanUTheta, MeanWTheta, _rc, _rs)
+
+    # Buoyancy-flux VECTOR components ⟨u_i'θ'⟩ = dispersive (form-induced) ũ_i·b̃
+    #   + temporal (Route C) ⟨ū_i·θ̄⟩_t − ū_i·θ̄.  Engineering: u=streamwise,
+    #   v=WALL-NORMAL (meteorological vertical), w=spanwise. DispVelU/W are rotated,
+    #   DispVelV is the wall-normal rotation axis.
+    utheta_disp = DispVelU * dispScal                       # rotated streamwise
+    vtheta_disp = DispVelV * dispScal                       # wall-normal (met. vertical)
+    wtheta_disp = DispVelW * dispScal                       # rotated spanwise
+    if _have_flux:
+        utheta_temp = (MeanUTheta - AvgPhU * AvgScal) * mask0
         vtheta_temp = (MeanVTheta - AvgPhV * AvgScal) * mask0
+        wtheta_temp = (MeanWTheta - AvgPhW * AvgScal) * mask0
         thetavar    = (MeanThTh  - AvgScal * AvgScal) * mask0   # scalar variance ⟨θ'θ'⟩ (temporal)
     else:                                                   # no cross-moments → temporal flux unknown (0)
+        utheta_temp = np.zeros_like(AvgScal)
         vtheta_temp = np.zeros_like(AvgScal)
+        wtheta_temp = np.zeros_like(AvgScal)
         thetavar    = np.zeros_like(AvgScal)
 
-    Bflux_disp = avg_c(eps, vtheta_disp, axis=1)            # ⟨ṽb̃⟩(z)
-    Bflux_temp = avg_c(eps, vtheta_temp, axis=1)            # ⟨v'θ'⟩(z) temporal
-    Bflux      = Bflux_disp + Bflux_temp                    # total wall-normal buoyancy flux(z)
+    # x-averaged (fluid-only) buoyancy-flux profiles ⟨u_i'b'⟩(z): disp + temporal + total.
+    Uflux_disp = avg_c(eps, utheta_disp, axis=1)           # ⟨ũb̃⟩(z) streamwise
+    Uflux_temp = avg_c(eps, utheta_temp, axis=1)           # ⟨u'b'⟩(z) temporal
+    Uflux      = Uflux_disp + Uflux_temp                   # total streamwise buoyancy flux(z)
+    Bflux_disp = avg_c(eps, vtheta_disp, axis=1)           # ⟨ṽb̃⟩(z)
+    Bflux_temp = avg_c(eps, vtheta_temp, axis=1)           # ⟨v'θ'⟩(z) temporal (wall-normal)
+    Bflux      = Bflux_disp + Bflux_temp                   # total wall-normal buoyancy flux(z)
+    Wflux_disp = avg_c(eps, wtheta_disp, axis=1)           # ⟨w̃b̃⟩(z) spanwise
+    Wflux_temp = avg_c(eps, wtheta_temp, axis=1)           # ⟨w'b'⟩(z) temporal
+    Wflux      = Wflux_disp + Wflux_temp                   # total spanwise buoyancy flux(z)
 
     # ──────────────────────────────────────────────────────────────────────────
     # GOAL 1 — Translate the control: B_0, Ri_B, Obukhov length, stability axis
@@ -1493,11 +1596,14 @@ if (1 == postprocess):
     # Primary source: planesK.* (or flow.*.1/2) IN THIS DIRECTORY — real
     # instantaneous frames, time-averaged here exactly as the paper defines γ,
     # with NO spatial averaging in any direction. Only when no such raw frames
-    # are available locally does this fall back to a RAW K-plane (fixed
-    # spanwise index) `<prefix>_slice_z####.npz` written by
-    # MyPyLib/Intermittency.py on the cluster — deliberately NOT the
-    # spanwise-mean `<prefix>_xy.npz`, which time+space-averages away the real
-    # patchy turbulent/quiescent structure this diagnostic exists to show.
+    # are available locally does this fall back to a single VERTICAL (x, wall-
+    # normal z) γ plane written by MyPyLib/Intermittency.py on the cluster —
+    # either a `<prefix>_planesK_k####.npz` (--from-planesK, PREFERRED; carries
+    # the instantaneous high-pass |ω'_z| too) or the older
+    # `<prefix>_slice_z####.npz` (--slice z, fixed spanwise index) — deliberately
+    # NOT the spanwise-mean `<prefix>_xy.npz` nor the HORIZONTAL
+    # `<prefix>_planesJ_j####.npz`, which average/reduce away the real patchy
+    # turbulent/quiescent structure this diagnostic exists to show.
     gamma_z = None;  gamma_field = None;  omega_rms_z = None
     e_omega = None;  omega0 = None;  omega_inst_raw = None;  omega_inst_hp = None
     if (1 == compute_intermittency):
@@ -1583,23 +1689,34 @@ if (1 == postprocess):
                       f"ω₀ = {omega_thresh_factor:g}·ω_rms(δ) = {omega0:.4g}, "
                       f"max γ = {float(np.nanmax(gamma_z)):.2f}.")
         else:
-            # No raw instantaneous data locally — fall back to a RAW K-plane
-            # (fixed spanwise index) written by Intermittency.py on the cluster.
-            # Deliberately NOT the spanwise-mean *_xy.npz: averaging over the
-            # full spanwise extent is exactly the destructive reduction this
-            # diagnostic exists to avoid. Multiple *_slice_z*.npz (different
-            # spanwise locations) are NOT averaged together either, for the
-            # same reason — the first one found is used as-is.
-            _kplanes = sorted(_glob.glob(cwd + '*_slice_z*.npz'))
+            # No raw instantaneous data locally — fall back to a single VERTICAL
+            # (x, wall-normal z) γ plane written by Intermittency.py on the
+            # cluster.  Two producers, both shape (ny, nx):
+            #   • `<prefix>_planesK_k####.npz`  (--from-planesK: ω_z' on a fixed
+            #     spanwise k-slot) — the purpose-built γ(x,z) plane, PREFERRED,
+            #     and it carries the instantaneous high-pass |ω'_z| ('omega_hp')
+            #     for the Fig-2 panel below;
+            #   • `<prefix>_slice_z####.npz`    (--slice z: a fixed spanwise index
+            #     of the full 3-D γ) — the older single-index slice.
+            # Deliberately NOT the spanwise-mean *_xy.npz nor the HORIZONTAL
+            # *_planesJ_j####.npz ((nz,nx) x–z_span plane, wrong orientation for
+            # γ(z)): averaging/reducing over the spanwise extent is exactly the
+            # destructive reduction this diagnostic exists to avoid. Multiple
+            # matching planes (different spanwise locations) are NOT averaged
+            # together either, for the same reason — the first found is used as-is.
+            _kplanes = (sorted(_glob.glob(cwd + '*_planesK_k*.npz')) or
+                        sorted(_glob.glob(cwd + '*_slice_z*.npz')))
             if not _kplanes:
                 print("[research] intermittency: no planesK.*, flow.*.[12], or "
-                      "*_slice_z*.npz — γ skipped.")
+                      "cluster γ plane (*_planesK_k*.npz / *_slice_z*.npz) — γ skipped.")
             else:
                 _npz_path = _kplanes[0]
                 _d = np.load(_npz_path, allow_pickle=True)
-                if 'gamma' not in _d.files or tuple(_d['gamma'].shape) != (ny, nx):
+                _gshape = tuple(_d['gamma'].shape) if 'gamma' in _d.files else None
+                if _gshape != (ny, nx):
                     print(f"[research] intermittency: {os.path.basename(_npz_path)} "
-                          f"gamma missing/shape mismatch — γ skipped.")
+                          f"gamma {_gshape or 'absent'} ≠ grid ({ny},{nx}) — γ skipped "
+                          "(a *_planesJ_j*.npz horizontal plane will trip this).")
                 else:
                     try:
                         _meta = _ast.literal_eval(str(_d['meta']))
@@ -1609,15 +1726,22 @@ if (1 == postprocess):
                     _gden = np.sum(_mom, axis=1)
                     gamma_z = np.divide(np.sum(gamma_field, axis=1), _gden,
                                         out=np.zeros_like(_gden), where=_gden > 0)
+                    # instantaneous high-pass |ω'_z| for the Fig-2 panel, if the
+                    # plane carried it (planesK writes 'omega_hp'); no RAW field
+                    # is stored, so panel (c) then shows the high-pass alone.
+                    if ('omega_hp' in _d.files and
+                            tuple(_d['omega_hp'].shape) == (ny, nx)):
+                        omega_inst_hp = np.nan_to_num(_d['omega_hp'], nan=0.0) * _mom
                     _o = _meta.get('omega0')
                     omega0 = float(_o) if _o is not None else float('nan')
                     _n2 = _meta.get('n_used', _meta.get('n_snapshots', '?'))
+                    _src = _meta.get('source', 'slice-z')
                     if len(_kplanes) > 1:
-                        print(f"[research] {len(_kplanes)} *_slice_z*.npz found; "
+                        print(f"[research] {len(_kplanes)} cluster γ plane(s) found; "
                               f"using {os.path.basename(_npz_path)} only (one "
                               f"spanwise location — not averaged across planes).")
                     print(f"[research] intermittency from {os.path.basename(_npz_path)} "
-                          f"(Intermittency.py K-plane, cluster, {_n2} snapshot(s) "
+                          f"(Intermittency.py {_src} plane, cluster, {_n2} snapshot(s) "
                           f"time-averaged); ω₀ = {omega0:.4g}, "
                           f"max γ = {float(np.nanmax(gamma_z)):.2f}.")
     # ══════════════════════════════════════════════════════════════════════════
@@ -1665,6 +1789,54 @@ if (1 == postprocess):
         print('[research]   NOTE: Fr=inf (neutral) — no stratification, so m(x,z) '
               'reflects topographic forcing, NOT a propagating internal gravity '
               'wave. The field is physically a wave wavenumber only for finite Fr.')
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Instantaneous fluctuation planes  inst_u/v/w/scal  (raw-record read → pickle)
+    # ──────────────────────────────────────────────────────────────────────────
+    # The instantaneous-snapshot figures (results.py P19–P22) need one x–y plane of
+    # the turbulent fluctuation u'ᵢ = uᵢ − ⟨uᵢ⟩ₓ.  That is the ONLY quantity derived
+    # from a RAW record (flow.<tag>.{1,2,3} / scal.<tag>.1); reading raw records is
+    # a stage-a/b job, never stage c.  So it is computed HERE (stage b, which already
+    # reads raw planes for the phase-average + intermittency) and pickled, so
+    # results.py merely READS inst_* — no flow.*/scal.* touched downstream.
+    # Fluctuation = z-plane 1 minus its x-mean, solid zeroed by mask0, stored float32
+    # (identical to the former results.py _inst_fluct).  Component→file map matches
+    # results.py: inst_u=flow.*.1, inst_v=flow.*.2 (wall-normal), inst_w=flow.*.3
+    # (spanwise), inst_scal=scal.*.1.  A truncated/absent download is skipped, and
+    # the corresponding key is simply not pickled (results.py then skips that panel).
+    import glob as _iglob
+    inst_u = inst_v = inst_w = inst_scal = None
+    for _icomp, _iname in (('1', 'inst_u'), ('2', 'inst_v'),
+                           ('3', 'inst_w'), ('scal', 'inst_scal')):
+        _ipat  = (cwd + 'scal.*.1') if _icomp == 'scal' else (cwd + 'flow.*.' + _icomp)
+        _ihits = sorted(_iglob.glob(_ipat))
+        if not _ihits:
+            continue
+        _ipath = _ihits[-1]
+        try:
+            _ihdr, _inx, _iny, *_ = read_header(_ipath)
+        except Exception as _ie:
+            print('[inst] header read failed for %s: %s' % (os.path.basename(_ipath), _ie))
+            continue
+        if _ihdr is None or _inx is None or _iny is None:
+            continue
+        # Only the header + first x–y plane are guaranteed present (downloads are
+        # deliberately truncated to ~header+one plane); confirm before reading.
+        if os.path.getsize(_ipath) < int(_ihdr) + int(_inx) * int(_iny) * 8:
+            print('[inst] %s truncated below one full %dx%d plane — skipped.'
+                  % (os.path.basename(_ipath), _inx, _iny))
+            continue
+        try:
+            _ipl = readplane(_ipath, _inx, _iny, 1, _ihdr)
+        except Exception as _ie:
+            print('[inst] plane read failed for %s: %s' % (os.path.basename(_ipath), _ie))
+            continue
+        _ifl = (_ipl - _ipl.mean(axis=1, keepdims=True))
+        if _ifl.shape == mask0.shape:
+            _ifl = _ifl * mask0
+        globals()[_iname] = _ifl.astype(np.float32)
+        print('[inst] %s ← %s (z-plane 1 fluctuation, pickled)'
+              % (_iname, os.path.basename(_ipath)))
 
     # Bundle every post-processed field listed in IO.var_names into sim1_results.pkl
     # (consumed cross-case by results.py).  IO.write_results_pickle skips names not
@@ -2049,12 +2221,15 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], AvgP[:limity,:],'',r'$\left\langle\overline{(P_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 05] Potential Temperature
     plot2D_div(x_in, y_in[:limity], AvgScal[:limity,:],'',r'$\left\langle\overline{(\theta)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Potential Temperature' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 06] (field map)
+    # [PLOT 06] Phase-averaged mean velocity field (in-plane streamlines +
+    #           spanwise-velocity contour; yaw angle; 3-D speed)
     plot_phavg_velocity_3D(x_in, y_in[:limity],
                            AvgPhU[:limity,:], AvgPhV[:limity,:], AvgPhW[:limity,:],
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'PhAvg_3D_velocity.png')
+                           cwd + '/fig/' + 'PhAvg_3D_velocity.png',
+                           title=r'Phase-averaged mean velocity field  '
+                                 r'$\langle\overline{u}_i\rangle(x^+,z^+)$')
 
     # %% ###########################################################################
     # Dispersive Velocity Component
@@ -2068,12 +2243,15 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 10b] DispScal (dispersive potential temperature / buoyancy)
     plot2D_div(x_in, y_in[:limity], DispScal[:limity,:],'',r'$\widetilde{\theta}(x,z) = \langle\overline{\theta}\rangle(x,z) - \langle\overline{\theta}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispScal' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 11] (field map)
+    # [PLOT 11] Dispersive velocity field (in-plane dispersive streamlines +
+    #           spanwise dispersive-velocity contour; yaw angle; 3-D speed)
     plot_phavg_velocity_3D(x_in, y_in[:limity],
                            DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'Disp_3D_velocity.png')
+                           cwd + '/fig/' + 'Disp_3D_velocity.png',
+                           title=r'Dispersive velocity field  '
+                                 r'$\widetilde{u}_i(x^+,z^+)$')
     
     # %% ###########################################################################    
     # Streamlines and vorticity
@@ -3835,7 +4013,7 @@ if (1 == plotRes):
 
     # ══════════════════════════════════════════════════════════════════════════
     # ░░  RESEARCH DIAGNOSTICS PLOTS  ░░   (8 goals — Research.md:536-550)
-    # All saved to fig_rotated/; gated terms degrade gracefully in the neutral run.
+    # All saved to fig/; gated terms degrade gracefully in the neutral run.
     # ══════════════════════════════════════════════════════════════════════════
     _zr   = y_in[:limity]
     _cols = {'windward': 'b', 'floor': 'g', 'lee': 'r'}
@@ -3855,6 +4033,28 @@ if (1 == plotRes):
     axRb.set_title('Buoyancy flux split' + ('' if _strat else '  (neutral $\\approx$ 0)'))
     axRb.legend(fontsize=8); axRb.grid(True, ls='--', lw=0.5)
     plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_flux_split.png'), dpi=300); plt.show()
+
+    # ── [R1b] Buoyancy-flux VECTOR components ⟨u'b'⟩,⟨v'b'⟩,⟨w'b'⟩ (Goal 4) ──────
+    # The three individual components of the phase-averaged buoyancy flux from
+    # avg_flux* (streamwise u·s, wall-normal/vertical v·s, spanwise w·s), each split
+    # into dispersive (ũ_i b̃) + temporal (Route C). Rotated frame: u,w are in the
+    # geostrophic-aligned frame (raw products rotated with rotate_pair above).
+    figR, _axF = plt.subplots(1, 3, figsize=(15, 6), dpi=300, sharey=True)
+    for _ax, (_dsp, _tmp, _tot, _ttl) in zip(
+            _axF,
+            ((Uflux_disp, Uflux_temp, Uflux, r"streamwise $\langle u'b'\rangle$"),
+             (Bflux_disp, Bflux_temp, Bflux, r"wall-normal $\langle v'b'\rangle$"),
+             (Wflux_disp, Wflux_temp, Wflux, r"spanwise $\langle w'b'\rangle$"))):
+        _ax.plot(_tmp[:limity], _zr, 'b-',  lw=1.5, label='turbulent (Route C)')
+        _ax.plot(_dsp[:limity], _zr, 'r--', lw=1.5, label='dispersive')
+        _ax.plot(_tot[:limity], _zr, 'k:',  lw=1.5, label='total')
+        _ax.axhline(y_in[hill_hgt], color='k', ls=':', lw=0.8)
+        _ax.axvline(0.0, color='0.6', lw=0.6)
+        _ax.set_xlabel(_ttl); _ax.grid(True, ls='--', lw=0.5)
+    _axF[0].set_ylabel(r'$z^+$'); _axF[0].legend(fontsize=8)
+    figR.suptitle('Buoyancy-flux vector components (avg_flux)'
+                  + ('' if _strat else '  (neutral $\\approx$ 0)'))
+    plt.tight_layout(); plt.savefig(os.path.join(fig_dir, 'Research_flux_components.png'), dpi=300); plt.show()
 
     # ── [R2] Dispersive flux share — momentum & buoyancy (Goal 4) ──────────────
     figR, axR = plt.subplots(figsize=(7, 6), dpi=300)
@@ -3969,9 +4169,15 @@ if (1 == plotRes):
         #     patches stand out; the raw panel is background-dominated (their point).
         if omega_inst_hp is not None:
             _sc = nu / u_star**2
-            figO, axO = plt.subplots(1, 2, figsize=(14, 4.5), dpi=300, sharey=True)
-            for _ax, _fld, _ttl in ((axO[0], omega_inst_raw, r'raw $|\omega_z|$'),
-                                    (axO[1], omega_inst_hp, r"high-pass $|\omega'_z|$")):
+            # raw |ω_z| may be absent — a cluster γ plane (*_planesK_k*.npz)
+            # stores only the high-pass field — so plot whichever panels exist.
+            _panels = [(_f, _t) for _f, _t in
+                       ((omega_inst_raw, r'raw $|\omega_z|$'),
+                        (omega_inst_hp,  r"high-pass $|\omega'_z|$")) if _f is not None]
+            figO, axO = plt.subplots(1, len(_panels), figsize=(7 * len(_panels), 4.5),
+                                     dpi=300, sharey=True, squeeze=False)
+            axO = axO[0]
+            for _ax, (_fld, _ttl) in zip(axO, _panels):
                 _m = np.abs(_fld[:limity, :]) * _sc
                 _vmax = float(np.nanpercentile(_m[_m > 0], 99)) if np.any(_m > 0) else 1.0
                 _cf = _ax.contourf(x_in, y_in[:limity], _m,

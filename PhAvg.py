@@ -1585,12 +1585,15 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], AvgP[:limity,:],'',r'$\left\langle\overline{(P_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 05] Potential Temperature
     plot2D_div(x_in, y_in[:limity], AvgScal[:limity,:],'',r'$\left\langle\overline{(\theta)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Potential Temperature' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 06] (field map)
+    # [PLOT 06] Phase-averaged mean velocity field (in-plane streamlines +
+    #           spanwise-velocity contour; yaw angle; 3-D speed)
     plot_phavg_velocity_3D(x_in, y_in[:limity],
                            AvgPhU[:limity,:], AvgPhV[:limity,:], AvgPhW[:limity,:],
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'PhAvg_3D_velocity.png')
+                           cwd + '/fig/' + 'PhAvg_3D_velocity.png',
+                           title=r'Phase-averaged mean velocity field  '
+                                 r'$\langle\overline{u}_i\rangle(x^+,z^+)$')
 
     # %% ###########################################################################
     # Dispersive Velocity Component
@@ -1602,12 +1605,15 @@ if (1 == plotRes):
     plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:],'',r'$\widetilde{V}_y(x,z) = \left\langle\overline{(V_y)}\right\rangle(x, z) - (\langle \overline{V}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 10] DispP
     plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 11] (field map)
+    # [PLOT 11] Dispersive velocity field (in-plane dispersive streamlines +
+    #           spanwise dispersive-velocity contour; yaw angle; 3-D speed)
     plot_phavg_velocity_3D(x_in, y_in[:limity],
                            DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
-                           cwd + '/fig/' + 'Disp_3D_velocity.png')
+                           cwd + '/fig/' + 'Disp_3D_velocity.png',
+                           title=r'Dispersive velocity field  '
+                                 r'$\widetilde{u}_i(x^+,z^+)$')
     
     # %% ###########################################################################    
     # Streamlines and vorticity

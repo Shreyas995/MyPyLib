@@ -995,13 +995,19 @@ def plot2D_streamlines_vorticityX(x, y, U, V, vorticity, field_label, title_pref
     plt.savefig(savename, dpi=300, format='png', transparent=False)
     plt.show()
 
-def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savename):
+def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savename,
+                           title=''):
     """
-    Three-panel figure visualising the 3D phase-averaged velocity (U, V, W) on a 2D (x,y) domain.
+    Three-panel figure visualising a 3-component velocity field (U, V, W) on a 2D (x,y) domain.
 
     Panel 1 — In-plane (U,V) streamlines; background colour = spanwise W.
     Panel 2 — Out-of-plane yaw angle arctan2(W, sqrt(U²+V²)) in degrees.
     Panel 3 — Total 3D speed sqrt(U²+V²+W²) with (U,V) streamlines overlaid.
+
+    The overlay is a filled-contour (spanwise component) + streamline (in-plane
+    vector field) view of the SAME velocity triad; ``title`` names WHICH field is
+    shown — e.g. the phase-averaged MEAN velocity ⟨ū_i⟩ or the DISPERSIVE velocity
+    ũ_i — since the two are otherwise identical apart from the input arrays.
 
     Parameters
     ----------
@@ -1013,6 +1019,7 @@ def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savenam
     resolution : int  number of points for the uniform y-grid used by streamplot
     xfill, yfill : IBM polygon coordinates for the solid fill
     savename   : str  output file path
+    title      : str  optional figure-level name (suptitle) identifying the field
     """
     y_uniform = np.linspace(y.min(), y.max(), resolution)
     X, Y = np.meshgrid(x, y_uniform, indexing='xy')
@@ -1074,7 +1081,11 @@ def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savenam
     ax.set_title(r'3D resultant speed; streamlines = in-plane $(U,V)$')
     ax.legend(handles=[ibm_patch], fontsize=7)
 
-    plt.tight_layout()
+    if title:
+        fig.suptitle(title, fontsize=14)
+        plt.tight_layout(rect=[0, 0, 1, 0.98])
+    else:
+        plt.tight_layout()
     plt.savefig(savename, dpi=300, bbox_inches='tight')
     plt.show()
 

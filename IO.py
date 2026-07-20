@@ -132,6 +132,11 @@ var_names = [
     # -------------------------------------------------------------------------
     'du_dy', 'du_dx', 'dv_dy', 'dv_dx', 'dw_dy', 'dw_dx',
 
+    # Second wall-normal derivative ∂²⟨u⟩/∂z² (2D) — computed in the momentum-budget
+    # block with the compact D2Y scheme.  Pickled so results.py (stage c) reads it
+    # for the profile-inflection panel instead of rebuilding it from du_dy.
+    'd2u_dy2',
+
     # Spatial derivatives of dispersive velocity  (2D)
     'dud_dy', 'dud_dx', 'dvd_dy', 'dvd_dx', 'dwd_dy', 'dwd_dx',
 
@@ -201,6 +206,15 @@ var_names = [
     'inst_alpha',
 
     # -------------------------------------------------------------------------
+    # Instantaneous fluctuation planes  u'ᵢ = uᵢ − ⟨uᵢ⟩ₓ  (one x–y plane, ny×nx,
+    # float32).  Derived from a RAW record (flow.<tag>.{1,2,3} / scal.<tag>.1) in
+    # PhAvg_rotated.py — the ONLY raw-record read in the pipeline's local stages —
+    # and pickled so results.py (stage c) never opens flow.*/scal.* itself.
+    #   inst_u=flow.*.1  inst_v=flow.*.2 (wall-normal)  inst_w=flow.*.3 (spanwise)
+    #   inst_scal=scal.*.1
+    'inst_u', 'inst_v', 'inst_w', 'inst_scal',
+
+    # -------------------------------------------------------------------------
     # Log-law reference profiles (Monin–Obukhov similarity theory)
     # -------------------------------------------------------------------------
     'u_most', 'u_most_v', 'y0',
@@ -215,6 +229,11 @@ var_names = [
     # Wall-normal (v = meteorological vertical) buoyancy fluxes  ⟨w'θ'⟩
     'vtheta_disp', 'vtheta_temp', 'utheta_disp', 'thetavar',
     'Bflux_disp', 'Bflux_temp', 'Bflux',
+    # Full buoyancy-flux VECTOR ⟨u_i'b'⟩(z): streamwise (U) + spanwise (W)
+    # components (the wall-normal one is Bflux above). Each split dispersive +
+    # temporal. Consumed by results.py's cross-case flux-components mirror (R1b).
+    'Uflux_disp', 'Uflux_temp', 'Uflux',
+    'Wflux_disp', 'Wflux_temp', 'Wflux',
 
     # Goal 1 — control translation (Ri_B, Obukhov, stability axis)
     'B_0', 'Ri_B', 'delta_neu_eff', 'B_s', 'b_star', 'G_mag',
