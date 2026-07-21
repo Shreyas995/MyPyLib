@@ -2445,6 +2445,33 @@ if (1 == plotRes):
     plt.savefig(os.path.join(fig_dir, 'Rotation_angle_outer.png'), dpi=300)
     plt.show()
 
+    # [PLOT 28c] Rotation angle — 2-D CONTOUR alpha(x+, z+) in RADIANS.
+    # Single-case counterpart of results.py / results_Re.py "P29b": the wind
+    # turning angle of the PHASE-AVERAGED field,
+    #     alpha(x,z) = arctan2(<W>, <U>)          [engineering AvgPhW / AvgPhU]
+    # i.e. met. arctan(<v>/<u>) with v = spanwise.  arctan2 (not arctan of the
+    # ratio) keeps it bounded in [-pi, pi] where <U> reverses inside the valley,
+    # the same fix the 1-D [PLOT 28] uses.  Solid cells are NaN'd so they neither
+    # set the colour limits nor paint a spurious arctan2(0,0) = 0 in the
+    # recirculation region.  RADIANS here (the 1-D plots above stay in degrees).
+    _ang_2d = np.arctan2(AvgPhW, AvgPhU)
+    _ang_2d = np.where(eps >= 0.5, np.nan, _ang_2d)
+    _amax   = float(np.nanmax(np.abs(_ang_2d[:limity, :]))) if np.any(
+        np.isfinite(_ang_2d[:limity, :])) else np.pi
+    plt.figure(figsize=(8, 6), dpi=300)
+    _cfa = plt.contourf(x_in, y_in[:limity], _ang_2d[:limity, :],
+                        levels=50, cmap='RdBu_r', vmin=-_amax, vmax=_amax)
+    _cla = plt.contour(x_in, y_in[:limity], np.nan_to_num(_ang_2d[:limity, :]),
+                       levels=12, colors='k', linewidths=0.4, alpha=0.5)
+    plt.clabel(_cla, inline=True, fontsize=6, fmt='%.2f')
+    plt.fill(x_oro_in, y_oro_in, facecolor='black')          # IBM solid
+    plt.colorbar(_cfa, label=r'$\alpha$ (rad)')
+    plt.xlabel(r'$x^+$')
+    plt.ylabel(r'$z^+$')
+    plt.title(r'Wind turning angle $\alpha=\arctan(\langle v\rangle/\langle u\rangle)$ (rad)')
+    plt.savefig(os.path.join(fig_dir, 'P28c_TurningAngle2D.png'), dpi=300)
+    plt.show()
+
     # %%###########################################################################
     # ╔══════════════════════════════════════════════════════════════════════════╗
     # ║  🔒 LOCKED — VALIDATED FIG-4 ASSEMBLY + PLOTS 29–32.  DO NOT MODIFY.       ║
@@ -4524,6 +4551,30 @@ if plot_spectra == 1:
             # Inner (wall) units: kx+ = kx*l_in,  E+ = E/(u*^2 * l_in)  (dimensionless)
             kx_plus = kx * l_in
             E_plus  = {vi: _E_acc[vi] / (u_star ** 2 * l_in) for vi in _E_acc}
+
+            # ---- Export for the cross-case comparison (stage c, spectra.py) -----
+            # This block runs LONG after IO.write_results_pickle() (line ~1846), so
+            # these arrays cannot ride in sim1_results.pkl.  Write a small .npz
+            # instead -- a sanctioned pipeline intermediate (cf. Intermittency.py),
+            # so spectra.py never has to touch a raw record itself.
+            _spec_npz = os.path.join(cwd, 'spectra_turb.npz')
+            _spec_out = {
+                'kx_plus': kx_plus,          # (nk,)  inner-scaled wavenumber
+                'y_in':    np.asarray(y_in), # (ny,)  z+ of each row
+                'u_star':  float(u_star),
+                'l_in':    float(l_in),
+                'n_frames': int(_nf),
+                'source':  ('flow-field plane 1' if _frames[0][0] == 'flow'
+                            else 'planesK'),
+            }
+            for _vi, _nm in ((0, 'E_uu'), (1, 'E_vv'), (2, 'E_ww')):
+                if _E_cnt.get(_vi, 0) > 0:   # only components that actually appeared
+                    _spec_out[_nm] = E_plus[_vi]          # (ny, nk), density in + units
+                    _spec_out[_nm + '_nframes'] = int(_E_cnt[_vi])
+            np.savez_compressed(_spec_npz, **_spec_out)
+            print(f'[spectra] saved {_spec_npz} '
+                  f'({", ".join(k for k in ("E_uu", "E_vv", "E_ww") if k in _spec_out)}; '
+                  f'{_nf} frame(s)) for cross-case spectra.py.')
 
             # Choose heights above the crest, below the sponge, nearest the targets.
             _j_lo = int(hill_hgt) + 2

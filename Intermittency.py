@@ -85,6 +85,9 @@ the eq. 4.1 time-average of the pointwise Heaviside indicator (the definition of
     # --pk-nvars/--pj-nvars (default 5 = u,v,w,s1,p); override if PLANES_LOG added
     # log(enstrophy)/log(grad s) columns.  --omega0 lets J run without a K in the
     # same call.  Plot locally the same way: --plot <prefix>_planesK_k0000.npz
+    # The K npz carries BOTH the raw 'gamma' and 'gamma_field_disp' — the same
+    # mask-aware box-smoothed DISPLAY field PhAvg_rotated.py builds for its
+    # Research_intermittency_gamma2D figure (--smooth-knl, 0 disables).
 
 Coordinates (tlab engineering): axis0 = y wall-normal, axis1 = x streamwise
 (periodic), axis2 = z spanwise (periodic).  Velocity components on disk:
@@ -523,7 +526,10 @@ def plot_npz(npz_path, out_png=None, field=None):
                          levels=np.linspace(0, 1, 21) if is_gamma else 21,
                          cmap='hot_r' if is_gamma else 'RdBu_r')
         if is_gamma:
-            ax.contour(ax_h, ax_v, np.nan_to_num(fplane), levels=[0.5],
+            # the γ=0.5 turbulent/non-turbulent border is drawn from the RAW
+            # field even when the smoothed display field is the one filled.
+            fborder = d['gamma'] if 'gamma' in d.files else fplane
+            ax.contour(ax_h, ax_v, np.nan_to_num(fborder), levels=[0.5],
                        colors='cyan', linewidths=1.0)
         plt.colorbar(cf, ax=ax, label=name)
         ax.set_xlabel(h_label); ax.set_ylabel(v_label)
@@ -633,8 +639,37 @@ def _jplane_mask(eps, jnode, nz):
     return np.broadcast_to(er[:, None].astype(np.float64), (er.size, nz)).copy()
 
 
+def _win_sum(a, k, axis):
+    """Sliding-window sum of length k along `axis` (numpy only — no scipy)."""
+    c = np.cumsum(a, axis=axis)
+    zero = np.zeros_like(np.take(c, [0], axis=axis))
+    c = np.concatenate([zero, c], axis=axis)
+    n = a.shape[axis] - k + 1
+    return (np.take(c, np.arange(k, k + n), axis=axis)
+            - np.take(c, np.arange(0, n), axis=axis))
+
+
+def box_smooth_masked(field, mask, knl):
+    """Mask-aware k×k box filter of a (ny, nx) plane: periodic in x, edge-
+    replicated in y, and normalised by the mask so solid/near-wall zeros do not
+    bleed into fluid cells.  DISPLAY ONLY — the raw γ is left untouched.
+    numpy-only counterpart of PhAvg_rotated.py's scipy `uniform_filter` pair."""
+    if knl is None or knl < 2:
+        return field.astype(np.float64)
+    p = knl // 2
+    knl = 2 * p + 1                                   # force odd footprint
+
+    def _pad(a):
+        a = np.pad(a, ((p, p), (0, 0)), mode='edge')  # y: nearest
+        return np.pad(a, ((0, 0), (p, p)), mode='wrap')   # x: periodic
+
+    num = _win_sum(_win_sum(_pad(field * mask), knl, 0), knl, 1)
+    den = _win_sum(_win_sum(_pad(mask), knl, 0), knl, 1)
+    return np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+
+
 def gamma_from_planesK(files, x, y, kslot, nk, nvars, mask_er,
-                       factor, delta, vel_max):
+                       factor, delta, vel_max, smooth_knl=9):
     """Two-pass γ(x,y) on one k-slot: pass 1 → ω_rms(y), δ, ω₀ = factor·ω_rms(δ);
     pass 2 → γ = ⟨H(|ω_z'| − ω₀)⟩_t.  Returns a result dict."""
     ny, nx = y.size, x.size
@@ -700,7 +735,9 @@ def gamma_from_planesK(files, x, y, kslot, nk, nvars, mask_er,
     print(f"    [planesK k={kslot}] {n2} frame(s); δ at j={j_delta}, "
           f"z={float(y[j_delta]):.4g}; e_ω=ω_rms(δ)={e_omega:.4g}; "
           f"ω₀={factor:g}·e_ω={omega0:.4g}; max γ={float(np.nanmax(gamma_profile)):.2f}")
-    return {'gamma': gamma_field, 'gamma_profile': gamma_profile,
+    gamma_field_disp = box_smooth_masked(gamma_field, mask, smooth_knl)
+    return {'gamma': gamma_field, 'gamma_field_disp': gamma_field_disp,
+            'gamma_profile': gamma_profile,
             'omega_hp': omega_inst, 'omega0': omega0, 'e_omega': e_omega,
             'j_delta': j_delta, 'omega_rms': omega_rms, 'n_used': n2}
 
@@ -769,15 +806,18 @@ def run_plane_intermittency(args, workdir, x, y, z, eps, mask_er):
                 print(f"  [skip] k-slot {ks} >= n_kplanes {nk}.")
                 continue
             res = gamma_from_planesK(kfiles, x, y, ks, nk, args.pk_nvars, mask_er,
-                                     args.factor, args.delta, args.vel_max)
+                                     args.factor, args.delta, args.vel_max,
+                                     args.smooth_knl)
             if omega0 is None:
                 omega0 = res['omega0']                   # first K-slot fixes the reused ω₀
             meta = {'source': 'planesK', 'k_slot': ks, 'omega0': res['omega0'],
                     'e_omega': res['e_omega'], 'factor': args.factor,
                     'j_delta': res['j_delta'], 'n_used': res['n_used'],
+                    'smooth_knl': args.smooth_knl,
                     'component': "omega_z' = dv'/dx - du'/dy"}
             out = os.path.join(workdir, f'{prefix}_planesK_k{ks:04d}.npz')
-            fields = {'gamma': res['gamma']}
+            fields = {'gamma': res['gamma'],
+                      'gamma_field_disp': res['gamma_field_disp']}
             if res['omega_hp'] is not None:
                 fields['omega_hp'] = res['omega_hp']
             write_plane_npz(out, fields, x, y, 'x', 'z (wall-normal)', meta)
@@ -873,6 +913,10 @@ def main():
                     help='wall-normal grid index of each --from-planesJ slot '
                          '(comma list, same order) for terrain masking; omit if '
                          'the plane is above the valley crest (all-fluid).')
+    ap.add_argument('--smooth-knl', type=int, default=9,
+                    help='footprint (grid cells) of the mask-aware box filter that '
+                         'produces the DISPLAY field gamma_field_disp alongside the '
+                         'raw gamma in the planesK npz; 0/1 disables it [9]')
     ap.add_argument('--omega0', type=float, default=None,
                     help='explicit threshold (bypasses δ); lets --from-planesJ run '
                          'without a --from-planesK in the same call.')
