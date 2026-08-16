@@ -709,6 +709,554 @@ def epsVolume(eps,ny,nx, hill_hgt):
                 _eps_log('i: %d j: %d Case undefined' % (i, j))
     return eps_vol
 
+
+###############################################################################
+#  GENERALIZED (coarse-grained) SLOPE of the IBM indicator field eps
+# -----------------------------------------------------------------------------
+#  eps[j,i] is a STEP function (1 solid / 0 fluid), so the surface it encodes,
+#      h(x_i) = elevation of the solid/fluid interface in column i,
+#  is a STAIRCASE on the y-grid: constant over a "tread" of several columns, then
+#  jumping by one cell across a single column (a "riser").  A two-point derivative
+#  of that staircase is therefore NOT the terrain slope — it is exactly 0 on every
+#  tread and dy/dx (a SPIKE) on every riser.  Refining the stencil makes it worse,
+#  not better: the spikes grow as the stencil narrows.
+#
+#  The meaningful object is the GENERALIZED (distributional) derivative — the
+#  slope of the staircase COARSE-GRAINED over a finite streamwise window Δ,
+#
+#      s_Δ(x) = d/dx (G_Δ * h)(x),
+#
+#  which is what these helpers compute.  s_Δ is bounded by max|Δh|/Δ (so it can
+#  never spike), it converges to the true terrain slope once Δ exceeds the tread
+#  length, and it is independent of Δ over the plateau between "Δ too small
+#  (staircase spikes)" and "Δ too large (the terrain itself is smoothed away)".
+#  Scanning Δ and reading that plateau IS the method — see eps_slope_scan().
+#
+#  Three levels are provided:
+#    eps_surface_height()      staircase h(x) + j_surf, from eps
+#    generalized_slope()       1-D s_Δ(x)  at one scale Δ (moving least-squares)
+#    eps_slope_scan()          s_Δ for many Δ + the plateau pick + ES/rms/max
+#    eps_generalized_gradient()2-D dh/dx from ∇ of the MOLLIFIED indicator ε̄
+#  plus eps_tread_lengths(), which sets the smallest honest Δ.
+#
+#  ES = ⟨|dh/dx|⟩ is the standard "effective slope" roughness classifier
+#  (Napoli, Armenio & De Marchis, JFM 613, 2008):
+#      ES < 0.15  waviness   |  0.15–0.35 transitional  |  > 0.35 roughness.
+###############################################################################
+
+def eps_surface_height(eps, y, ref='mid'):
+    """Streamwise profile of the IBM solid/fluid interface elevation h(x).
+
+    Parameters
+    ----------
+    eps : (ny, nx) IBM indicator, 1 = solid, 0 = fluid (bottom-attached body).
+    y   : (ny,) wall-normal cell-centre coordinate.
+    ref : which cell centre defines the surface —
+            'fluid' : y[j_surf]                 (first FLUID cell; the y_w
+                                                 convention used elsewhere here)
+            'solid' : y[j_surf-1]               (last SOLID cell)
+            'mid'   : ½(y[j_surf-1] + y[j_surf])(interface midway between the
+                                                 two — the least biased estimate;
+                                                 DEFAULT)
+          The three differ by ≈ ½ cell, a near-constant offset inside the uniform
+          near-wall zone, so the SLOPE is insensitive to the choice.
+
+    Returns
+    -------
+    h      : (nx,) interface elevation per column, in the units of y.
+    j_surf : (nx,) int, index of the first FLUID cell in each column.
+    n_over : int, number of columns whose solid cells are NOT bottom-contiguous
+             (overhang / stray solid cell).  h is unreliable in those columns;
+             this is REPORTED, not silently repaired.
+    """
+    eps    = np.asarray(eps)
+    y      = np.asarray(y, dtype=np.float64)
+    ny, nx = eps.shape
+    solid  = eps > 0.5
+    # First fluid cell scanning UP from the floor: argmin of the boolean column
+    # returns the first False (= first fluid).  A fully solid column would give
+    # argmin = 0, so it is flagged explicitly.
+    j_surf = np.argmin(solid, axis=0).astype(int)
+    j_surf[solid.all(axis=0)] = ny
+    # Consistency check: for a bottom-attached body without overhangs the first
+    # fluid index equals the solid CELL COUNT (the eps_hgt used elsewhere).
+    n_over = int(np.count_nonzero(solid.sum(axis=0).astype(int) != j_surf))
+    j_lo = np.clip(j_surf - 1, 0, ny - 1)
+    j_hi = np.clip(j_surf,     0, ny - 1)
+    if ref == 'fluid':
+        h = y[j_hi].astype(np.float64)
+    elif ref == 'solid':
+        h = y[j_lo].astype(np.float64)
+    elif ref == 'mid':
+        h = 0.5*(y[j_lo] + y[j_hi])
+    else:
+        raise ValueError("eps_surface_height: ref must be 'mid', 'fluid' or 'solid'")
+    h[j_surf == 0] = y[0]                 # column with no solid at all: on the floor
+    return h, j_surf, n_over
+
+
+def eps_tread_lengths(h, x=None):
+    """Run lengths of the staircase treads in h (spans of constant elevation).
+
+    A tread is the horizontal distance between successive risers.  It is the
+    scale BELOW which a coarse-graining window can still see a pure flat
+    (slope 0) or a pure step (slope → ∞), so the tread distribution sets the
+    smallest honest Δ for generalized_slope().  Returned in the units of x
+    (in CELLS when x is None), ordered as they occur along the profile.
+    """
+    h   = np.asarray(h, dtype=np.float64)
+    chg = np.flatnonzero(np.diff(h) != 0.0)          # index of each riser
+    if chg.size == 0:
+        runs = np.array([float(h.size)])
+    else:
+        runs = np.diff(np.concatenate(([-1.0], chg.astype(float),
+                                       [float(h.size - 1)])))
+    dx = 1.0 if x is None else float(np.mean(np.diff(np.asarray(x, dtype=np.float64))))
+    return runs*dx
+
+
+def coarse_grain(h, x, width, periodic=True, window='hann'):
+    """Mollified profile  (G_Δ * h)(x)  — the companion of generalized_slope().
+
+    Same kernel and same circular convention, but the ZEROTH moment: a normalised
+    moving average of physical width Δ (Σ w_k = 1), so it returns the smooth
+    surface whose derivative generalized_slope() computes.  Used for the smooth
+    h(x) overlay on the raw staircase.
+    """
+    h  = np.asarray(h, dtype=np.float64)
+    x  = np.asarray(x, dtype=np.float64)
+    nx = h.size
+    dx = float(np.mean(np.diff(x)))
+    half = int(max(1, round(0.5*float(width)/dx)))
+    half = int(min(half, (nx - 1)//2))
+    k    = np.arange(-half, half + 1, dtype=np.float64)
+    if window == 'hann':
+        w = 0.5*(1.0 + np.cos(np.pi*k/(half + 1.0)))
+    elif window == 'boxcar':
+        w = np.ones_like(k)
+    else:
+        raise ValueError("coarse_grain: window must be 'hann' or 'boxcar'")
+    w = w/np.sum(w)
+    if periodic:
+        out = np.zeros(nx, dtype=np.float64)
+        for _kk, _wk in zip(k.astype(int), w):
+            out += _wk*np.roll(h, -_kk)
+    else:
+        idx = np.clip(np.arange(nx)[:, None] + k.astype(int)[None, :], 0, nx - 1)
+        out = h[idx] @ w
+    return out
+
+
+def generalized_slope(h, x, width, periodic=True, window='hann'):
+    """Generalized (coarse-grained) slope  s_Δ = d/dx (G_Δ * h)  of a staircase.
+
+    Implemented as a moving WEIGHTED LEAST-SQUARES straight-line fit over a
+    window of physical width Δ = `width`: s_Δ(x_i) is the slope of the best-fit
+    line through the h points inside that window.  Equivalently a Savitzky–Golay
+    first-derivative filter of polynomial order 1 — smoothing and differentiation
+    in ONE step, so the staircase is never differentiated at cell resolution and
+    no spike can be produced (|s_Δ| ≤ max|Δh|/Δ by construction).
+
+    Because x is uniform the fit collapses to a fixed FIR kernel
+
+        s[i] = Σ_k c_k h[i+k],      c_k = w_k·(k·dx) / Σ_k w_k (k·dx)²,
+
+    applied CIRCULARLY (the streamwise direction of this DNS is periodic), so the
+    profile needs no end padding and s_Δ stays exactly periodic.  The kernel is
+    EXACT for a linear h (Σ c_k = 0 and Σ c_k·x_k = 1), so a genuine constant
+    slope is returned unattenuated at every Δ.
+
+    Parameters
+    ----------
+    h        : (nx,) surface elevation (may be a staircase).
+    x        : (nx,) uniform streamwise coordinate.
+    width    : Δ, coarse-graining window width in the units of x.
+    periodic : circular filter (True, default) or edge-clamped (False).
+    window   : 'hann' (default; tapered, so s_Δ is smooth and free of the ringing
+               a sharp-edged window leaves behind) or 'boxcar' (plain local
+               least squares / Savitzky–Golay).
+
+    Returns
+    -------
+    s : (nx,) generalized slope dh/dx at scale Δ.
+    """
+    h  = np.asarray(h, dtype=np.float64)
+    x  = np.asarray(x, dtype=np.float64)
+    nx = h.size
+    dx = float(np.mean(np.diff(x)))
+    # Half-width in cells; the window spans m = 2·half+1 points ≈ Δ.  At least one
+    # cell each side (a 3-point fit) — below that there is nothing to coarse-grain.
+    half = int(max(1, round(0.5*float(width)/dx)))
+    half = int(min(half, (nx - 1)//2))               # cannot exceed the domain
+    k    = np.arange(-half, half + 1, dtype=np.float64)
+    if window == 'hann':
+        w = 0.5*(1.0 + np.cos(np.pi*k/(half + 1.0)))  # → 0 at the (excluded) ends
+    elif window == 'boxcar':
+        w = np.ones_like(k)
+    else:
+        raise ValueError("generalized_slope: window must be 'hann' or 'boxcar'")
+    xk    = k*dx
+    denom = float(np.sum(w*xk*xk))
+    c     = w*xk/denom                                # Σ c_k = 0, Σ c_k x_k = 1
+    if periodic:
+        s = np.zeros(nx, dtype=np.float64)
+        for _kk, _ck in zip(k.astype(int), c):
+            s += _ck*np.roll(h, -_kk)                 # np.roll(h,-k)[i] = h[i+k]
+    else:
+        idx = np.clip(np.arange(nx)[:, None] + k.astype(int)[None, :], 0, nx - 1)
+        s   = h[idx] @ c
+    return s
+
+
+def eps_slope_scan(h, x, widths, periodic=True, window='hann',
+                   metric='s_rms', tol=0.01, min_run=2):
+    """Scan the coarse-graining width Δ and locate the resolution-independent plateau.
+
+    For every Δ in `widths` the generalized slope s_Δ (generalized_slope) is formed
+    and reduced to three scalars:
+
+        ES    = ⟨|s_Δ|⟩       effective slope (Napoli et al. 2008 roughness classifier)
+        s_rms = ⟨s_Δ²⟩^½      rms slope
+        s_max = max|s_Δ|      steepest local slope
+
+    WHICH ONE SELECTS Δ — and why it is NOT ES.  Over any monotone stretch of the
+    staircase, ∫|dh/dx|dx is just the total rise, and coarse-graining conserves it;
+    ES = (total variation)/L_x is therefore very nearly INVARIANT under Δ (measured:
+    0.02280 from Δ⁺ = 4 to 263 for the reference valley — flat to five digits).
+    That invariance is exactly why ES is a good roughness parameter, and exactly
+    why it is blind to the staircase artefact.  The spikes live in the HIGHER
+    moments: s_rms and s_max both diverge as Δ → dx and settle onto the physical
+    value once Δ exceeds the tread length.  The plateau is therefore read off
+    `metric` (default 's_rms' — the same information as s_max but far less noisy,
+    being an average rather than a single-point extremum).
+
+    Δ* is the SMALLEST Δ for which the logarithmic sensitivity
+    |d ln(metric) / d ln Δ| stays below `tol` for `min_run` consecutive scan
+    points (the run requirement stops one accidentally flat point from winning);
+    'width_lo'/'width_hi' bracket the contiguous sub-tolerance run it belongs to,
+    i.e. the plateau itself.  If no Δ qualifies, the flattest point is used and
+    'plateau' is returned False.
+
+    Parameters
+    ----------
+    h, x               : staircase profile and its uniform coordinate.
+    widths             : 1-D array of Δ values, ASCENDING, units of x.
+    periodic, window   : passed through to generalized_slope.
+    metric             : 's_rms' (default), 's_max' or 'ES' — the plateau statistic.
+    tol                : plateau tolerance on |d ln(metric) / d ln Δ| (default 0.01).
+    min_run            : consecutive sub-tolerance points required (default 2).
+
+    Returns
+    -------
+    dict with keys
+      'widths'    (nW,)      the scanned Δ
+      'slopes'    (nW, nx)   s_Δ for every Δ
+      'ES','s_rms','s_max'   (nW,) the three reductions
+      'metric','tol'         the plateau statistic and its tolerance
+      'sens'      (nW,)      |d ln(metric) / d ln Δ|
+      'i_opt', 'width_opt'   plateau index and its Δ
+      'i_lo','i_hi','width_lo','width_hi'   the plateau bracket
+      'plateau'   bool       True if the tolerance was actually met
+    """
+    widths = np.atleast_1d(np.asarray(widths, dtype=np.float64))
+    slopes = np.vstack([generalized_slope(h, x, _w, periodic, window)
+                        for _w in widths])
+    ES     = np.mean(np.abs(slopes), axis=1)
+    s_rms  = np.sqrt(np.mean(slopes**2, axis=1))
+    s_max  = np.max(np.abs(slopes), axis=1)
+    stats  = {'ES': ES, 's_rms': s_rms, 's_max': s_max}
+    if metric not in stats:
+        raise ValueError("eps_slope_scan: metric must be 's_rms', 's_max' or 'ES'")
+    sens = np.full(widths.size, np.nan)
+    if widths.size > 2:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            _m   = stats[metric]
+            _ln  = np.log(np.where(_m > 0.0, _m, np.nan))
+            sens = np.abs(np.gradient(_ln, np.log(widths)))
+    ok  = np.isfinite(sens) & (sens < tol)
+    run = int(max(1, min(min_run, widths.size)))
+    i_opt, plateau = None, False
+    for _i in range(widths.size - run + 1):
+        if ok[_i:_i + run].all():
+            i_opt, plateau = _i, True
+            break
+    if i_opt is None:                       # no plateau: fall back on the flattest Δ
+        i_opt = (int(np.argmin(np.where(np.isfinite(sens), sens, np.inf)))
+                 if np.any(np.isfinite(sens)) else int(widths.size//2))
+    # Extend to the contiguous sub-tolerance run containing i_opt -> plateau bracket
+    i_lo = i_opt
+    while i_lo > 0 and ok[i_lo - 1]:
+        i_lo -= 1
+    i_hi = i_opt
+    while i_hi < widths.size - 1 and ok[i_hi + 1]:
+        i_hi += 1
+    return {'widths': widths, 'slopes': slopes, 'ES': ES, 's_rms': s_rms,
+            's_max': s_max, 'metric': metric, 'tol': float(tol), 'sens': sens,
+            'i_opt': int(i_opt), 'width_opt': float(widths[i_opt]),
+            'i_lo': int(i_lo), 'i_hi': int(i_hi),
+            'width_lo': float(widths[i_lo]), 'width_hi': float(widths[i_hi]),
+            'plateau': plateau}
+
+
+def sinusoid_steepness(h=None, H=None, lam=None, k=None, theta_max=None):
+    """Steepness  hk = 2πh/λ  of a sinusoidal surface  η(x) = h·cos(kx).
+
+    η'(x) = −h·k·sin(kx)  ⇒  max|η'| = h·k = 2πh/λ.  It is a rise-over-run:
+    DIMENSIONLESS, no units.  Three equivalent forms, whichever you have to hand:
+
+        amplitude h and wavelength λ        hk = 2πh/λ
+        peak-to-trough height H and λ       hk = πH/λ           (H = 2h)
+        maximum slope angle θ_max           hk = tan θ_max
+
+    THE TRAP.  h is the AMPLITUDE, not the crest-to-trough depth.  A valley whose
+    height is quoted crest-to-trough is giving H = 2h, and putting that H into
+    2πh/λ returns TWICE the true steepness — enough to move a case across the
+    separation threshold on paper while nothing changed in the flow.  This bites
+    for a full cosine with real troughs; it does not arise for a RECTIFIED cosine
+    (bumps of height h on a flat floor, η = −h·cos(2πx/λ) where positive and 0
+    elsewhere), where h is unambiguously the bump height above the floor.
+
+    Every route supplied is evaluated and cross-checked against the others, and
+    the mistaken value is returned explicitly as 'hk_if_H_used_as_h' so it can be
+    recognised on sight instead of silently adopted.
+
+    Parameters
+    ----------
+    h         : amplitude (half the crest-to-trough height).
+    H         : peak-to-trough height (= 2h).  Supply h OR H (or both).
+    lam, k    : wavelength or wavenumber; supply either (k = 2π/λ).
+    theta_max : maximum slope angle in RADIANS (independent third route).
+
+    Returns
+    -------
+    dict with 'hk' (the consensus value), the per-route 'hk_from_h' /
+    'hk_from_H' / 'hk_from_theta' (NaN where not computable), 'spread' (max−min
+    across the available routes), 'routes' (how many were usable),
+    'hk_if_H_used_as_h' (= 2× the true value when H is known), and the resolved
+    'h','H','lam','k','theta_max'.
+    """
+    if lam is None and k is not None and k != 0.0:
+        lam = 2.0*np.pi/float(k)
+    if k is None and lam is not None and lam != 0.0:
+        k = 2.0*np.pi/float(lam)
+    if h is None and H is not None:
+        h = 0.5*float(H)
+    if H is None and h is not None:
+        H = 2.0*float(h)
+
+    _nan = float('nan')
+    hk_h  = 2.0*np.pi*float(h)/float(lam) if (h is not None and lam) else _nan
+    hk_H  = np.pi*float(H)/float(lam)     if (H is not None and lam) else _nan
+    hk_th = float(np.tan(theta_max))      if theta_max is not None else _nan
+
+    routes = [v for v in (hk_h, hk_H, hk_th) if np.isfinite(v)]
+    if not routes:
+        raise ValueError('sinusoid_steepness: supply (h or H) with (lam or k), '
+                         'or theta_max')
+    hk     = float(routes[0])
+    spread = float(max(routes) - min(routes)) if len(routes) > 1 else 0.0
+    return {'hk': hk, 'hk_from_h': hk_h, 'hk_from_H': hk_H,
+            'hk_from_theta': hk_th, 'spread': spread, 'routes': len(routes),
+            'hk_if_H_used_as_h': (2.0*np.pi*float(H)/float(lam)
+                                  if (H is not None and lam) else _nan),
+            'h': (float(h) if h is not None else _nan),
+            'H': (float(H) if H is not None else _nan),
+            'lam': (float(lam) if lam is not None else _nan),
+            'k': (float(k) if k is not None else _nan),
+            'theta_max': (float(theta_max) if theta_max is not None else _nan)}
+
+
+def fit_cosine_surface(h, x, n_harm=4, free_k=True):
+    """Least-squares COSINE fit to the staircase surface h(x) — its "curve nature".
+
+    The generalized slope (generalized_slope) is a numerical, scale-Δ object.  This
+    is the complementary ANALYTIC route: fit the smooth curve the IBM was cut from,
+    then differentiate it in closed form.  Its slope carries no Δ and no staircase
+    residue at all, so it is the natural reference for the coarse-grained one.
+
+    Two fits are performed, and both are reported:
+
+    1. PERIODIC HARMONIC least squares on the exact Fourier basis
+       {1, cos(m·k₀x), sin(m·k₀x)}, m = 1…n_harm, with k₀ = 2π/Lₓ, Lₓ = x[-1]+dx.
+       Linear, non-iterative, and it yields the VARIANCE FRACTION carried by each
+       harmonic — the quantitative answer to "is a single cosine enough?".
+    2. FREE-WAVENUMBER nonlinear fit  h ≈ h₀ + A·cos(k·x + φ)  (scipy curve_fit),
+       started from the m = 1 harmonic.  Because k is free, the recovered
+       wavelength is a genuine measurement of the geometry's period rather than an
+       assumption, and it cross-checks the k₀ the rest of the script uses.
+
+    The reported model is the single cosine (free-k when it converges, harmonic-1
+    otherwise), whose derivative is exact:
+
+        h(x)  = h₀ + A·cos(k·x + φ)
+        h'(x) = −A·k·sin(k·x + φ)
+
+    Parameters
+    ----------
+    h, x   : staircase profile and its uniform coordinate.
+    n_harm : harmonics kept in the linear periodic fit (default 4), for the
+             harmonic-content diagnostic.
+    free_k : also run the free-wavenumber nonlinear refinement (default True).
+
+    Returns
+    -------
+    dict with
+      'h_fit','s_fit'      (nx,) fitted elevation and its analytic derivative
+      'h0','A','k','phi'   single-cosine parameters (A ≥ 0)
+      'lam','lam_over_Lx'  fitted wavelength and its ratio to the domain length
+      'r2','rms_resid'     coefficient of determination and rms residual of h_fit
+      'resid'              (nx,) h − h_fit
+      'harm_frac'          (n_harm,) variance fraction per harmonic (linear fit)
+      'harm_A'             (n_harm,) amplitude per harmonic
+      'ES','s_rms','s_max' slope statistics of the fitted (exact) derivative
+      'free_k_ok'          True if the nonlinear refinement converged
+    """
+    h  = np.asarray(h, dtype=np.float64)
+    x  = np.asarray(x, dtype=np.float64)
+    nx = h.size
+    dx = float(np.mean(np.diff(x)))
+    Lx = float(x[-1] + dx)                     # periodic domain length
+    k0 = 2.0*np.pi/Lx
+    n_harm = int(max(1, min(int(n_harm), (nx - 1)//2)))
+
+    # ---- 1. linear periodic harmonic least squares --------------------------
+    cols = [np.ones(nx)]
+    for m in range(1, n_harm + 1):
+        cols += [np.cos(m*k0*x), np.sin(m*k0*x)]
+    G = np.vstack(cols).T
+    coef, *_ = np.linalg.lstsq(G, h, rcond=None)
+    h0_l = float(coef[0])
+    a_m  = coef[1::2]
+    b_m  = coef[2::2]
+    harm_A = np.hypot(a_m, b_m)
+    var_h  = float(np.var(h))
+    # each harmonic contributes A²/2 to the variance of a periodic signal
+    harm_frac = (0.5*harm_A**2/var_h) if var_h > 0 else np.zeros_like(harm_A)
+    A_l   = float(harm_A[0])
+    phi_l = float(np.arctan2(-b_m[0], a_m[0]))
+
+    # ---- 2. free-wavenumber nonlinear refinement ----------------------------
+    h0, A, k, phi, free_k_ok = h0_l, A_l, k0, phi_l, False
+    if free_k:
+        def _cos_model(_x, _h0, _A, _k, _phi):
+            return _h0 + _A*np.cos(_k*_x + _phi)
+        try:
+            # A near-perfect fit makes the covariance singular and curve_fit emits
+            # OptimizeWarning; the covariance is discarded here, so silence it
+            # rather than let a GOOD fit print a scary warning on every run.
+            import warnings as _warn
+            with _warn.catch_warnings():
+                _warn.simplefilter('ignore')
+                popt, _ = curve_fit(_cos_model, x, h, p0=[h0_l, A_l, k0, phi_l],
+                                    maxfev=20000)
+            if np.all(np.isfinite(popt)) and popt[2] > 0.0:
+                h0, A, k, phi = (float(popt[0]), float(popt[1]),
+                                 float(popt[2]), float(popt[3]))
+                free_k_ok = True
+        except Exception:
+            pass
+    if A < 0.0:                                # fold a negative amplitude into φ
+        A, phi = -A, phi + np.pi
+    phi = float((phi + np.pi) % (2.0*np.pi) - np.pi)
+
+    h_fit = h0 + A*np.cos(k*x + phi)
+    s_fit = -A*k*np.sin(k*x + phi)
+    resid = h - h_fit
+    ss_t  = float(np.sum((h - np.mean(h))**2))
+    r2    = float(1.0 - np.sum(resid**2)/ss_t) if ss_t > 0 else np.nan
+
+    # Steepness hk = A·k = 2πA/λ.  Note this is IDENTICALLY max|h'| for the fitted
+    # cosine (max|−A·k·sin| = A·k), so 's_max' below and 'hk' are the same number
+    # reached two ways — see sinusoid_steepness for the H-vs-h trap.
+    return {'h_fit': h_fit, 's_fit': s_fit, 'resid': resid,
+            'h0': float(h0), 'A': float(A), 'k': float(k), 'phi': phi,
+            'hk': float(A*k), 'h_over_lam': float(A*k/(2.0*np.pi)),
+            'H_over_lam': float(A*k/np.pi),
+            'lam': float(2.0*np.pi/k), 'lam_over_Lx': float(2.0*np.pi/(k*Lx)),
+            'r2': r2, 'rms_resid': float(np.sqrt(np.mean(resid**2))),
+            'harm_frac': harm_frac, 'harm_A': harm_A,
+            'ES': float(np.mean(np.abs(s_fit))),
+            's_rms': float(np.sqrt(np.mean(s_fit**2))),
+            's_max': float(np.max(np.abs(s_fit))),
+            'free_k_ok': bool(free_k_ok)}
+
+
+def eps_generalized_gradient(eps, x, y, width_x, n_y=5, iso_lo=0.1, iso_hi=0.9):
+    """2-D generalized (distributional) gradient of the IBM indicator.
+
+    eps is a step function, so ∇eps exists only as a distribution supported on the
+    interface.  MOLLIFYING it — convolving with a finite kernel — turns it into a
+    smooth volume-fraction field ε̄ ∈ [0,1] whose gradient is an ordinary function
+    concentrated in a band around the surface.  The surface is the level set
+    ε̄ = ½, and implicit differentiation of ε̄(x, h(x)) = ½ gives the LOCAL TERRAIN
+    SLOPE everywhere inside that band:
+
+        dh/dx = − (∂ε̄/∂x) / (∂ε̄/∂y)        (∂ε̄/∂y < 0: solid below, fluid above)
+
+    with fluid-pointing unit normal n = −∇ε̄/|∇ε̄| and inclination θ = arctan(dh/dx).
+    This is the 2-D counterpart of generalized_slope(): the same coarse-graining,
+    applied to the FIELD instead of to the extracted h(x).
+
+    TWO THINGS THIS GETS RIGHT, both verified against the 1-D generalized slope
+    (correlation 0.99 at the ε̄ = ½ level set for the reference valley):
+
+    1. `n_y` is given in CELLS, not as a physical width.  y is STRETCHED: the
+       near-wall spacing where the interface lives is ~8× finer than the domain
+       mean, so converting a physical width with a mean dy over-smooths the
+       interface by an order of magnitude.  A few cells is all that is needed —
+       the vertical kernel only has to make ∂ε̄/∂y smooth, while `width_x` does
+       the actual coarse-graining.  Widening n_y steadily degrades the result
+       (max|slope| 0.038 → 0.27 going from 5 to 136 cells).
+    2. The band is gated on ε̄ itself (iso_lo < ε̄ < iso_hi), not on |∇ε̄|.  The
+       level-set identity holds only where ε̄ is genuinely in transition; a
+       |∇ε̄| threshold also admits cells deep in the solid where ∂ε̄/∂y is small
+       but ∂ε̄/∂x is not, and there the ratio blows up into spurious steep slopes.
+
+    NOTE ON INTERPRETATION.  A boxcar in x makes ε̄(x,y) the fraction of the window
+    whose surface lies above y, so the level set ε̄ = c is the (1−c) QUANTILE of h
+    in that window.  This 2-D slope is therefore a moving-quantile derivative,
+    a slightly different (equally valid) generalized slope from the moving-least-
+    squares one that generalized_slope() returns; they agree closely but are not
+    identical by construction.  Use the 1-D routine for the reported statistics
+    and this one for the spatial picture.
+
+    Parameters
+    ----------
+    eps            : (ny, nx) indicator.
+    x, y           : coordinates (x uniform and periodic; y may be stretched).
+    width_x        : streamwise mollifier width Δx, units of x.
+    n_y            : wall-normal mollifier width in CELLS (default 5).
+    iso_lo, iso_hi : ε̄ range defining the interface band (default 0.1 … 0.9).
+
+    Returns
+    -------
+    eps_bar : (ny, nx) mollified indicator ε̄.
+    slope2d : (ny, nx) dh/dx inside the interface band, NaN elsewhere.
+    band    : (ny, nx) bool, True where slope2d is defined.
+    """
+    eps    = np.asarray(eps, dtype=np.float64)
+    x      = np.asarray(x, dtype=np.float64)
+    y      = np.asarray(y, dtype=np.float64)
+    ny, nx = eps.shape
+    dx     = float(np.mean(np.diff(x)))
+    n_x    = int(max(1, round(float(width_x)/dx)))
+    n_yc   = int(max(1, round(float(n_y))))
+    # Separable moving average: WRAP in x (periodic), NEAREST in y.  'nearest' is
+    # the physically correct extension at BOTH y-boundaries here — below the floor
+    # the column continues as whatever row 0 is (solid under the flanks, fluid
+    # where the valley reaches the floor), above the top it is all fluid.
+    eps_bar = uniform_filter1d(eps,     size=n_x,  axis=1, mode='wrap')
+    eps_bar = uniform_filter1d(eps_bar, size=n_yc, axis=0, mode='nearest')
+    # Gradient: circular central difference in x, non-uniform central in y.
+    deps_dx = (np.roll(eps_bar, -1, axis=1) - np.roll(eps_bar, 1, axis=1))/(2.0*dx)
+    deps_dy = np.gradient(eps_bar, y, axis=0)
+    band    = ((eps_bar > iso_lo) & (eps_bar < iso_hi) & (np.abs(deps_dy) > 0.0))
+    slope2d = np.full((ny, nx), np.nan)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        slope2d[band] = -deps_dx[band]/deps_dy[band]
+    return eps_bar, slope2d, band
+
+
 def writefield(path, Nx, Ny, Nz, field):
     output_FilePath = path
     data_block = np.zeros((Ny,Nx))

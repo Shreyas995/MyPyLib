@@ -2126,6 +2126,277 @@ if (1 == postprocess):
 
 # %%
 if (1 == plotRes):
+    # ══════════════════════════════════════════════════════════════════════════
+    # [PLOT 00] GENERALIZED SLOPE OF THE IBM INDICATOR eps
+    # --------------------------------------------------------------------------
+    # eps is a STEP function (1 solid / 0 fluid), so the surface it encodes is a
+    # STAIRCASE on the y-grid: flat over a "tread" of several columns, then a
+    # one-cell jump across a single column (a "riser").  Differentiating that at
+    # cell resolution does NOT give the terrain slope — it gives exactly 0 on every
+    # tread and dy/dx (a SPIKE) on every riser, and refining the stencil makes the
+    # spikes WORSE.  The meaningful object is the GENERALIZED (distributional)
+    # derivative: the slope of the staircase coarse-grained over a finite window Δ,
+    #     s_Δ(x) = d/dx (G_Δ * h)(x),
+    # bounded by max|Δh|/Δ so it can never spike.  Δ must sit on the PLATEAU
+    # between "too small" (staircase spikes) and "too large" (the terrain itself is
+    # smoothed away); that plateau is located here by scanning Δ, not assumed.
+    #
+    # Compute only (per the file split): the helpers live in functions.py
+    # (eps_surface_height / coarse_grain / generalized_slope / eps_slope_scan /
+    # eps_generalized_gradient) and ALL the drawing lives in PlotField.plot_eps_slope.
+    # Everything below depends on eps + the grid alone — no field data — so this
+    # block runs even when the .npy/.pkl set is incomplete.
+    # ══════════════════════════════════════════════════════════════════════════
+    # 1. Staircase surface h(x) straight out of eps (mid-face datum: the interface
+    #    sits halfway between the last solid and the first fluid cell centre).
+    h_surf, j_surf_eps, n_over_eps = eps_surface_height(eps, y, ref='mid')
+    if n_over_eps:
+        print('[eps-slope] WARNING: %d column(s) have non-contiguous solid '
+              '(overhang / stray cell); h(x) is unreliable there.' % n_over_eps)
+
+    # 2. Tread statistics — the horizontal run between risers.  A window narrower
+    #    than a tread can still see a pure flat or a pure step, so the tread
+    #    distribution sets the smallest HONEST Δ.
+    tread_eps   = eps_tread_lengths(h_surf, x)
+    tread_med   = float(np.median(tread_eps))
+    tread_p90   = float(np.percentile(tread_eps, 90))
+
+    # 3. Scan Δ from the smallest resolvable window (3 points) to a quarter
+    #    wavelength (beyond that the valley itself is being averaged out).
+    #    Widths are built from integer half-widths so every Δ is a distinct kernel.
+    #    Δ* is read off s_rms, NOT off ES: coarse-graining conserves the total
+    #    variation of a monotone staircase, so ES = TV/L_x is Δ-invariant (flat to
+    #    five digits here) and cannot see the spikes — they live in s_rms / s_max.
+    _halves   = np.unique(np.round(np.geomspace(1.0, max(2.0, nx/4.0), 40)).astype(int))
+    w_scan    = 2.0*_halves*dx
+    slope_scan = eps_slope_scan(h_surf, x, w_scan, periodic=True, window='hann',
+                                metric='s_rms', tol=0.01, min_run=2)
+    w_opt      = slope_scan['width_opt']
+    s_gen_opt  = slope_scan['slopes'][slope_scan['i_opt']]
+    h_gen_opt  = coarse_grain(h_surf, x, w_opt)
+    if slope_scan['plateau']:
+        print('[eps-slope] plateau in %s(Δ): Δ+ = %.1f … %.1f  →  Δ*+ = %.1f'
+              % (slope_scan['metric'], slope_scan['width_lo']/l_in,
+                 slope_scan['width_hi']/l_in, w_opt/l_in))
+    else:
+        print('[eps-slope] NOTE: no Δ met the flatness tolerance — using the '
+              'flattest point of %s(Δ) instead (Δ+ = %.1f).'
+              % (slope_scan['metric'], w_opt/l_in))
+
+    # 4. The cell-resolution (two-point, circular) derivative — the spiky object
+    #    the generalized slope replaces.  Kept only as the reference curve.
+    s_raw_eps = (np.roll(h_surf, -1) - np.roll(h_surf, 1))/(2.0*dx)
+
+    # 5. Three representative widths for the profile overlay: too small, chosen,
+    #    too large — so the figure shows the failure modes on either side of Δ*.
+    _w_show = [max(2.0*dx, w_opt/4.0), w_opt, min(4.0*w_opt, x[-1]/4.0)]
+    s_show  = [generalized_slope(h_surf, x, _w) for _w in _w_show]
+    lb_show = [r'$\Delta^+=%.0f$ (too small)' % (_w_show[0]/l_in),
+               r'$\Delta^+=%.0f$ (chosen)'    % (_w_show[1]/l_in),
+               r'$\Delta^+=%.0f$ (too large)' % (_w_show[2]/l_in)]
+
+    # 6. Nominal-geometry reference.  The IBM was cut from a cosine in INDEX space
+    #    (see y_oro above: round((hill_hgt/2)·(1+cos k₀x))), so the exact surface is
+    #    that fractional index mapped through y, and its slope follows by the chain
+    #    rule  dh/dx = (dy/dj)|_j · dj/dx  — periodic-safe and free of any numerical
+    #    differentiation.  h_an is de-biased by its mean offset from h_surf: the two
+    #    differ by a sub-cell datum choice, which shifts the curve but not the slope.
+    _j_an   = (hill_hgt/2.0)*(1.0 + np.cos(kx0*x))
+    _jj     = np.arange(ny, dtype=np.float64)
+    h_an    = np.interp(_j_an, _jj, y)
+    h_an   += float(np.mean(h_surf) - np.mean(h_an))
+    _dy_dj  = np.interp(_j_an, _jj, np.gradient(y, _jj))
+    s_an    = _dy_dj*(-(hill_hgt/2.0)*kx0*np.sin(kx0*x))
+    ref_an  = {'h': h_an/l_in, 's': s_an,
+               'ES':    float(np.mean(np.abs(s_an))),
+               's_rms': float(np.sqrt(np.mean(s_an**2))),
+               's_max': float(np.max(np.abs(s_an)))}
+
+    # 7. COSINE CURVE FIT — the analytic "curve nature" of the eps surface.  The
+    #    generalized slope above is numerical and carries a scale Δ; this is the
+    #    complementary route: fit the smooth curve the IBM was cut from and
+    #    differentiate it in CLOSED FORM (h = h₀+A·cos(kx+φ) ⇒ h' = −A·k·sin(kx+φ)),
+    #    so its slope has no Δ and no staircase residue at all.  fit_cosine_surface
+    #    does both a periodic harmonic least squares (giving the variance fraction
+    #    per harmonic — the quantitative "is one cosine enough?") and a FREE-
+    #    WAVENUMBER nonlinear fit, so the wavelength is measured, not assumed.
+    cos_fit = fit_cosine_surface(h_surf, x, n_harm=4, free_k=True)
+    s_fit_c = cos_fit['s_fit']
+    # Cell size at the surface: the residual of a staircase fit cannot beat ±½ cell,
+    # so this is the floor the fit is compared against (near-wall dy, not the mean).
+    _dz_cell = float(np.median(np.diff(y)[:int(np.max(j_surf_eps)) + 1]))
+    ref_fit = {'h': cos_fit['h_fit']/l_in, 's': s_fit_c,
+               'resid': cos_fit['resid']/l_in, 'dz_cell': _dz_cell/l_in,
+               'ES': cos_fit['ES'], 's_rms': cos_fit['s_rms'],
+               's_max': cos_fit['s_max'],
+               'label': r'cosine fit  $h_0+A\cos(kx+\varphi)$',
+               'note': (r'$R^2$ = %.6f,  rms resid = %.3f $z^+$'
+                        '\n' r'$A^+$ = %.2f,  $\lambda/L_x$ = %.4f'
+                        % (cos_fit['r2'], cos_fit['rms_resid']/l_in,
+                           cos_fit['A']/l_in, cos_fit['lam_over_Lx']))}
+
+    # 8. Surface inclination in RADIANS, θ = arctan(dh/dx), from the CONVERGED
+    #    generalized slope (spike-free by construction) and from the exact fit.
+    theta_gen     = np.arctan(s_gen_opt)
+    theta_fit     = np.arctan(s_fit_c)
+    theta_max_rad = float(np.max(np.abs(theta_gen)))
+    theta_rms_rad = float(np.sqrt(np.mean(theta_gen**2)))
+    theta_fit_max = float(np.max(np.abs(theta_fit)))
+
+    # 8b. STEEPNESS  hk = 2πh/λ  — the dimensionless rise-over-run that classifies
+    #     a wavy surface.  For η = h·cos(kx), η' = −hk·sin(kx), so hk = max|η'|
+    #     identically; the fit's A and k give it directly.
+    #
+    #     h IS THE AMPLITUDE, NOT THE CREST-TO-TROUGH DEPTH.  That distinction is
+    #     live for THIS geometry: the valley has real troughs, its trough sits on
+    #     the domain floor, so the crest height quoted everywhere else in this
+    #     script (hill_hgt, ptp(h_surf)) is H = 2h — feeding it into 2πh/λ would
+    #     double hk.  The wrong value is computed too, and printed, so it is
+    #     recognisable rather than reachable by accident.  (A rectified cosine —
+    #     bumps on a flat floor — has no such ambiguity; see config §14.)
+    #
+    #     All three routes are evaluated as an internal cross-check: amplitude,
+    #     peak-to-trough, and the independent angle route hk = tan θ_max.
+    steep = sinusoid_steepness(h=cos_fit['A'], lam=cos_fit['lam'],
+                               theta_max=theta_fit_max)
+    hk_eps = float(steep['hk'])
+    # Same quantity from the purely NUMERICAL side (no cosine model at all): the
+    # converged generalized slope's own maximum.  Agreement is a model-free check.
+    hk_gen = float(np.tan(theta_max_rad))
+    _lee   = globals().get('lee_hk_range', None)
+    _sep   = globals().get('steepness_sep_threshold', None)
+
+    # 9. 2-D generalized gradient: mollify eps into a volume fraction ε̄ and read the
+    #    slope off its level set, dh/dx = −(∂ε̄/∂x)/(∂ε̄/∂z), in the interface band.
+    #    Δ* does the streamwise coarse-graining; the wall-normal kernel is only a
+    #    FEW CELLS (y is stretched — a physical width converted with a mean dy
+    #    would over-smooth the fine near-wall region where the interface sits).
+    eps_bar, slope2d_eps, band_eps = eps_generalized_gradient(eps, x, y, w_opt, n_y=5)
+    # Cross-check the 2-D field against the 1-D generalized slope on the ε̄ = ½
+    # level set, where the level-set identity is exact.  These are two independent
+    # constructions (moving quantile vs moving least squares), so agreement here is
+    # a genuine validation of both.
+    _s2d_surf, _s1d_surf = [], []
+    for _i in range(nx):
+        _c = eps_bar[:, _i]
+        _k = np.flatnonzero((_c[:-1] >= 0.5) & (_c[1:] < 0.5))
+        if _k.size and np.isfinite(slope2d_eps[int(_k[0]), _i]):
+            _s2d_surf.append(slope2d_eps[int(_k[0]), _i])
+            _s1d_surf.append(s_gen_opt[_i])
+    if len(_s2d_surf) > 2:
+        slope2d_corr = float(np.corrcoef(_s2d_surf, _s1d_surf)[0, 1])
+        slope2d_err  = float(np.max(np.abs(np.array(_s2d_surf) - np.array(_s1d_surf))))
+    else:
+        slope2d_corr, slope2d_err = np.nan, np.nan
+
+    # 10. Scalars.  ES = ⟨|dh/dx|⟩ is the Napoli, Armenio & De Marchis (JFM 613,
+    #    2008) effective slope: < 0.15 waviness, 0.15–0.35 transitional, > 0.35
+    #    roughness — i.e. whether this valley acts as a wavy wall or as roughness.
+    ES_eps      = float(slope_scan['ES'][slope_scan['i_opt']])
+    s_rms_eps   = float(slope_scan['s_rms'][slope_scan['i_opt']])
+    s_max_eps   = float(slope_scan['s_max'][slope_scan['i_opt']])
+    ang_max_eps = float(np.degrees(np.arctan(s_max_eps)))
+    ES_class    = ('waviness' if ES_eps < 0.15 else
+                   'transitional' if ES_eps < 0.35 else 'roughness')
+    # Independent closed-form check: for ONE cosine of peak-to-trough height H over
+    # a wavelength L_x, ES = (1/L_x)∮|dh/dx|dx = (total variation)/L_x = 2H/L_x.
+    ES_closed   = 2.0*float(np.ptp(h_surf))/float(x[-1] + dx)
+    print_summary_table('GENERALIZED SLOPE OF THE IBM INDICATOR (eps)', [
+        ('section', 'Staircase geometry'),
+        ('Crest height h+',                     float(np.ptp(h_surf))/l_in,   '.2f'),
+        ('Streamwise spacing dx+',              dx/l_in,                      '.3f'),
+        ('Tread length (median) +',             tread_med/l_in,               '.2f'),
+        ('Tread length (90th pct) +',           tread_p90/l_in,               '.2f'),
+        ('Non-contiguous solid columns',        n_over_eps,                   'd'),
+        ('section', 'Coarse-graining width  (plateau read off s_rms, not ES)'),
+        ('Plateau range Delta+ (low)',          slope_scan['width_lo']/l_in,  '.2f'),
+        ('Plateau range Delta+ (high)',         slope_scan['width_hi']/l_in,  '.2f'),
+        ('Chosen width Delta*+',                w_opt/l_in,                   '.2f'),
+        ('Delta* / median tread',               w_opt/max(tread_med, 1e-30),  '.2f'),
+        ('Plateau tolerance met',               float(slope_scan['plateau']), '.0f'),
+        ('Sensitivity |dln s_rms/dlnD| at D*',  float(slope_scan['sens'][slope_scan['i_opt']]), '.4f'),
+        ('section', 'Cosine curve fit   h = h0 + A cos(kx + phi)'),
+        ('Amplitude A+',                        cos_fit['A']/l_in,            '.3f'),
+        ('Mean level h0+',                      cos_fit['h0']/l_in,           '.3f'),
+        ('Peak-to-trough 2A+',                  2.0*cos_fit['A']/l_in,        '.3f'),
+        ('Phase phi (rad)',                     cos_fit['phi'],               '.4f'),
+        ('Wavelength lambda+',                  cos_fit['lam']/l_in,          '.2f'),
+        ('   lambda / Lx',                      cos_fit['lam_over_Lx'],       '.5f'),
+        ('Free-wavenumber fit converged',       float(cos_fit['free_k_ok']),  '.0f'),
+        ('Fit R^2',                             cos_fit['r2'],                '.6f'),
+        ('RMS residual (z+)',                   cos_fit['rms_resid']/l_in,    '.4f'),
+        ('   half a grid cell (z+)',            0.5*_dz_cell/l_in,            '.4f'),
+        ('Variance in harmonic 1',              float(cos_fit['harm_frac'][0]), '.6f'),
+        ('Variance in harmonic 2',              float(cos_fit['harm_frac'][1]), '.2e'),
+        ('Variance in harmonic 3',              float(cos_fit['harm_frac'][2]), '.2e'),
+        ('section', 'Slope: EPS FIELD (what the solver blanks) vs OROGRAPHY (y_oro)'),
+        ('Effective slope ES = <|dh/dx|>',      ES_eps,                       '.4f'),
+        ('   eps cosine fit',                   cos_fit['ES'],                '.4f'),
+        ('   OROGRAPHY y_oro',                  ref_an['ES'],                 '.4f'),
+        ('   closed form 2H/Lx (sinusoid)',     ES_closed,                    '.4f'),
+        ('RMS slope',                           s_rms_eps,                    '.4f'),
+        ('   eps cosine fit',                   cos_fit['s_rms'],             '.4f'),
+        ('   OROGRAPHY y_oro',                  ref_an['s_rms'],              '.4f'),
+        ('Max |slope|  (= hk)',                 s_max_eps,                    '.4f'),
+        ('   eps cosine fit',                   cos_fit['s_max'],             '.4f'),
+        ('   OROGRAPHY y_oro',                  ref_an['s_max'],              '.4f'),
+        ('eps / orography  max-slope ratio',    s_max_eps/max(ref_an['s_max'], 1e-30), '.4f'),
+        ('Orography max angle (deg)',           float(np.degrees(np.arctan(ref_an['s_max']))), '.3f'),
+        ('section', 'Surface inclination  theta = arctan(dh/dx)'),
+        ('Max |theta| (rad)',                   theta_max_rad,                '.5f'),
+        ('   cosine-fit max |theta| (rad)',     theta_fit_max,                '.5f'),
+        ('RMS theta (rad)',                     theta_rms_rad,                '.5f'),
+        ('Max |theta| (deg)',                   ang_max_eps,                  '.3f'),
+        ('section', 'Steepness  hk = 2*pi*h/lambda   (h = AMPLITUDE, not H)'),
+        ('Amplitude h+  (= A)',                 cos_fit['A']/l_in,            '.3f'),
+        ('Peak-to-trough H+ = 2h',              2.0*cos_fit['A']/l_in,        '.3f'),
+        ('h / lambda',                          cos_fit['h_over_lam'],        '.6f'),
+        ('STEEPNESS hk',                        hk_eps,                       '.5f'),
+        ('   route 1: 2*pi*h/lambda',           steep['hk_from_h'],           '.5f'),
+        ('   route 2: pi*H/lambda',             steep['hk_from_H'],           '.5f'),
+        ('   route 3: tan(theta_max)',          steep['hk_from_theta'],       '.5f'),
+        ('   spread across routes',             steep['spread'],              '.2e'),
+        ('   model-free: tan(max|theta_gen|)',  hk_gen,                       '.5f'),
+        ('WRONG if H is used as h (2x)',        steep['hk_if_H_used_as_h'],   '.5f'),
+        ('   hk of the OROGRAPHY y_oro',        ref_an['s_max'],              '.5f'),
+        ('Lee et al. hk (low end)',   (_lee[0] if _lee else np.nan),          '.4f'),
+        ('Lee et al. hk (high end)',  (_lee[1] if _lee else np.nan),          '.4f'),
+        ('This case / Lee low end',   (hk_eps/_lee[0] if _lee else np.nan),   '.3f'),
+        ('Separation threshold hk (config)',    (_sep if _sep else np.nan),   '.4f'),
+        ('section', 'Roughness classification (Napoli et al. 2008)'),
+        ('ES regime',                           np.nan,                       '.1f', ES_class),
+        ('section', 'Cell-resolution derivative (why it is NOT used)'),
+        ('Raw 2-point max |dh/dx|',             float(np.max(np.abs(s_raw_eps))), '.4f'),
+        ('Raw / generalized max-slope ratio',   float(np.max(np.abs(s_raw_eps)))/max(s_max_eps, 1e-30), '.1f'),
+        ('Raw 2-point ES',                      float(np.mean(np.abs(s_raw_eps))), '.4f'),
+        ('section', '2-D grad(eps_bar) vs the 1-D slope, on the eps_bar=1/2 level set'),
+        ('Correlation',                         slope2d_corr,                 '.4f'),
+        ('Max absolute difference',             slope2d_err,                  '.4f'),
+        ('Interface band cells',                int(np.count_nonzero(band_eps)), 'd'),
+    ])
+
+    # 11. Figure — PURE plotting, everything above is passed in.
+    plot_eps_slope(x_in, h_surf/l_in, h_gen_opt/l_in, s_raw_eps,
+                   s_show, lb_show, s_gen_opt,
+                   w_scan/l_in, slope_scan['ES'], slope_scan['s_rms'],
+                   slope_scan['s_max'], w_opt/l_in,
+                   y_in, slope2d_eps, x_oro_in, y_oro_in,
+                   os.path.join(fig_dir, 'Eps_generalized_slope.png'),
+                   fit=ref_fit, analytic=ref_an,
+                   plateau_in=(slope_scan['width_lo']/l_in,
+                               slope_scan['width_hi']/l_in),
+                   es_note='ES = %.4f  →  %s\n(< 0.15 waviness, 0.15–0.35\n'
+                           ' transitional, > 0.35 roughness)' % (ES_eps, ES_class),
+                   hk=hk_eps,
+                   title=r'Generalized slope of the IBM indicator $\varepsilon$  '
+                         r'[$hk=2\pi h/\lambda$ = %.4f,  ES = %.3f (%s),  '
+                         r'$\Delta^{+}_{*}$ = %.0f,  '
+                         r'$\max|\theta|$ = %.4f rad = %.2f$^\circ$,  '
+                         r'cosine fit $R^2$ = %.5f]'
+                         % (hk_eps, ES_eps, ES_class, w_opt/l_in, theta_max_rad,
+                            ang_max_eps, cos_fit['r2']))
+    # ──────────────────────────────────────────────────────────────────────────
+
     res_dispz    = np.sqrt(DispVelU**2 + DispVelV**2)
     res_phavg_uv = np.sqrt(AvgPhU**2 + AvgPhV**2)
 
@@ -2210,59 +2481,70 @@ if (1 == plotRes):
 
     # All plots use inner-scaled coordinates (x_in = x/l_in, y_in = y/l_in) unless noted.
     # Orography outline (x_oro_in, y_oro_in) is overlaid on 2-D colour maps.
+    #
+    # WALL-UNIT field normalization: every phase-average field map below is drawn
+    # in this case's OWN wall (inner) units — u_star is the Method-2 plateau set
+    # above — so the colour value is dimensionless in u* rather than geostrophic
+    # (u/G).  velocity → /u*, velocity² (p, TKE, stresses) → /u*², vorticity and
+    # velocity-gradients → ·ν/u*².  The SCALAR (θ/buoyancy) has no clean u* power
+    # (it is a 1→0 deficit), so AvgScal / DispScal are left in their stored units.
+    # [U*-NORM] wall-unit factors for every phase-average field map below
+    _WU_V  = 1.0 / u_star            # velocity        → u+
+    _WU_V2 = 1.0 / u_star**2         # velocity² / p / TKE / stress → /u*²
+    _WU_W  = nu  / u_star**2         # vorticity / velocity-gradient → ·ν/u*²
     # Phase Average
     # [PLOT 01] PhAvgU
-    plot2D_div(x_in, y_in[:limity], AvgPhU[:limity,:],'',r'$\left\langle\overline{(U_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgU' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgPhU[:limity,:]*_WU_V,'',r'$\left\langle\overline{(U_y)}\right\rangle/u_*\,(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgU' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 02] PhAvgW
-    plot2D_div(x_in, y_in[:limity], AvgPhV[:limity,:],'',r'$\left\langle\overline{(W_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgW' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgPhV[:limity,:]*_WU_V,'',r'$\left\langle\overline{(W_y)}\right\rangle/u_*\,(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgW' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 03] PhAvgV
-    plot2D_div(x_in, y_in[:limity], AvgPhW[:limity,:],'',r'$\left\langle\overline{(V_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgV' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], AvgPhW[:limity,:]*_WU_V,'',r'$\left\langle\overline{(V_y)}\right\rangle/u_*\,(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'PhAvgV' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 04] Pressure
-    plot2D_div(x_in, y_in[:limity], AvgP[:limity,:],'',r'$\left\langle\overline{(P_y)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 05] Potential Temperature
+    plot2D_div(x_in, y_in[:limity], AvgP[:limity,:]*_WU_V2,'',r'$\left\langle\overline{(P_y)}\right\rangle/u_*^2\,(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Pressure' + '.png', x_oro_in, y_oro_in, 1000)
+    # [PLOT 05] Potential Temperature — scalar deficit, left in stored units (no clean u* scale)
     plot2D_div(x_in, y_in[:limity], AvgScal[:limity,:],'',r'$\left\langle\overline{(\theta)}\right\rangle(x, z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'Potential Temperature' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 06] Phase-averaged mean velocity field (in-plane streamlines +
-    #           spanwise-velocity contour; yaw angle; 3-D speed)
+    #           spanwise-velocity contour; yaw angle; 3-D speed) — in u* units
     plot_phavg_velocity_3D(x_in, y_in[:limity],
-                           AvgPhU[:limity,:], AvgPhV[:limity,:], AvgPhW[:limity,:],
+                           AvgPhU[:limity,:]*_WU_V, AvgPhV[:limity,:]*_WU_V, AvgPhW[:limity,:]*_WU_V,
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
                            cwd + '/fig/' + 'PhAvg_3D_velocity.png',
                            title=r'Phase-averaged mean velocity field  '
-                                 r'$\langle\overline{u}_i\rangle(x^+,z^+)$')
+                                 r'$\langle\overline{u}_i\rangle/u_*\,(x^+,z^+)$')
 
     # %% ###########################################################################
     # Dispersive Velocity Component
     # [PLOT 07] DispU
-    plot2D_div(x_in, y_in[:limity], DispVelU[:limity,:],'',r'$\widetilde{U}_y(x,z) = \left\langle\overline{(U_y)}\right\rangle(x, z) - (\langle \overline{U}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispU' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispVelU[:limity,:]*_WU_V,'',r'$\widetilde{U}_y/u_*\,(x,z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispU' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 08] DispW
-    plot2D_div(x_in, y_in[:limity], DispVelV[:limity,:],'',r'$\widetilde{W}_y(x,z) = \left\langle\overline{(W_y)}\right\rangle(x, z) - (\langle \overline{W}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispW' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispVelV[:limity,:]*_WU_V,'',r'$\widetilde{W}_y/u_*\,(x,z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispW' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 09] DispV
-    plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:],'',r'$\widetilde{V}_y(x,z) = \left\langle\overline{(V_y)}\right\rangle(x, z) - (\langle \overline{V}\rangle) (z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], DispVelW[:limity,:]*_WU_V,'',r'$\widetilde{V}_y/u_*\,(x,z)$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispV' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 10] DispP
-    plot2D_div(x_in, y_in[:limity], DispP[:limity,:],'',r'$\widetilde{P}(x,z) = \langle\overline{P}\rangle(x,z) - \langle\overline{P}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 10b] DispScal (dispersive potential temperature / buoyancy)
+    plot2D_div(x_in, y_in[:limity], DispP[:limity,:]*_WU_V2,'',r'$\widetilde{P}/u_*^2\,(x,z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispP' + '.png', x_oro_in, y_oro_in, 1000)
+    # [PLOT 10b] DispScal (dispersive potential temperature / buoyancy) — scalar, left in stored units
     plot2D_div(x_in, y_in[:limity], DispScal[:limity,:],'',r'$\widetilde{\theta}(x,z) = \langle\overline{\theta}\rangle(x,z) - \langle\overline{\theta}\rangle(z)$',r'$x^+$',r'$z^+$', cwd + '/fig/' + 'DispScal' + '.png', x_oro_in, y_oro_in, 1000)
     # [PLOT 11] Dispersive velocity field (in-plane dispersive streamlines +
-    #           spanwise dispersive-velocity contour; yaw angle; 3-D speed)
+    #           spanwise dispersive-velocity contour; yaw angle; 3-D speed) — in u* units
     plot_phavg_velocity_3D(x_in, y_in[:limity],
-                           DispVelU[:limity,:], DispVelV[:limity,:], DispVelW[:limity,:],
+                           DispVelU[:limity,:]*_WU_V, DispVelV[:limity,:]*_WU_V, DispVelW[:limity,:]*_WU_V,
                            eps[:limity,:], 1000,
                            x_oro_in, y_oro_in,
                            cwd + '/fig/' + 'Disp_3D_velocity.png',
                            title=r'Dispersive velocity field  '
-                                 r'$\widetilde{u}_i(x^+,z^+)$')
-    
-    # %% ###########################################################################    
+                                 r'$\widetilde{u}_i/u_*\,(x^+,z^+)$')
+
+    # %% ###########################################################################
     # Streamlines and vorticity
-    # [PLOT 12] Vorticity_Y
-    plot2D_div(x_in, y_in[:limity], (vort_z[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \overline{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 13] Disp_Vorticity_Y
-    plot2D_div(x_in, y_in[:limity], (disp_vortz[:limity,:]),'',r'$\langle\omega\rangle_\phi=\nabla \times\langle \widetilde{(U)}\rangle_\phi$',r'$x$',r'$z$', cwd + '/fig/' + 'Disp_Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
-    # [PLOT 14] Dispersive Resultant
-    plot2D_streamlines_vorticity(x_in, y_in[:limity], DispVelU[:limity,:], DispVelV[:limity,:],res_dispz[:limity,:],eps[:limity,:],'Dispersive Resultant','',r'$x$',r'$z$', cwd + '/fig/' + 'Dispersive Resultant' + '.png', x_oro_in, y_oro_in ,1000)
-    # [PLOT 15] Resultant flow
-    plot2D_streamlines_vorticity(x_in, y_in[:limity], AvgPhU[:limity,:], AvgPhV[:limity,:],res_phavg_uv[:limity,:],eps[:limity,:],'Resultant flow','',r'$x$',r'$z$', cwd + '/fig/' + 'Resultant flow' + '.png', x_oro_in, y_oro_in,1000)
+    # [PLOT 12] Vorticity_Y  (ω·ν/u*²)
+    plot2D_div(x_in, y_in[:limity], (vort_z[:limity,:]*_WU_W),'',r'$\langle\omega\rangle_\phi\,\nu/u_*^2$',r'$x$',r'$z$', cwd + '/fig/' + 'Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
+    # [PLOT 13] Disp_Vorticity_Y  (ω̃·ν/u*²)
+    plot2D_div(x_in, y_in[:limity], (disp_vortz[:limity,:]*_WU_W),'',r'$\langle\widetilde{\omega}\rangle_\phi\,\nu/u_*^2$',r'$x$',r'$z$', cwd + '/fig/' + 'Disp_Vorticity_Y' + '.png', x_oro_in, y_oro_in, 1000)
+    # [PLOT 14] Dispersive Resultant  (velocity magnitude /u*; streamlines are scale-invariant)
+    plot2D_streamlines_vorticity(x_in, y_in[:limity], DispVelU[:limity,:]*_WU_V, DispVelV[:limity,:]*_WU_V,res_dispz[:limity,:]*_WU_V,eps[:limity,:],'Dispersive Resultant','',r'$x$',r'$z$', cwd + '/fig/' + 'Dispersive Resultant' + '.png', x_oro_in, y_oro_in ,1000)
+    # [PLOT 15] Resultant flow  (velocity magnitude /u*)
+    plot2D_streamlines_vorticity(x_in, y_in[:limity], AvgPhU[:limity,:]*_WU_V, AvgPhV[:limity,:]*_WU_V,res_phavg_uv[:limity,:]*_WU_V,eps[:limity,:],'Resultant flow','',r'$x$',r'$z$', cwd + '/fig/' + 'Resultant flow' + '.png', x_oro_in, y_oro_in,1000)
 
     # %% This cannnot be calculated unless one has 3D fields
     # plot2D_streamlines_vorticityX(x, y[:limity], DispVelV[:limity,:], DispVelW[:limity,:],disp_vortx[:limity,:],'','',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlineyz' + '.png', x_oro, y_oro,1000)
@@ -2271,12 +2553,12 @@ if (1 == plotRes):
     # %% ###########################################################################
     # Plot derivatives
     # [PLOT 16] dv_dx
-    plot2D_div(x, y[:limity], dv_dx[:limity,:],'', 'dv_dx',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'dv_dx' + '.png', x_oro, y_oro ,1000) # quantity dv/dx where v is vertical component 
+    plot2D_div(x, y[:limity], dv_dx[:limity,:]*_WU_W,'', r'dv_dx $\,\nu/u_*^2$',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'dv_dx' + '.png', x_oro, y_oro ,1000) # quantity dv/dx where v is vertical component 
     # Streamlines of the phase average
     # [PLOT 17] Streamlinexy
-    plot2D_streamlines_vorticityZ(x_in, y_in[:200], DispVelU[:200,:], DispVelV[:200,:], disp_vortz[:200,:],'Stream--vorticity',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinexy' + '.png', x_oro_in, y_oro_in,1000)
+    plot2D_streamlines_vorticityZ(x_in, y_in[:200], DispVelU[:200,:]*_WU_V, DispVelV[:200,:]*_WU_V, disp_vortz[:200,:]*_WU_W,'Stream--vorticity',r'$x$',r'$z$', cwd + '/fig/' + 'Streamlinexy' + '.png', x_oro_in, y_oro_in,1000)
     # [PLOT 18] ResPhXY
-    plot2D_div(x, y[:limity], res_phavg_uv[:limity,:],'', 'ResPhXY',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'ResPhXY' + '.png', x_oro, y_oro ,1000)
+    plot2D_div(x, y[:limity], res_phavg_uv[:limity,:]*_WU_V,'', r'ResPhXY $/u_*$',r'$x^{+}$',r'$z^{+}$' , cwd + '/fig/' + 'ResPhXY' + '.png', x_oro, y_oro ,1000)
     
     # %%###########################################################################
     # orographic wave drag
@@ -2287,7 +2569,7 @@ if (1 == plotRes):
     # %%###########################################################################
     # TKE
     # [PLOT 19] TKE
-    plot2D_div(x_in, y_in[:limity], TKE[:limity,:], '', 'TKE', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'TKE' + '.png', x_oro_in, y_oro_in, 1000)
+    plot2D_div(x_in, y_in[:limity], TKE[:limity,:]*_WU_V2, '', r'TKE $/u_*^2$', r'$x^+$',r'$z^+$', cwd + '/fig/' + 'TKE' + '.png', x_oro_in, y_oro_in, 1000)
     
     # %%###########################################################################
     # Stress-tensor 2D maps — the FOUR families, 6 independent components each
@@ -2321,7 +2603,7 @@ if (1 == plotRes):
             _ml = _meteo[_ek]
             _title = _tfmt % (_ml[0], _ml[1])
             _fn = '%s_R%s.png' % (_fname, _ml)
-            plot2D_div(x_in, y_in[:limity], _fld[_ek][:limity, :], '', _title,
+            plot2D_div(x_in, y_in[:limity], _fld[_ek][:limity, :]*_WU_V2, '', _title,
                        r'$x^+$', r'$z^+$', cwd + '/fig/' + _fn, x_oro_in, y_oro_in, 1000)
     
     # %%###########################################################################

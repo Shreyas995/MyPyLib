@@ -42,7 +42,11 @@ set -euo pipefail
 # script's own directory on sys.path[0], so linking these three into the target
 # is enough for `python3 results.py` to find its imports AND read data via
 # __file__ (= the symlink's directory).
-RESULTS_DEPS=(results.py PlotField.py functions.py)
+# results.py = Froude ladder (Re=500 fixed); results_Re.py = Reynolds ladder
+# (neutral, Re=500 vs 750).  Both are stage-c plotting scripts run from the
+# central examples root and share the same two imports.  A missing file is
+# warned about and skipped, so listing both is safe.
+RESULTS_DEPS=(results.py results_Re.py PlotField.py functions.py)
 
 RESULTS_ONLY=0
 if [ "${1:-}" = "--results-only" ]; then

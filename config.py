@@ -251,3 +251,22 @@ fig4_plateau_lo = 0.05
 # paper and fig4_smooth_standalone.py (Coriolis reads positive); it leaves τ_zx,
 # u*, and the closure untouched (only the plotted sign of the spanwise flips).
 fig4_paper_spanwise_sign = True
+
+# ── 14. Sinusoidal-surface steepness  hk = 2*pi*h/lambda  ([PLOT 00]) ─────────
+# h is the AMPLITUDE (half the crest-to-trough height H), NOT the crest height.
+# Using H in place of h doubles hk, which is exactly the size of error that moves
+# a case across the separation threshold on paper (see functions.sinusoid_steepness).
+#
+# Reference comparison: Lee et al.'s RECTIFIED cosine (bumps of height h on a flat
+# floor, so their h is unambiguous and the H-vs-h question does not arise for them).
+# They report h/l = 0.042 ... 0.084 with l = lambda/4, hence
+#   h/lambda = 0.042/4 = 0.0105 ... 0.084/4 = 0.021
+#   hk       = 2*pi*h/lambda = 0.066 ... 0.132
+# Set to None to drop the comparison row from the [PLOT 00] table.
+lee_hk_range = (0.066, 0.132)
+
+# Separation-onset steepness to test against, if you have a value you trust.
+# LEFT AS None ON PURPOSE: no threshold is asserted here.  Set it to the hk at
+# which separation is taken to begin and the [PLOT 00] table will report which
+# side of it this case falls on.
+steepness_sep_threshold = None

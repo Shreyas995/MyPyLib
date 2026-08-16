@@ -1211,3 +1211,220 @@ def plot_fig4_budget(zin, zout, C_zx, V_zx, R_zx, T_zx, C_zy, V_zy, R_zy, T_zy,
     plt.tight_layout()
     plt.savefig(os.path.join(fig_dir, f'Fig4_momentum_budget_{label}.png'), dpi=200)
     plt.show()
+
+
+def plot_eps_slope(x_in, h_in, h_gen_in, s_raw, s_gen, gen_labels, s_opt,
+                   scan_w_in, scan_ES, scan_rms, scan_max, w_opt_in,
+                   y_in, slope2d, x_oro_in, y_oro_in, savename,
+                   fit=None, analytic=None, zlim=None, title=None,
+                   plateau_in=None, es_note=None, hk=None):
+    """Generalized slope of the IBM indicator eps — PURE plotting (6 panels).
+
+    Every quantity is COMPUTED BY THE CALLER (PhAvg_rotated.py, PLOT 00) from the
+    functions.py helpers (eps_surface_height / generalized_slope / eps_slope_scan /
+    fit_cosine_surface / eps_generalized_gradient) and passed in, so this routine
+    stays reusable for any staircase surface.  Panels:
+
+      (a) surface elevation h⁺(x⁺) — raw staircase, coarse-grained, cosine FIT
+      (b) fit residual h − h_fit — what the single cosine does not capture
+      (c) Δ-sensitivity: ES, s_rms, max|s| vs Δ⁺ — the small-Δ blow-up, the
+          plateau, and the large-Δ roll-off; the chosen Δ* is marked
+      (d) slope dh/dx — the raw two-point derivative (spiky, deliberately shown
+          off-scale) against the generalized slope at several widths Δ and the
+          exact derivative of the fitted cosine
+      (e) surface inclination θ = arctan(dh/dx) in RADIANS (right axis: degrees)
+      (f) the 2-D generalized slope angle θ = arctan(−∂ₓε̄/∂_zε̄) in RADIANS, in
+          the mollified interface band, with the orography outline
+
+    Parameters
+    ----------
+    x_in, y_in           inner-unit axes (x⁺, z⁺).
+    h_in                 (nx,) raw staircase surface elevation, z⁺.
+    h_gen_in             (nx,) coarse-grained surface elevation at Δ*, z⁺.
+    s_raw                (nx,) two-point cell-resolution slope (dimensionless).
+    s_gen, gen_labels    list of (nx,) generalized slopes + their legend labels.
+    s_opt                (nx,) the CHOSEN generalized slope (at Δ*) — the result.
+    scan_w_in            (nW,) scanned widths Δ in INNER units.
+    scan_ES/rms/max      (nW,) the three reductions from functions.eps_slope_scan.
+    w_opt_in             chosen Δ* in inner units.
+    slope2d              (ny, nx) 2-D generalized slope, NaN outside the band.
+    x_oro_in, y_oro_in   orography outline (inner units).
+    savename             full output path of the PNG.
+    fit                  optional dict from functions.fit_cosine_surface with 'h'
+                         and 'resid' already in z⁺ plus 's' and a 'label' string;
+                         panel (b) is blanked when None.
+    analytic             optional dict of the nominal-geometry reference with keys
+                         'h' (nx, z⁺), 's' (nx), 'ES', 's_rms', 's_max'; skipped
+                         entirely when None.
+    zlim                 z⁺ cap for panel (f) (default: 1.35× the crest height).
+    title                figure suptitle.
+    plateau_in           optional (Δ⁺_lo, Δ⁺_hi) bracket shaded in panel (c).
+    es_note              optional text box for panel (c) (the ES classification).
+    hk                   optional steepness 2πh/λ, annotated on panel (e) — where
+                         it belongs, since hk = tan θ_max is that panel's maximum.
+    """
+    fig, axs = plt.subplots(2, 3, figsize=(19, 9), dpi=200)
+
+    # ── (a) surface elevation + cosine fit ───────────────────────────────────
+    ax = axs[0, 0]
+    ax.plot(x_in, h_in, color='0.55', lw=0.8, drawstyle='steps-mid',
+            label=r'raw staircase  $h^+$ (eps)')
+    ax.plot(x_in, h_gen_in, color='crimson', lw=1.8,
+            label=r'coarse-grained  $\Delta^+=%.0f$' % w_opt_in)
+    if fit is not None and fit.get('h') is not None:
+        ax.plot(x_in, fit['h'], color='tab:blue', lw=1.4,
+                label=fit.get('label', 'cosine fit'))
+    if analytic is not None and analytic.get('h') is not None:
+        ax.plot(x_in, analytic['h'], color='black', ls=':', lw=1.2,
+                label='nominal sinusoid')
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$')
+    ax.set_title('(a) IBM surface elevation + cosine fit', fontsize=9)
+    # 'upper center': a valley puts its crests at BOTH ends, so the mid-top is the
+    # only region the curves never enter.
+    ax.grid(alpha=0.3); ax.legend(fontsize=7, loc='upper center', framealpha=0.92)
+
+    # ── (b) cosine-fit residual ──────────────────────────────────────────────
+    ax = axs[0, 1]
+    if fit is not None and fit.get('resid') is not None:
+        _rs = np.asarray(fit['resid'])
+        ax.plot(x_in, _rs, color='0.45', lw=0.7, drawstyle='steps-mid',
+                label=r'$h^+ - h^+_{\rm fit}$')
+        _rr = float(np.sqrt(np.mean(_rs**2)))
+        for _s, _l in ((_rr, r'$\pm$rms = %.3f' % _rr), (-_rr, None)):
+            ax.axhline(_s, color='crimson', ls='--', lw=1.0, label=_l)
+        if fit.get('dz_cell') is not None:      # one grid cell = the quantisation
+            ax.axhline(0.5*fit['dz_cell'], color='tab:blue', ls=':', lw=1.0,
+                       label=r'$\pm\frac{1}{2}\,\Delta z^+_{\rm cell}$')
+            ax.axhline(-0.5*fit['dz_cell'], color='tab:blue', ls=':', lw=1.0)
+        ax.axhline(0, color='grey', lw=0.5)
+        ax.legend(fontsize=7, loc='upper right', ncol=2)
+        if fit.get('note'):
+            ax.text(0.02, 0.03, fit['note'], transform=ax.transAxes,
+                    ha='left', va='bottom', fontsize=7.5,
+                    bbox=dict(fc='white', ec='0.7', alpha=0.85, pad=2.5))
+    else:
+        ax.text(0.5, 0.5, 'no cosine fit supplied', transform=ax.transAxes,
+                ha='center', va='center', fontsize=9, color='0.5')
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'residual  $z^+$')
+    ax.set_title('(b) cosine-fit residual — the staircase quantisation', fontsize=9)
+    ax.grid(alpha=0.3)
+
+    # ── (d) slope: raw (spiky) vs generalized ────────────────────────────────
+    ax = axs[1, 0]
+    ax.plot(x_in, s_raw, color='0.72', lw=0.5, alpha=0.55, zorder=1,
+            label='raw 2-point (off-scale spikes)')
+    _cols = ['tab:blue', 'crimson', 'tab:green', 'tab:purple', 'tab:orange']
+    _ref = []
+    for _i, (_s, _lb) in enumerate(zip(s_gen, gen_labels)):
+        # the under-resolved curve stays thin/faint: it is evidence, not a result
+        _small = 'small' in str(_lb)
+        ax.plot(x_in, _s, color=_cols[_i % len(_cols)],
+                lw=0.9 if _small else 1.8, alpha=0.7 if _small else 1.0,
+                zorder=2 if _small else 3, label=_lb)
+        _ref.append(_s)
+    if fit is not None and fit.get('s') is not None:
+        ax.plot(x_in, fit['s'], color='black', ls='--', lw=1.3, zorder=4,
+                label=fit.get('label', 'cosine fit') + ' (exact)')
+        _ref.append(fit['s'])
+    elif analytic is not None and analytic.get('s') is not None:
+        ax.plot(x_in, analytic['s'], color='black', ls='--', lw=1.3, zorder=4,
+                label='nominal sinusoid')
+        _ref.append(analytic['s'])
+    # y-range from the MEDIAN of the per-curve maxima, so neither the raw spikes
+    # nor a deliberately under-resolved Δ can crush the converged curves flat —
+    # they simply run off the top, which is what the panel is showing.
+    _m = float(np.nanmedian([np.nanmax(np.abs(np.ravel(_r))) for _r in _ref])) \
+         if _ref else 1.0
+    _m = _m if _m > 0 else 1.0
+    ax.set_ylim(-1.8*_m, 1.8*_m)
+    ax.axhline(0, color='grey', lw=0.5)
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$\mathrm{d}h/\mathrm{d}x$')
+    ax.set_title('(d) generalized slope vs the cell-resolution derivative', fontsize=9)
+    ax.grid(alpha=0.3); ax.legend(fontsize=7, loc='upper left', framealpha=0.92)
+
+    # ── (e) surface inclination in RADIANS ───────────────────────────────────
+    # θ = arctan(dh/dx).  Plotted from the CONVERGED generalized slope (Δ*), so it
+    # is spike-free by construction; the cosine fit gives the analytic comparison.
+    # Right-hand axis carries the same curve in degrees for readability.
+    ax = axs[1, 1]
+    _th_opt = np.arctan(np.asarray(s_opt))
+    ax.plot(x_in, _th_opt, color='crimson', lw=1.8,
+            label=r'generalized  $\Delta^+=%.0f$' % w_opt_in)
+    if fit is not None and fit.get('s') is not None:
+        ax.plot(x_in, np.arctan(np.asarray(fit['s'])), color='black', ls='--',
+                lw=1.3, label=fit.get('label', 'cosine fit') + ' (exact)')
+    _thm = float(np.nanmax(np.abs(_th_opt)))
+    _thm = _thm if _thm > 0 else 1.0
+    ax.axhline(0, color='grey', lw=0.5)
+    ax.set_ylim(-1.35*_thm, 1.35*_thm)
+    ax.set_xlabel(r'$x^+$')
+    ax.set_ylabel(r'$\theta=\arctan(\mathrm{d}h/\mathrm{d}x)$   [rad]')
+    ax.set_title(r'(e) surface inclination $\theta$ in radians', fontsize=9)
+    ax.grid(alpha=0.3); ax.legend(fontsize=7, loc='upper left', framealpha=0.92)
+    _axd = ax.twinx()                                  # same data, degree ticks
+    _axd.set_ylim(np.degrees(-1.35*_thm), np.degrees(1.35*_thm))
+    _axd.set_ylabel(r'$\theta$  [deg]', fontsize=8)
+    _axd.tick_params(labelsize=7)
+    # hk = tan θ_max is the third route to the steepness, so this panel is where
+    # it belongs: the annotation and the curve maximum are the same statement.
+    _tnote = r'$\max|\theta| = %.4f$ rad $= %.2f^\circ$' % (_thm, np.degrees(_thm))
+    if hk is not None:
+        _tnote += '\n' + r'$hk = 2\pi h/\lambda = \tan\theta_{\max} = %.4f$' % hk
+    ax.text(0.98, 0.04, _tnote, transform=ax.transAxes,
+            ha='right', va='bottom', fontsize=7.5,
+            bbox=dict(fc='white', ec='0.7', alpha=0.85, pad=2.5))
+
+    # ── (c) width sensitivity + plateau ──────────────────────────────────────
+    ax = axs[0, 2]
+    if plateau_in is not None:                 # the sub-tolerance run = the plateau
+        ax.axvspan(plateau_in[0], plateau_in[1], color='tab:green', alpha=0.10,
+                   label='plateau')
+    ax.loglog(scan_w_in, scan_max, color='tab:purple', marker='.', ms=3,
+              label=r'$\max|s_\Delta|$')
+    ax.loglog(scan_w_in, scan_rms, color='tab:blue', marker='.', ms=3, lw=2,
+              label=r'$s_{\rm rms}$  (selects $\Delta_*$)')
+    ax.loglog(scan_w_in, scan_ES, color='crimson', marker='.', ms=3,
+              label=r'ES $=\langle|s_\Delta|\rangle$  ($\Delta$-invariant)')
+    _hl = fit if (fit is not None and fit.get('ES') is not None) else analytic
+    if _hl is not None:
+        for _k, _c in (('s_max', 'tab:purple'), ('s_rms', 'tab:blue'), ('ES', 'crimson')):
+            if _hl.get(_k) is not None:
+                ax.axhline(_hl[_k], color=_c, ls=':', lw=1.0)
+    ax.axvline(w_opt_in, color='black', ls='--', lw=1.0,
+               label=r'chosen $\Delta^{+}_{*}=%.0f$' % w_opt_in)
+    ax.set_xlabel(r'coarse-graining width  $\Delta^+$')
+    ax.set_ylabel('slope statistic')
+    ax.set_title('(c) resolution dependence — staircase spikes (small $\\Delta$), '
+                 'plateau, over-smoothing (large $\\Delta$)', fontsize=9)
+    ax.grid(alpha=0.3, which='both'); ax.legend(fontsize=7, loc='lower left')
+    if es_note:
+        ax.text(0.98, 0.95, es_note, transform=ax.transAxes, ha='right', va='top',
+                fontsize=7.5, bbox=dict(fc='white', ec='0.7', alpha=0.85, pad=2.5))
+
+    # ── (f) 2-D generalized slope angle in the interface band, in RADIANS ────
+    ax = axs[1, 2]
+    # ∇ε̄ is concentrated ON the interface, so the band is only a few cells thick —
+    # crop just above the crest or the ribbon shrinks to a line.
+    _zc  = float(np.nanmax(h_in)) if np.isfinite(np.nanmax(h_in)) else float(y_in[-1])
+    _zl  = zlim if zlim is not None else 1.35*max(_zc, y_in[1])
+    _lim = int(np.searchsorted(y_in, _zl)) + 1
+    _lim = int(min(max(_lim, 2), np.size(y_in)))
+    _ang = np.arctan(slope2d[:_lim, :])                       # radians
+    _v   = float(np.nanpercentile(np.abs(_ang), 99)) if np.any(np.isfinite(_ang)) else 1.0
+    _v   = _v if _v > 0 else 1.0
+    _cf  = ax.contourf(x_in, y_in[:_lim], np.clip(_ang, -_v, _v),
+                       levels=np.linspace(-_v, _v, 101), cmap='RdBu_r', extend='both')
+    ax.plot(x_oro_in, y_oro_in, color='black', lw=0.8)
+    _cb = plt.colorbar(_cf, ax=ax,
+                       label=r'$\theta=\arctan(\mathrm{d}h/\mathrm{d}x)$  [rad]')
+    _cb.ax.tick_params(labelsize=7)
+    ax.set_ylim(0, y_in[_lim - 1])
+    ax.set_xlabel(r'$x^+$'); ax.set_ylabel(r'$z^+$')
+    ax.set_title(r'(f) 2-D generalized slope from $\nabla\bar\varepsilon$ '
+                 '[rad]', fontsize=9)
+
+    if title:
+        fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(savename, dpi=200)
+    plt.show()

@@ -944,6 +944,44 @@ def _range_note(cbar_label, dmin, dmax):
     return _note if not cbar_label else '%s\n%s' % (cbar_label, _note)
 
 
+# ── Wall-unit normalization of the 2-D phase-average field maps ──────────────
+# Every 2-D comparison map is drawn in the case's OWN wall (inner) units, so the
+# colour value is dimensionless in u* rather than in geostrophic (u/G) units.
+# The field is multiplied by  pre / u*_case**unorm  (smooth panel by ustr_s1).
+# Powers by physical dimension:
+#   velocity          u_i           -> /u*        (unorm=1)
+#   velocity^2        p, TKE, ⟨u_iu_j⟩, ũ_iũ_j, ⟨u_i⟩⟨u_j⟩  -> /u*^2   (unorm=2)
+#   vorticity         ω_y           -> ·ν/u*^2    (pre=ν, unorm=2)
+#   scalar/buoyancy, streamfunction, Poisson source, turning ANGLE:
+#       no single clean u* power (θ is a 1→0 deficit; ψ/source need ν too) ->
+#       left in their stored units (unorm=0).  See the note printed at run time.
+def _wall_power(field_key):    # [U*-NORM] field-map wall-unit classifier
+    """(pre, unorm): plotted = pre * field / u*^unorm.  unorm=0 → unchanged."""
+    k = field_key
+    if k in ('vort_z', 'disp_vortz'):
+        return (nu, 2)                       # ω·ν/u*^2
+    if k in ('AvgPhU', 'AvgPhV', 'AvgPhW',
+             'DispVelU', 'DispVelV', 'DispVelW',
+             'inst_u', 'inst_v', 'inst_w'):
+        return (1.0, 1)                      # velocity → u+
+    if k in ('AvgP', 'TKE'):
+        return (1.0, 2)                      # p/ρu*^2 ; k/u*^2
+    if k.endswith('_mean') and k.startswith('Ph'):
+        return (1.0, 2)                      # mean-flow stress ⟨u_i⟩⟨u_j⟩
+    if k.startswith(('tot_', 'reyn_', 'rey_')):
+        return (1.0, 2)                      # total / Reynolds / turbulent stress
+    if k.endswith('_disp') and len(k) == 7:  # UU_disp … WW_disp (dispersive stress)
+        return (1.0, 2)
+    return (1.0, 0)                          # scalar / advanced / angle: unchanged
+
+def _wall_note(pre, unorm):
+    """Colorbar suffix describing the wall-unit scaling applied."""
+    if unorm == 0:
+        return ''
+    if pre is nu or pre == nu:
+        return r'$\,\nu/u_*^2$'
+    return r'$/u_*$' if unorm == 1 else r'$/u_*^{%d}$' % unorm
+
 def plot2D_allRe(field_key, suptitle, cmap_name, savename,
                  ylim=None, use_inner=True, cbar_label=None,
                  include_smooth=True, shared_scale='auto',
@@ -955,6 +993,19 @@ def plot2D_allRe(field_key, suptitle, cmap_name, savename,
     if not _avail:
         print(f'plot2D_allRe: no data for {field_key}')
         return
+
+    # [U*-NORM] Per-case wall-unit scaling (see _wall_power): each panel is divided
+    # by that case's own u*^unorm so the comparison is in inner units, not
+    # geostrophic.  Applied to EVERY plot2D_allRe field map (P01,P02,… velocity,
+    # pressure, TKE, stresses, vorticity) — that is why the individual
+    # plot2D_allRe('AvgPhU',…) call sites below are unchanged: the scaling lives
+    # here in the helper, not at each call.
+    _pre, _un = _wall_power(field_key)
+    def _wscale(_cn):
+        return (_pre / norm_ustar(_cn) ** _un) if _un else 1.0
+    _sm_scale = (_pre / _ustar_ref ** _un) if _un else 1.0  # smooth uses its own u* (safe if unloaded)
+    if _un and cbar_label is None:
+        cbar_label = _wall_note(_pre, _un)
 
     # All contour panels share the common z+=800 extent (ylim retained for
     # API compatibility but no longer sets the wall-normal crop).
@@ -968,11 +1019,14 @@ def plot2D_allRe(field_key, suptitle, cmap_name, savename,
     _sm_arr = _smooth_field_2d(field_key) if include_smooth else None
     if _sm_arr is not None:
         _zs = y_in_s if use_inner else y_s
-        _panels.append((_smooth['label'], sx, _zs, _sm_arr,
+        _panels.append((_smooth['label'], sx, _zs,
+                        _sm_arr * _sm_scale if _un else _sm_arr,   # [U*-NORM] smooth panel
                         _clip_rows(_zs, _zmax), np.array([]), np.array([]), None))
     for cn, lb in _avail:
         _xp, _yp, _xo, _yo = _case_grid(cn, use_inner)
-        _panels.append((lb, _xp, _yp, gv(field_key, cn),
+        _fld_cn = gv(field_key, cn)
+        _panels.append((lb, _xp, _yp,
+                        _fld_cn * _wscale(cn) if _un else _fld_cn,   # [U*-NORM] per-case panel
                         _clip_rows(_yp, _zmax), _xo, _yo, geps(cn)))
 
     npan = len(_panels)
@@ -2210,7 +2264,7 @@ def case_nu(case):
     at module level."""
     return SIM_NU.get(case, nu)
 # CLAUDE.md "Physics constants per Reynolds number" — fallback only.
-SIM_USTAR_FALLBACK = {'re500_oro': 0.077, 're750_oro': 0.06732}
+SIM_USTAR_FALLBACK = {'re500_oro': 0.068, 're750_oro': 0.067}
 SIM_USTAR_MEASURED = {}   # filled after the pickles load (see the resolver below)
 
 # Per-case override for the intermittency .npz directory ONLY.  A case absent
@@ -2416,7 +2470,7 @@ else:
           '(log layers should collapse; higher Re = longer log region).')
 print('-' * 78)
 
-def norm_ustar(case):
+def norm_ustar(case):          # [U*-NORM] inner-scale velocity/stress normalizer
     """VELOCITY / stress normalization scale for this case = the case's OWN
     MEASURED Method-2 plateau friction velocity (case_ustar / _ustar_measured).
 
