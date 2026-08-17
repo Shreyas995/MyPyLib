@@ -14,16 +14,37 @@ WHAT DIFFERS FROM results.py
 ----------------------------
 results.py varies the Froude number at FIXED Re = 500.  This file does the
 opposite: stratification is held at NEUTRAL (Fr = inf) and the Reynolds number
-varies, so every difference between the two cases is a Reynolds effect.
+varies, so every difference between the cases is a Reynolds effect.
 
-  cwd1  Ekman18/        Re_D = 500   (also the reference grid / IBM geometry)
-  cwd2  Ekman18/Re750/  Re_D = 750
+  cwd1  EkRe500FrInf/    Re_D = 500
+  cwd2  EkRe750FrInf/    Re_D = 750
+  cwd3  EkRe1000FrInf/   Re_D = 1000   (commented out by default)
+
+  nc1   Re500/ri00.00_re0500_..._avg_all.nc    SMOOTH (flat) reference, Re_D=500
+  nc2   Re1000/ri00.00_re1000_..._avg_all.nc   SMOOTH (flat) reference, Re_D=1000
+
+  The Re500/ and Re1000/ folders in the examples ROOT hold the SMOOTH (flat
+  wall) NetCDF references; the EkRe*FrInf folders are the VALLEY simulations.
+
+0. DATA SOURCES ARE A SINGLE SWITCH — for the valley cases (cwd1/cwd2/cwd3)
+   AND for the smooth references (nc1/nc2) alike.  COMMENTING OUT A SOURCE LINE
+   REMOVES IT COMPLETELY — a commented source is an ABSENT source.  EVERY
+   declared smooth reference is DRAWN (one curve per reference, each in its own
+   wall units), so the figures carry as many flat-wall benchmarks as there are
+   uncommented nc* lines.  Every derived
+   table (SIM_DIRS / CASES / ACTIVE_CASES / USTAR_REF / SIM_FR / SIM_RE /
+   SIM_NU / SIM_USTAR_FALLBACK) is built from the CASE REGISTRY, which only
+   picks up the cwdN names that exist, so nothing downstream can reference a
+   case that was switched off.  The reference grid / IBM geometry is taken from
+   the first declared case directory that carries a `grid` file (NOT hardwired
+   to cwd1, which used to break the moment cwd1 was commented out).
 
 1. PER-CASE WALL UNITS.  results.py could use the single global nu / u* / l_in
    from config.py because Re was fixed.  Here nu = 1/(0.5*Re_D^2) and
-   l_in = nu/u* are PER-CASE.  u* is each case's own measured Method-2 value
-   (pickled u_star2) when available, else the CLAUDE.md table (the Re=750 entry
-   is an ESTIMATE until that flow is measured).
+   l_in = nu/u* are PER-CASE — including for the smooth reference, whose nu
+   follows the smooth file actually selected.  u* is each case's own measured
+   Method-2 value (pickled u_star2) when available, else the CLAUDE.md table
+   (the Re=750 / Re=1000 entries are ESTIMATES until those flows are measured).
 
 2. NORMALIZATION IS A USER INPUT.  The single knob is the USTAR_REF dict near
    the top of the file — one reference friction velocity per case:
@@ -32,9 +53,10 @@ varies, so every difference between the two cases is a Reynolds effect.
        u+ = u / USTAR_REF[case],   tau / USTAR_REF[case]**2
 
    Defaults are each case's smooth-wall reference (Re=500 → 0.0618,
-   Re=750 → 0.0561), so every case is drawn in its OWN wall units — the
-   physically correct inner scaling for comparing Reynolds numbers, in which
-   the log layers should collapse and the higher Re shows a longer log region.
+   Re=750 → 0.0561, Re=1000 → 0.0531; they live in the case registry as
+   `ustar_ref`), so every case is drawn in its OWN wall units — the physically
+   correct inner scaling for comparing Reynolds numbers, in which the log
+   layers should collapse and the higher Re shows a longer log region.
 
    SET THE USTAR_REF ENTRIES EQUAL to normalize every case by one common
    velocity scale and see the raw, uncollapsed Reynolds effect.  (That equates
@@ -46,13 +68,13 @@ varies, so every difference between the two cases is a Reynolds effect.
 
    ONE set of figures is produced, written directly into fig_Re/.
 
-3. WALL LAW.  Both cases are neutral, so every fit takes the classical
+3. WALL LAW.  Every case is neutral, so every fit takes the classical
    ln(z+ - d+) branch.  The Obukhov (1971) stability-corrected branch is
    retained but unreachable on this ladder.
 
 4. FROUDE-LADDER BLOCKS PRESERVED, NOT DELETED.  The cross-case vs-Ri_B
    aggregation (X1-X10 / P72-P78) is kept verbatim and gated off by
-   PLOT_FR_LADDER, since Ri_B = 0 for both neutral cases would collapse every
+   PLOT_FR_LADDER, since Ri_B = 0 for every neutral case would collapse every
    such view to a single point.  Intermittency (P79-P84) is deliberately left
    ENABLED — Ansorge gamma is Reynolds-dependent and meaningful at neutral.
 
@@ -253,7 +275,7 @@ def epsfield():
     # read
     #-----------------------------------------------------------------------------#
     # header
-    f = open(cwd1 + fname,'rb')
+    f = open(_REF_DIR + fname,'rb')
     f.seek(0,0)
     header = np.fromfile(f, type_i4, head_params)
     f.close()
@@ -265,7 +287,7 @@ def epsfield():
     rsize = bsize * 8
 
     # read eps field as int1
-    f = open(cwd1 + fname,'rb')
+    f = open(_REF_DIR + fname,'rb')
     f.seek(header[0],0)
     data = np.fromfile(f, np.dtype('<i1'), bsize)
     f.close()
@@ -574,71 +596,152 @@ def plot_frame(ax, x, y, field_2D):
 # at CALL time — those names are populated by the main body and the plotRes block
 # before any of these functions run, so the relocation does not change behaviour.
 ###############################################################################
-def gv(name, case='re500_oro'):
+def _dflt_case(case=None):
+    """Resolve an omitted `case` argument to the FIRST DECLARED case.
+
+    The per-case helpers below used to default to the literal 're500_oro',
+    which silently returned nothing the moment that data source was commented
+    out.  SIM_DIRS is read at CALL time, so the default always follows whichever
+    sources are actually declared."""
+    return case if case is not None else next(iter(SIM_DIRS), None)
+
+def gv(name, case=None):
     """Return sims[case][name]; None if absent."""
+    case = _dflt_case(case)
     return sims.get(case, {}).get(name)
 
-def gy_in(case='re500_oro'):
+_OWN_GRID_CACHE = {}
+
+def _case_own_grid(case):
+    """This case's OWN grid + IBM geometry, read from its data directory.
+
+    Used only as a FALLBACK for a legacy/stale pickle that predates per-case
+    grid bundling (no 'x'/'y'/'eps' inside sim1_results.pkl).  Without it such a
+    case can be placed on NO wall-normal axis and is skipped by every shared
+    z+/z- figure — which is exactly how a case silently disappears from the
+    *_allRe plots while the case that happens to own the reference grid still
+    draws.  Reads only `grid` and `eps_save.npy` (the same two files stage c
+    already reads for the reference case) — never a raw field record.
+
+    Returns {'x','y','z','eps','mask0'} (eps/mask0 may be None) or None.
+    Cached per case."""
+    if case in _OWN_GRID_CACHE:
+        return _OWN_GRID_CACHE[case]
+    _d = SIM_DIRS.get(case)
+    _out = None
+    if _d and os.path.exists(_d + 'grid'):
+        try:
+            _xc, _yc, _zc = read_grid(_d)
+            _ec = None
+            if os.path.exists(_d + 'eps_save.npy'):
+                _ec = np.load(_d + 'eps_save.npy')
+                if _ec.shape != (len(_yc), len(_xc)):
+                    print('  %s: eps_save.npy %s does not match its grid (%d, %d)'
+                          ' — ignored' % (case, _ec.shape, len(_yc), len(_xc)))
+                    _ec = None
+            _out = {'x': _xc, 'y': _yc, 'z': _zc, 'eps': _ec,
+                    'mask0': (1 - _ec) if _ec is not None else None}
+            print('  %s: per-case grid read from its own `grid` file '
+                  '(pickle carries none): ny=%d, nx=%d'
+                  % (case, len(_yc), len(_xc)))
+        except Exception as _e_g:
+            print('  %s: could not read its own grid (%s)' % (case, _e_g))
+    _OWN_GRID_CACHE[case] = _out
+    return _out
+
+
+def _case_axis_y(case):
+    """(y_physical, source) — the wall-normal grid THIS case's profiles are
+    plotted against, tried in order:
+      1. the per-case grid bundled in its pickle          ('pickle')
+      2. this case's own `grid` file in its data dir      ('own grid file')
+      3. the shared reference grid                        ('reference grid')
+    A candidate is accepted only if its length matches the case's own profile
+    length (so a case on a different grid is never silently drawn on the wrong
+    axis).  Returns (None, reason) when nothing matches — the caller then skips
+    that case, and the PLOT READINESS table prints the reason."""
+    _sd = sims.get(case, {})
+    if not _sd:
+        return None, 'no pickle loaded'
+    _probe = _sd.get('u_plus_rot')
+    _n = len(_probe) if _probe is not None else None
+    _OWN = object()                            # sentinel: resolve lazily
+    for _cand, _src in ((_sd.get('y'), 'pickle'), (_OWN, 'own grid file'),
+                        (y, 'reference grid')):
+        if _cand is _OWN:                      # reads that case's `grid` file
+            _own = _case_own_grid(case)
+            _cand = _own['y'] if _own else None
+        if _cand is None:
+            continue
+        if _n is None or len(_cand) == _n:
+            return _cand, _src
+    return None, ('no grid matches this case\'s profile length (ny=%s)' % _n)
+
+
+def gy_in(case=None):
     """Per-case wall-normal grid in inner units (Reynolds-ladder specific).
 
     Returns the case's own physical grid y (which may have a different ny than
-    the reference grid) divided by norm_l_in(case) = nu(case)/USTAR_REF[case],
-    i.e. by the wall unit implied by the USER INPUT reference velocity.  With
-    distinct USTAR_REF entries each case is in its own true wall units (log
-    layers should collapse across Reynolds number); equate the entries to put
-    every case on one common velocity scale.
+    the reference grid) divided by norm_l_in(case) = nu(case)/norm_ustar(case),
+    i.e. by that case's own wall unit.  With distinct u* per case each case is
+    in its own true wall units (log layers should collapse across Reynolds
+    number); equate the USTAR_REF entries to put every case on one common
+    velocity scale.  results.py divided by the single global l_in
+    unconditionally, which is only valid when every case shares one Re.
 
-    In results.py this divided by the single global l_in unconditionally, which
-    is only valid when every case shares one Reynolds number.
+    The grid itself comes from _case_axis_y: pickle → the case's own `grid`
+    file → the reference grid.  None only when none of the three matches the
+    case's profile length (the caller then skips it instead of crashing)."""
+    _yg, _ = _case_axis_y(_dflt_case(case))
+    return None if _yg is None else _yg / norm_l_in(_dflt_case(case))
 
-    Legacy/stale pickles (predating per-case grid bundling) carry no 'y'.
-    For those we fall back to the reference physical grid y ONLY when the
-    case's profile length matches it (i.e. the case really is on the reference
-    grid); a legacy pickle on a different grid can't be placed on the inner
-    axis, so we return None and the caller skips it rather than crashing on a
-    length mismatch.
-    """
-    _sd = sims.get(case, {})
-    _yg = _sd.get('y')
-    if _yg is not None:
-        return _yg / norm_l_in(case)
-    _probe = _sd.get('u_plus_rot')
-    if _probe is not None and len(_probe) == len(y_in):
-        return y / norm_l_in(case)
-    return None
+def geps(case=None):
+    """Per-case IBM indicator eps (1 in solid): pickled per-case eps → the eps
+    saved beside that case's own grid → the reference eps (last resort, correct
+    only for a case actually on the reference grid)."""
+    case = _dflt_case(case)
+    _e = sims.get(case, {}).get('eps')
+    if _e is None:
+        _own = _case_own_grid(case)
+        _e = _own['eps'] if _own else None
+    return eps if _e is None else _e
 
-def geps(case='re500_oro'):
-    """Per-case IBM indicator eps (1 in solid). Falls back to the reference
-    eps for a case whose pickle predates the per-case grid bundling."""
-    return sims.get(case, {}).get('eps', eps)
+def gmask0(case=None):
+    """Per-case fluid mask (1-eps), same fallback chain as geps."""
+    case = _dflt_case(case)
+    _m = sims.get(case, {}).get('mask0')
+    if _m is None:
+        _own = _case_own_grid(case)
+        _m = _own['mask0'] if _own else None
+    return mask0 if _m is None else _m
 
-def gmask0(case='re500_oro'):
-    """Per-case fluid mask (1-eps); falls back to the reference mask0."""
-    return sims.get(case, {}).get('mask0', mask0)
-
-def geps_f(case='re500_oro'):
+def geps_f(case=None):
     """Per-case fluid-fraction column weight for intrinsic x-averages:
     mean_x(mask0) with zeros replaced by NaN (avoids divide-by-zero)."""
-    _m = np.mean(gmask0(case), axis=1)
+    _m = np.mean(gmask0(_dflt_case(case)), axis=1)
     return np.where(_m > 0, _m, np.nan)
 
-def gx_in(case='re500_oro'):
+def gx_in(case=None):
     """Per-case streamwise grid in inner units under the ACTIVE normalization
     mode (x / norm_l_in(case) — see gy_in).  A case on a different grid than
     the reference has a different nx, so x-distribution profiles (e.g.
     AVG_TKE_V) must be plotted against THIS case's own x.  Falls back to the
     reference x for a legacy pickle that carries no per-case 'x'."""
+    case = _dflt_case(case)
     _xg = sims.get(case, {}).get('x')
+    if _xg is None:
+        _own = _case_own_grid(case)
+        _xg = _own['x'] if _own else None
     return (x if _xg is None else _xg) / norm_l_in(case)
 
-def ghill(case='re500_oro'):
+def ghill(case=None):
     """Per-case valley-crest ROW index from THIS case's eps, using the same
     definition as the global hill_hgt (max solid-cell column count - 1).
     Cases on different wall-normal grids place the crest at a different index,
     so any per-case profile sampled 'at the crest' (u*, hodograph markers)
     must use this, not the neutral hill_hgt (= 94).  Falls back to the neutral
     hill_hgt when the case has no per-case eps (geps returns the reference)."""
-    _e = geps(case)
+    _e = geps(_dflt_case(case))
     if _e is eps:
         return hill_hgt
     return int(np.max(np.sum(_e, axis=0).astype(int)) - 1)
@@ -657,14 +760,20 @@ def _xprof(case, field):
     return avg_c(geps(case), _f, axis=1) if _f.ndim == 2 else _f
 
 def all_handles():
-    """Legend handles for active cases (smooth if loaded + active rough-wall)."""
-    _h = []
-    if _smooth_loaded:
-        _h.append(Line2D([0],[0], color=_smooth['color'], linestyle=_smooth['ls'],
-                         label=_smooth['label']))
+    """Legend handles for everything drawn: ONE handle per loaded smooth
+    reference (in registry order) followed by the active valley cases."""
+    _h = [Line2D([0], [0], color=SMOOTH_MAP[_k]['color'],
+                 linestyle=SMOOTH_MAP[_k]['ls'], label=SMOOTH_MAP[_k]['label'])
+          for _k in SMOOTH_KEYS]
     _h += [Line2D([0],[0], color=c['color'], linestyle=c['ls'], label=c['label'])
            for c in _sims]
     return _h
+
+def smooth_handles():
+    """Legend handles for the loaded smooth references only."""
+    return [Line2D([0], [0], color=SMOOTH_MAP[_k]['color'],
+                   linestyle=SMOOTH_MAP[_k]['ls'], label=SMOOTH_MAP[_k]['label'])
+            for _k in SMOOTH_KEYS]
 
 def sim_handles():
     """Legend handles for the active rough-wall cases only — lines only."""
@@ -1003,7 +1112,8 @@ def plot2D_allRe(field_key, suptitle, cmap_name, savename,
     _pre, _un = _wall_power(field_key)
     def _wscale(_cn):
         return (_pre / norm_ustar(_cn) ** _un) if _un else 1.0
-    _sm_scale = (_pre / _ustar_ref ** _un) if _un else 1.0  # smooth uses its own u* (safe if unloaded)
+    # (the smooth panels scale by the u* of the reference being drawn — see
+    # _sm_scale_r inside the smooth_refs() loop below)
     if _un and cbar_label is None:
         cbar_label = _wall_note(_pre, _un)
 
@@ -1016,12 +1126,19 @@ def plot2D_allRe(field_key, suptitle, cmap_name, savename,
     # rough Fr cases each on their own grid (a common z-extent _zmax keeps the
     # panels comparable across grids).
     _panels = []
-    _sm_arr = _smooth_field_2d(field_key) if include_smooth else None
-    if _sm_arr is not None:
-        _zs = y_in_s if use_inner else y_s
-        _panels.append((_smooth['label'], sx, _zs,
-                        _sm_arr * _sm_scale if _un else _sm_arr,   # [U*-NORM] smooth panel
-                        _clip_rows(_zs, _zmax), np.array([]), np.array([]), None))
+    # ONE panel per loaded smooth reference (each on its own grid + own u*),
+    # then the valley cases.  smooth_refs() rebinds the flat *_s names, so the
+    # body below is the single-reference code unchanged.
+    if include_smooth:
+        for _ in smooth_refs():
+            _sm_arr = _smooth_field_2d(field_key)
+            if _sm_arr is None:
+                continue
+            _zs = y_in_s if use_inner else y_s
+            _sm_scale_r = (_pre / ustr_s1 ** _un) if _un else 1.0
+            _panels.append((SMOOTH_LABEL, sx, _zs,
+                            _sm_arr * _sm_scale_r if _un else _sm_arr,  # [U*-NORM] smooth panel
+                            _clip_rows(_zs, _zmax), np.array([]), np.array([]), None))
     for cn, lb in _avail:
         _xp, _yp, _xo, _yo = _case_grid(cn, use_inner)
         _fld_cn = gv(field_key, cn)
@@ -1984,7 +2101,8 @@ def _print_run_summary():
     print('\n--- tally ---')
     print('  cases with pickle (diagnosed): %s' % (_plotted or 'none'))
     print('  cases skipped (no pickle)    : %s' % (_skipped or 'none'))
-    print('  smooth reference loaded      : %s' % _smooth_loaded)
+    print('  smooth references drawn      : %s'
+          % (', '.join(SMOOTH_KEYS) if SMOOTH_KEYS else 'none'))
     print('#' * 78)
 ###############################################################################
 ############################# Varaible decleration ############################
@@ -2053,40 +2171,126 @@ _ONLY_SHEAR = plot_only in ('shear', 'tau', 'p46', 'p47', 'p46p47')
 # whole examples tree and the paths still resolve).
 cwd = str(os.path.dirname(__file__) + '/' )
 # ═══════════════════════════════════════════════════════════════════════════
-# REYNOLDS LADDER (this file) — two NEUTRAL valley runs, Fr = ∞ for BOTH.
+# REYNOLDS LADDER (this file) — NEUTRAL valley runs, Fr = ∞ for ALL of them.
 # ═══════════════════════════════════════════════════════════════════════════
 # This is the Reynolds-number counterpart of results.py's Froude ladder: the
 # stratification is held FIXED at neutral and the Reynolds number is varied, so
-# every difference between the two cases is a Reynolds effect (see the
-# per-case physics block below — nu and u* now differ BY CASE, which the
-# Froude-ladder results.py never had to handle because Re was fixed at 500).
+# every difference between the cases is a Reynolds effect (see the per-case
+# physics block below — nu and u* now differ BY CASE, which the Froude-ladder
+# results.py never had to handle because Re was fixed at 500).
 #
-#   cwd1  Ekman18/        Re_D = 500   (reference: grid, eps, IBM geometry)
-#   cwd2  Ekman18/Re750/  Re_D = 750
+# EXPECTED LAYOUT (everything is relative to the examples root = the directory
+# this file sits in, so the whole tree can be moved):
 #
-# Both are sub-directories of cwd (the examples root), so the data is found
-# wherever that root is placed.  The trailing '/' is REQUIRED — every consumer
-# builds paths as `<dir> + 'sim1_results.pkl'`.
+#   <root>/EkRe500FrInf/    Re_D = 500   SIMULATION dir  (sim1_results.pkl + grid)
+#   <root>/EkRe750FrInf/    Re_D = 750   SIMULATION dir
+#   <root>/EkRe1000FrInf/   Re_D = 1000  SIMULATION dir
+#   <root>/Re500/*.nc       flat smooth-wall NetCDF REFERENCE, Re_D = 500
+#   <root>/Re1000/*.nc      flat smooth-wall NetCDF REFERENCE, Re_D = 1000
 #
-# NOTE on the directory layout: Ekman18/Re500/ holds the smooth-wall NetCDF
-# REFERENCE (see _nc_smooth below), so Ekman18/Re750/ is its sibling.  This
-# file expects Re750/ to be a SIMULATION directory (carrying sim1_results.pkl
-# written by PhAvg_rotated.py), not a NetCDF reference directory.  The loader
-# below reports explicitly which of the two it actually found.
+# The trailing '/' on each case dir is REQUIRED — every consumer builds paths as
+# `<dir> + 'sim1_results.pkl'`.  A case dir must carry a pickle written by
+# PhAvg_rotated.py (stage b); the loader below reports explicitly whether it
+# found a simulation dir, a NetCDF-only dir, or nothing.
 _base = cwd                                      # examples root = where this file sits
-cwd1 = _base + 'Ekman18/'                        # Neutral Fr = ∞, Re_D = 500 (valley present)
-cwd2 = _base + 'Ekman18/Re750/'                  # Neutral Fr = ∞, Re_D = 750 (valley present)
-# Reference grid + IBM geometry come from the NEUTRAL case (cwd1): the central
-# examples/ root holds no grid of its own, and the valley geometry (eps, nx, ny,
-# hill_hgt) used for the 2-D orographic plots is the neutral-case grid.
-x, y, z = read_grid(cwd1)
+
+# ── DATA SOURCES — one line per Reynolds number ──────────────────────────────
+# COMMENT A LINE OUT TO DROP THAT CASE.  A commented source is an ABSENT source:
+# the case then disappears from every table, legend, figure and console block
+# and NOTHING downstream fails.  The registry below picks up only the cwdN names
+# that actually exist (globals()), so nothing else in this file has to change —
+# do not add the case name anywhere else by hand.
+cwd1 = _base + 'EkRe500FrInf/'          # Neutral Fr = ∞, Re_D = 500  (valley present)
+cwd2 = _base + 'EkRe750FrInf/'          # Neutral Fr = ∞, Re_D = 750  (valley present)
+# cwd3 = _base + 'EkRe1000FrInf/'       # Neutral Fr = ∞, Re_D = 1000 (valley present)
+
+###############################################################################
+# CASE REGISTRY — the SINGLE source of truth for the whole ladder.
+#
+# One entry per possible case; 'var' names the source variable above.  An entry
+# whose 'var' is not defined (its line is commented out) is simply DECLARED
+# ABSENT: it contributes to no dict, no legend and no loop.  Everything the rest
+# of the file used to hold in separate hand-maintained dicts — SIM_DIRS, CASES,
+# ACTIVE_CASES, USTAR_REF, SIM_FR, SIM_RE, SIM_NU, SIM_USTAR_FALLBACK — is
+# derived from this table below, so the three data-source lines above are the
+# only place a case is switched on or off.
+#
+#   Re          : Re_D  (nu = 1/(0.5*Re_D^2) — the per-case viscosity)
+#   Fr          : wall-law switch (np.inf = neutral -> classical ln(z+ - d+))
+#   ustar_ref   : USER-INPUT normalization fallback u* (see USTAR_REF below)
+#   ustar_fall  : CLAUDE.md physics-table u*, used only if the pickle carries no
+#                 measured u_star2 (Re=750/1000 entries are ESTIMATES: the
+#                 smooth-wall value +20 % for orography, not measurements)
+###############################################################################
+_CASE_REGISTRY = (
+    {'name': 're500_oro',  'var': 'cwd1', 'Re': 500.0,  'Fr': np.inf,
+     'label': r'$Re_D=500$',  'color': '#1565C0', 'ls': '--', 'marker': 's',
+     'ustar_ref': 0.0618, 'ustar_fall': 0.068},
+    {'name': 're750_oro',  'var': 'cwd2', 'Re': 750.0,  'Fr': np.inf,
+     'label': r'$Re_D=750$',  'color': '#C62828', 'ls': '-.', 'marker': '^',
+     'ustar_ref': 0.0561, 'ustar_fall': 0.067},
+    {'name': 're1000_oro', 'var': 'cwd3', 'Re': 1000.0, 'Fr': np.inf,
+     'label': r'$Re_D=1000$', 'color': '#2E7D32', 'ls': ':',  'marker': 'D',
+     'ustar_ref': 0.0531, 'ustar_fall': 0.06372},
+)
+# A source counts as DECLARED only if its cwdN variable exists and is a string.
+_DECLARED = [_e for _e in _CASE_REGISTRY
+             if isinstance(globals().get(_e['var']), str)]
+_ABSENT   = [_e for _e in _CASE_REGISTRY
+             if _e['name'] not in {_d['name'] for _d in _DECLARED}]
+if not _DECLARED:
+    raise SystemExit('results_Re.py: every data source (cwd1/cwd2/cwd3) is '
+                     'commented out — nothing to post-process.')
+
+SIM_DIRS            = {_e['name']: globals()[_e['var']] for _e in _DECLARED}
+SIM_RE              = {_e['name']: _e['Re']             for _e in _DECLARED}
+SIM_FR              = {_e['name']: _e['Fr']             for _e in _DECLARED}
+SIM_USTAR_FALLBACK  = {_e['name']: _e['ustar_fall']     for _e in _DECLARED}
+# nu = 1/(0.5*Re_D^2)  (tlab convention: nu = 1/Re_lambda, Re_lambda = 0.5*Re_D^2)
+#   Re_D = 500 -> 8.0e-6,  750 -> 3.5556e-6,  1000 -> 2.0e-6
+SIM_NU              = {_k: 1.0 / (0.5 * _v ** 2) for _k, _v in SIM_RE.items()}
+
+def case_nu(case):
+    """Kinematic viscosity OF THIS CASE.  On the Froude ladder results.py could
+    use the single global `nu` everywhere because Re was fixed at 500; here it
+    differs by case (nu = 1/(0.5*Re_D^2)), so every expression forming a case's
+    inner units, viscous stress or delta+ must go through this.  Falls back to
+    the global config nu (Re=500) for an unknown case.  'Sm_Neu' (the flat
+    smooth reference) is registered in SIM_NU below with the viscosity of
+    WHICHEVER smooth NetCDF was selected, so it is correct at any Reynolds
+    number, not only 500."""
+    return SIM_NU.get(case, nu)
+
+print('-' * 78)
+print('REYNOLDS LADDER — data sources')
+for _e in _DECLARED:
+    print('  declared : %-12s Re_D=%-6.0f %s  (%s)'
+          % (_e['name'], _e['Re'], SIM_DIRS[_e['name']], _e['var']))
+for _e in _ABSENT:
+    print('  absent   : %-12s Re_D=%-6.0f (%s commented out — case dropped '
+          'from every plot/table)' % (_e['name'], _e['Re'], _e['var']))
+
+# Reference grid + IBM geometry: the central examples/ root holds no grid of its
+# own, so they come from the FIRST DECLARED case directory that actually carries
+# a `grid` file (previously hardwired to cwd1, which broke as soon as cwd1 was
+# commented out).  Every per-case calculation still uses that case's OWN pickled
+# grid/eps; this reference only sets the shared axes and the valley geometry
+# (nx, ny, hill_hgt) of the 2-D orographic panels.
+_REF_DIR = next((_d for _d in SIM_DIRS.values() if os.path.exists(_d + 'grid')),
+                None)
+if _REF_DIR is None:
+    raise SystemExit('results_Re.py: no declared case directory carries a '
+                     '`grid` file — checked %s' % list(SIM_DIRS.values()))
+print('  reference grid / IBM geometry from: %s' % _REF_DIR)
+print('-' * 78)
+x, y, z = read_grid(_REF_DIR)
 
 nx = np.size(x)
 ny = np.size(y)
 nz = np.size(z)
     
 try:
-    eps = np.load(cwd1 + 'eps_save.npy')   # IBM indicator from the neutral case grid
+    eps = np.load(_REF_DIR + 'eps_save.npy')  # IBM indicator from the reference case grid
     print('eps loaded')
 except:
     print('Needed to read eps field')
@@ -2128,14 +2332,113 @@ mask0 = 1 - eps
 
 ###############################################################################
 # MASTER PLOT CONTROL
-# Set PLOT_SMOOTH and ACTIVE_CASES to choose which simulations appear in
-# every plot.  Comment out any name to exclude it; all styling is automatic.
+# PLOT_SMOOTH toggles the flat smooth-wall NetCDF reference.  ACTIVE_CASES is
+# DERIVED from the data sources (cwd1/cwd2/cwd3): every declared case is active,
+# so a case is switched off by commenting its source line — not by editing a
+# second list here that could silently disagree with it.  DISABLE_CASES is the
+# escape hatch for keeping a source line but hiding that case from the figures.
 ###############################################################################
-PLOT_SMOOTH = True   # smooth-wall NetCDF reference (flat wall, Fr = inf, Re = 500)
-ACTIVE_CASES = {
-    're500_oro',    # Neutral, Fr = inf, Re_D = 500
-    're750_oro',    # Neutral, Fr = inf, Re_D = 750
-}
+PLOT_SMOOTH   = True     # smooth-wall NetCDF reference (flat wall, Fr = inf)
+DISABLE_CASES = set()    # e.g. {'re750_oro'} to hide a declared case
+ACTIVE_CASES  = {_n for _n in SIM_DIRS if _n not in DISABLE_CASES}
+
+###############################################################################
+# SMOOTH-WALL NetCDF REFERENCES — flat-wall benchmarks, one line per file.
+#
+# These are SMOOTH (flat, no valley) cases — the counterpart of the EkRe*FrInf
+# VALLEY cases above, not another valley run.  They are stored as tlab
+# horizontally-averaged avg_all.nc (ri00.00 = neutral) in the EXAMPLES ROOT,
+# beside the case directories:
+#     <examples root>/Re500/ri00.00_re0500_...nc     smooth, Re_D = 500
+#     <examples root>/Re1000/ri00.00_re1000_...nc    smooth, Re_D = 1000
+# (the path used to be hardwired inside cwd1, i.e. EkRe500FrInf/Re500/..., which
+# does not exist — the smooth curve was therefore silently missing from EVERY
+# figure and the smooth-only names it defines, e.g. ustr_s1_stored, were never
+# created.  That is the NameError at the hodograph block.)
+#
+# ── SAME CONTROL AS THE VALLEY CASES: COMMENT A LINE OUT TO DROP THAT ────────
+# ── REFERENCE.  A commented source is an ABSENT source. ─────────────────────
+# EVERY declared reference is loaded AND DRAWN: each figure that carries a
+# smooth benchmark now carries one curve per declared reference, each in its
+# OWN wall units (its own nu = 1/(0.5*Re_D^2) and its own u*).  Nothing else in
+# the file has to be touched to add or remove one.
+#
+# The FIRST declared reference is the PRIMARY one: it backs the flat `*_s`
+# module names (y_in_s, Rxy_s, ustr_s1, …) that anything not iterating over the
+# references still reads, and it is the 'Sm_Neu' entry of USTAR_REF / SIM_NU.
+#
+# Each path is searched as given first, then by basename inside the examples
+# root and each declared case directory (legacy layout).  A declared file that
+# is nowhere on disk is reported and skipped — it does not stop the run.
+###############################################################################
+nc1 = _base + 'Re500/ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'    # smooth, Re_D = 500
+nc2 = _base + 'Re1000/ri00.00_re1000_3072x0512x6144_20130520_avg_all.nc'   # smooth, Re_D = 1000
+
+###############################################################################
+# SMOOTH REGISTRY — mirrors the case registry.  'var' names the source line
+# above; an entry whose variable is not defined (line commented out) is absent.
+#   Re     : Re_D of the smooth file -> its nu = 1/(0.5*Re_D^2)
+#   ustar  : fallback u*, used ONLY if the .nc stores no FrictionVelocity
+#            (Re=500: 0.0618 stored; Re=1000: 0.0531, CLAUDE.md table)
+#   colour : greys, so the smooth benchmarks stay visually distinct from the
+#            coloured valley cases; the linestyle separates the Reynolds numbers
+###############################################################################
+_SMOOTH_REGISTRY = (
+    {'name': 'Sm_Neu_500',  'var': 'nc1', 'Re': 500.0,  'ustar': 0.0618,
+     'label': r'Smooth ($Re_D=500$, flat)',  'color': '#636363',
+     'ls': '-', 'marker': 'o'},
+    {'name': 'Sm_Neu_1000', 'var': 'nc2', 'Re': 1000.0, 'ustar': 0.0531,
+     'label': r'Smooth ($Re_D=1000$, flat)', 'color': '#9E9E9E',
+     'ls': (0, (5, 2)), 'marker': 'v'},
+)
+
+def _find_smooth_nc(_path):
+    """Locate one smooth reference: the path as written first, then its
+    <parent>/<file> tail under the examples root and each declared case
+    directory (legacy layout).  None if it is nowhere on disk."""
+    _tail = '/'.join(_path.rstrip('/').split('/')[-2:])
+    for _cand in [_path] + [_r + _tail for _r in [_base] + list(SIM_DIRS.values())]:
+        if os.path.exists(_cand):
+            return _cand
+    return None
+
+# Declared = the source line exists; found = the file is also on disk.
+_SM_DECLARED = [_e for _e in _SMOOTH_REGISTRY
+                if isinstance(globals().get(_e['var']), str)]
+SMOOTH_NC = {}                       # name -> resolved path, in registry order
+for _e_s in _SM_DECLARED:
+    _p_s = _find_smooth_nc(globals()[_e_s['var']])
+    if _p_s is not None:
+        SMOOTH_NC[_e_s['name']] = _p_s
+    else:
+        print('  smooth %-12s NOT FOUND on disk (%s) — reference skipped'
+              % (_e_s['name'], globals()[_e_s['var']]))
+for _e_s in _SMOOTH_REGISTRY:
+    if _e_s['name'] not in {_d['name'] for _d in _SM_DECLARED}:
+        print('  smooth %-12s absent (%s commented out — reference dropped from '
+              'every plot/table)' % (_e_s['name'], _e_s['var']))
+
+SMOOTH_MAP  = {_e['name']: _e for _e in _SMOOTH_REGISTRY}
+SMOOTH_KEYS = list(SMOOTH_NC)                       # every reference to be drawn
+_SM_PRIMARY = SMOOTH_KEYS[0] if SMOOTH_KEYS else 'Sm_Neu'
+_nc_smooth  = SMOOTH_NC.get(_SM_PRIMARY)            # the primary file (or None)
+_smooth_re  = SMOOTH_MAP[_SM_PRIMARY]['Re'] if SMOOTH_KEYS else None
+# Each smooth reference is a case in its own right for the normalization tables:
+# it carries the viscosity of ITS Reynolds number (never the global Re=500 nu).
+# 'Sm_Neu' is kept as an ALIAS of the primary so any lookup by that literal name
+# still resolves.
+for _k_s, _e_s in ((_k, SMOOTH_MAP[_k]) for _k in SMOOTH_KEYS):
+    SIM_NU[_k_s] = 1.0 / (0.5 * float(_e_s['Re']) ** 2)
+SIM_NU['Sm_Neu'] = SIM_NU.get(_SM_PRIMARY, nu)
+SMOOTH_USTAR_FALLBACK = {_e['name']: _e['ustar'] for _e in _SMOOTH_REGISTRY}
+if SMOOTH_KEYS:
+    print('  smooth references drawn : %s' % ', '.join(
+        '%s (Re_D=%.0f)' % (_k, SMOOTH_MAP[_k]['Re']) for _k in SMOOTH_KEYS))
+    print('  smooth PRIMARY (backs the flat *_s names): %s  %s'
+          % (_SM_PRIMARY, _nc_smooth))
+else:
+    print('  smooth reference : NONE declared/found — all smooth overlays skipped')
+print('-' * 78)
 
 ###############################################################################
 # ░░  USER INPUT — NORMALIZATION REFERENCE FRICTION VELOCITY  ░░
@@ -2152,8 +2455,9 @@ ACTIVE_CASES = {
 # so every case is drawn in its own true inner units.  This is the physically
 # correct scaling for comparing Reynolds numbers: the log layers should
 # COLLAPSE, with the higher Re showing a LONGER log region (larger Re_tau).
-#     Re=500 : 0.0618  — smooth Re=500 .nc stored FrictionVelocity (== ustr_s1)
-#     Re=750 : 0.0561  — smooth Re=750, CLAUDE.md "Physics constants" table
+#     Re=500  : 0.0618 — smooth Re=500 .nc stored FrictionVelocity (== ustr_s1)
+#     Re=750  : 0.0561 — smooth Re=750,  CLAUDE.md "Physics constants" table
+#     Re=1000 : 0.0531 — smooth Re=1000, CLAUDE.md "Physics constants" table
 #
 # ── TO COMPARE ON ONE COMMON REFERENCE ───────────────────────────────────────
 # SET THE VALUES EQUAL (e.g. put 0.0618 — or 0.0561 — in every entry).  All
@@ -2163,21 +2467,27 @@ ACTIVE_CASES = {
 # NOTE on what "equal" does and does not equate: setting these equal equates the
 # VELOCITY scale (u+, tau/u*^2) exactly.  The LENGTH scale l_in = nu/u* still
 # differs between the cases, because nu is fixed by the Reynolds number itself
-# (nu = 1/(0.5*Re_D^2): 8.0e-6 at Re=500, 3.556e-6 at Re=750) — that residual
+# (nu = 1/(0.5*Re_D^2): 8.0e-6 at Re=500, 3.556e-6 at Re=750, 2.0e-6 at
+# Re=1000) — that residual
 # difference IS the Reynolds effect and cannot be normalized away.  To place two
 # different Re on a literally identical z+ axis you would have to abandon wall
 # units; the outer-unit figures (z^- panels) already provide that view.
 #
-# 'Sm_Neu' is the flat smooth NetCDF reference (Re=500).  Leaving it at 0.0618
-# keeps it on its own stored FrictionVelocity; change it with the others if you
-# equate the references, so the smooth overlay stays on the same axis as the
-# valley cases rather than silently sitting on a different one.
+# 'Sm_Neu' is the flat smooth NetCDF reference; its entry follows WHICHEVER
+# smooth file was selected above (Re=500 → 0.0618, Re=1000 → 0.0531), so the
+# smooth overlay never silently sits on a different axis than the valley cases.
+#
+# THE VALUES LIVE IN THE CASE REGISTRY (`ustar_ref`, top of the file) so that a
+# commented-out data source cannot leave a stale entry behind.  Edit them there,
+# or override an individual case here — the dict is a plain dict:
+#     USTAR_REF['re750_oro'] = 0.0618      # e.g. one common velocity yardstick
 ###############################################################################
-USTAR_REF = {
-    'Sm_Neu':    0.0618,   # smooth flat reference, Re_D = 500
-    're500_oro': 0.0618,   # valley Re_D = 500  ← set equal to compare on one scale
-    're750_oro': 0.0561,   # valley Re_D = 750  ← set equal to compare on one scale
-}
+USTAR_REF = {_e['name']: _e['ustar_ref'] for _e in _DECLARED}
+# One entry per DECLARED smooth reference (each on its own u*), plus the
+# 'Sm_Neu' alias of the primary for any lookup by that literal name.
+for _k_s in SMOOTH_KEYS:
+    USTAR_REF[_k_s] = float(SMOOTH_MAP[_k_s]['ustar'])
+USTAR_REF['Sm_Neu'] = float(USTAR_REF.get(_SM_PRIMARY, 0.0618))
 
 # ── ACTIVE normalization: each case's OWN MEASURED friction velocity ─────────
 # DEFAULT (False): norm_ustar(case) returns that case's MEASURED Method-2
@@ -2202,69 +2512,45 @@ PLOT_FR_LADDER = False
 ###############################################################################
 
 ###############################################################################
-# CASES — smooth reference + the two neutral valley runs, by increasing Re.
-# Fr = inf for BOTH valley cases: this ladder varies Reynolds number ONLY.
+# CASES — smooth reference first, then the DECLARED valley runs by increasing Re
+# (styling comes straight from the case registry, so a commented-out source can
+# never leave a dangling legend entry).  Fr = inf for every valley case: this
+# ladder varies Reynolds number ONLY.
 # Coordinate convention: simulation uses engineering coords
 #   u/x = streamwise, v/y = wall-normal, w/z = spanwise.
 #   Plots label the wall-normal axis as z+ (meteorological convention).
-###############################################################################
-CASES = [
-    {'name': 'Sm_Neu',    'label': r'Smooth ($Re_D=500$, flat)', 'color': '#636363', 'ls': '-',  'marker': 'o'},
-    {'name': 're500_oro', 'label': r'$Re_D=500$',                'color': '#1565C0', 'ls': '--', 'marker': 's'},
-    {'name': 're750_oro', 'label': r'$Re_D=750$',                'color': '#C62828', 'ls': '-.', 'marker': '^'},
-]
-
-SIM_DIRS = {
-    're500_oro': cwd1,
-    're750_oro': cwd2,
-}
-
-# Per-case Froude number — the switch that selects the wall-law form fitted to
-# each simulation's velocity profile (mirrors config.Fr, which is per-run there):
+#
+# Per-case Froude number (SIM_FR, built from the registry) is the switch that
+# selects the wall-law form fitted to each simulation's velocity profile
+# (mirrors config.Fr, which is per-run there):
 #   Fr = np.inf (neutral)  → classical Monin–Obukhov (1954) log law of the wall,
 #   Fr finite  (stratified)→ Obukhov (1971) stability-corrected law.
-# BOTH cases here are neutral, so every fit takes the classical ln(z+ - d+)
-# branch — bit-for-bit the same path results.py takes for its neutral case.
-# The Obukhov branch stays in the file but is unreachable on this ladder.
-SIM_FR = {
-    're500_oro': np.inf,
-    're750_oro': np.inf,
-}
-
-###############################################################################
-# PER-CASE PHYSICS — the fundamental difference from the Froude ladder.
+# Every case here is neutral, so all fits take the classical ln(z+ - d+) branch
+# — bit-for-bit the same path results.py takes for its neutral case.  The
+# Obukhov branch stays in the file but is unreachable on this ladder.
 #
+# PER-CASE PHYSICS (SIM_RE / SIM_NU / case_nu, built from the registry above):
 # results.py could use the single global nu / u_star / l_in from config.py
-# because all six of its cases shared Re = 500.  Here Re VARIES, so the
-# viscosity and the inner (wall) length scale are per-case quantities:
-#
-#   nu    = 1 / Re_lambda,  Re_lambda = 0.5 * Re_D^2   (tlab convention)
-#   l_in  = nu / u*                                    (one wall unit)
+# because all six of its cases shared Re = 500.  Here Re VARIES, so viscosity
+# and inner length scale are per-case:  nu = 1/(0.5*Re_D^2),  l_in = nu/u*.
 #
 # u* SOURCE (in order of preference, resolved per case below):
 #   1. The case's OWN measured Method-2 friction velocity, read from its pickle
-#      (`u_star2`, crest value) — the only correct u* in a rotating Ekman layer
-#      (Kostelecky & Ansorge 2024 eq. 4.2).  This is what compare_Re_loglaw.py
-#      uses and it is preferred whenever the pickle carries it.
-#   2. The CLAUDE.md physics table fallback below, used only when the pickle has
-#      no u_star2.  The Re=750 entry is an ESTIMATE (smooth-wall 0.0561 + 20 %
-#      for orography), NOT a measurement — replace it once that flow exists.
-#      The console reports which source was used for each case.
+#      (`u_star2`, plateau/crest) — the only correct u* in a rotating Ekman
+#      layer (Kostelecky & Ansorge 2024 eq. 4.2).  Preferred whenever present.
+#   2. The CLAUDE.md physics-table fallback (registry `ustar_fall`), used only
+#      when the pickle has no u_star2.  The Re=750 / Re=1000 entries are
+#      ESTIMATES (smooth-wall value + 20 % for orography), NOT measurements —
+#      replace them once those flows are measured.  The console reports which
+#      source was used for each case.
 ###############################################################################
-SIM_RE = {'re500_oro': 500.0, 're750_oro': 750.0}
-SIM_NU = {_k: 1.0 / (0.5 * _v ** 2) for _k, _v in SIM_RE.items()}   # 8.0e-6 / 3.5556e-6
+CASES = ([{'name': _k, 'label': SMOOTH_MAP[_k]['label'],
+           'color': SMOOTH_MAP[_k]['color'], 'ls': SMOOTH_MAP[_k]['ls'],
+           'marker': SMOOTH_MAP[_k]['marker']} for _k in SMOOTH_KEYS]
+         + [{'name': _e['name'], 'label': _e['label'], 'color': _e['color'],
+             'ls': _e['ls'], 'marker': _e['marker']} for _e in _DECLARED])
+CASE_STYLE = {_c['name']: _c for _c in CASES}
 
-def case_nu(case):
-    """Kinematic viscosity OF THIS CASE.  On the Froude ladder results.py could
-    use the single global `nu` everywhere because Re was fixed at 500; here it
-    differs by case (nu = 1/(0.5*Re_D^2)), so every expression forming a case's
-    inner units, viscous stress or delta+ must go through this.  Falls back to
-    the global config nu (Re=500) for the flat smooth reference / unknown case.
-    Defined here, beside SIM_NU, because the normalization tables below use it
-    at module level."""
-    return SIM_NU.get(case, nu)
-# CLAUDE.md "Physics constants per Reynolds number" — fallback only.
-SIM_USTAR_FALLBACK = {'re500_oro': 0.068, 're750_oro': 0.067}
 SIM_USTAR_MEASURED = {}   # filled after the pickles load (see the resolver below)
 
 # Per-case override for the intermittency .npz directory ONLY.  A case absent
@@ -2289,7 +2575,8 @@ print('results_Re.py — REYNOLDS-LADDER post-processing log   %s'
       % _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 print('Examples root : %s' % cwd)
 print('Case dirs     : %s' % {k: v for k, v in SIM_DIRS.items()})
-print('Stratification: Fr = inf (NEUTRAL) for both cases — Reynolds varies only')
+print('Smooth ref    : %s' % (_nc_smooth or 'none found'))
+print('Stratification: Fr = inf (NEUTRAL) for every case — Reynolds varies only')
 print('=' * 78)
 
 ###############################################################################
@@ -2383,6 +2670,14 @@ for _name, _d in SIM_DIRS.items():
         else:
             print(f'  {_name}: directory {_d} does not exist.')
 
+# A declared case whose pickle is missing is treated exactly like a commented-out
+# source: it is removed from ACTIVE_CASES, so it cannot appear as a phantom
+# legend entry / empty curve on any figure.  The warning above already said why.
+_NO_PKL = {_n for _n in SIM_DIRS if _n not in sims}
+if _NO_PKL:
+    ACTIVE_CASES -= _NO_PKL
+    print('  → dropped from every figure (no pickle): %s' % sorted(_NO_PKL))
+
 ###############################################################################
 # PER-CASE WALL UNITS  (Reynolds-ladder specific)
 #
@@ -2424,13 +2719,13 @@ def _ustar_measured(case):
             return _val, 'measured (pickled u_star2, crest)'
     _fb = SIM_USTAR_FALLBACK.get(case, np.nan)
     _note = 'CLAUDE.md fallback'
-    if case == 're750_oro':
-        _note += ' — ESTIMATE (smooth 0.0561 +20 % for orography), not measured'
+    if SIM_RE.get(case, 500.0) > 500.0:
+        _note += ' — ESTIMATE (smooth-wall value +20 % for orography), not measured'
     return float(_fb), _note
 
 # Fallback wall unit per case from the USER INPUT dict (used when USE_USTAR_REF
-# is True, or for a case with no measured u*).
-# 'Sm_Neu' (flat smooth reference) is Re=500, so it takes the global config nu.
+# is True, or for a case with no measured u*).  'Sm_Neu' (the flat smooth
+# reference) carries the viscosity of the smooth file actually selected.
 _L_IN = {_c: case_nu(_c) / _u for _c, _u in USTAR_REF.items() if _u}
 
 # PHYSICAL (measured) friction velocity — must be resolved FIRST, because it is
@@ -2458,7 +2753,9 @@ print('  %-12s %6s %12s %11s %14s %10s'
       % ('case', 'Re_D', 'nu', 'u*_norm', 'l_in = nu/u*', 'source'))
 for _c, (_uv, _usrc) in _ACTIVE_USTAR.items():
     print('  %-12s %6s %12.4e %11.5f %14.4e %10s'
-          % (_c, ('%.0f' % SIM_RE[_c]) if _c in SIM_RE else '500(sm)',
+          % (_c, ('%.0f' % SIM_RE[_c]) if _c in SIM_RE
+             else ('%.0f(sm)' % SMOOTH_MAP[_c]['Re'] if _c in SMOOTH_MAP
+                   else '(sm)'),
              case_nu(_c), _uv, case_nu(_c) / _uv, _usrc))
 _uvals = {round(_v[0], 10) for _c, _v in _ACTIVE_USTAR.items() if _c in ACTIVE_CASES}
 if len(_uvals) == 1:
@@ -2501,68 +2798,233 @@ def case_ustar(case):
     return SIM_USTAR_MEASURED.get(case, u_star)
 
 ###############################################################################
-# Load smooth-wall reference (Re=500, NetCDF) — used as benchmark in plots
+# PLOT READINESS — WHY A CASE DOES OR DOES NOT APPEAR IN THE *_allRe FIGURES.
+#
+# Every shared z+/z- figure loops over the active cases and SKIPS any case for
+# which `gy_in(case)` is None or the plotted field is absent:
+#
+#       _upr = gv('u_plus_rot', case);  _yi = gy_in(case)
+#       if _upr is None or _yi is None:
+#           continue                     <-- silent drop, no message
+#
+# so a case with a stale pickle (no bundled grid, different ny than the
+# reference) used to vanish from EVERY comparison figure without a word, while
+# the case that happens to own the reference grid still drew.  This table makes
+# that visible: it reports, per case, whether the pickle loaded, which grid its
+# profiles are placed on (pickle / its own `grid` file / the reference grid),
+# and which of the core plotted fields are missing.  A case marked SKIPPED here
+# is exactly a case you will not see in the figures — and the reason is stated.
 ###############################################################################
-_nc_smooth = cwd1 + 'Re500/ri00.00_re0500_2048x0192x2048_20110615_avg_all.nc'
-_smooth_loaded = False
-if os.path.exists(_nc_smooth):
-    # Smooth case computed by the SINGLE shared loader (functions.load_smooth_case),
-    # identical to PhAvg.py — the two scripts can no longer diverge.  Uses PhAvg's
-    # validated formulas: TKE_s = 0.5*(Rxx+Ryy+Rzz); Coriolis cor_yx_s = -(W_s-G_z)
-    # with scalar geostrophic G_z = max(W_s); Fornberg du_dy_s.
-    _sm = load_smooth_case(_nc_smooth, x, nu, Re_lambda)
-    sy = _sm['sy']; nys = _sm['nys']
-    U_s = _sm['U_s']; V_s = _sm['V_s']; W_s = _sm['W_s']
-    su = _sm['su']; sw = _sm['sw']; alpha_s = _sm['alpha_s']
-    # ustr_s1 is results.py's normalizer for every SMOOTH-reference curve
-    # (u/ustr_s1, stress/ustr_s1**2, outer y_s/ustr_s1 — ~34 sites).  Point it at
-    # the USER INPUT entry so the smooth overlay follows USTAR_REF like the
-    # valley cases do: if you equate the references, the smooth curve moves onto
-    # the same scale instead of silently staying on its own stored value.
-    # The STORED value is kept as ustr_s1_stored — it is the smooth case's
-    # PHYSICAL friction velocity and must keep setting its physical delta+.
-    ustr_s1_stored = _sm['ustr_s1']
-    ustr_s1 = float(USTAR_REF.get('Sm_Neu', ustr_s1_stored))
-    alpha_str_s = _sm['alpha_str_s']
-    y_s = _sm['y_s']; y_in_s = _sm['y_s_p']          # results.py uses the name y_in_s
-    rU_s = _sm['rU_s']; rV_s = _sm['rV_s']; rW_s = _sm['rW_s']; rP_s = _sm['rP_s']
-    rs_s = _sm['rs_s']          # mean scalar ⟨s⟩ (Boussinesq solution); ≡0 in neutral ref
-    G_x_s = _sm['G_x_s']; G_z_s = _sm['G_z_s']; G_s = _sm['G_s']
-    U_s_p = _sm['U_s_p']; W_s_p = _sm['W_s_p']
-    GblU_s = _sm['GblU_s']; GblW_s = _sm['GblW_s']
-    Rxx_s = _sm['Rxx_s']; Rxy_s = _sm['Rxy_s']; Rxz_s = _sm['Rxz_s']
-    Ryy_s = _sm['Ryy_s']; Ryz_s = _sm['Ryz_s']; Rzz_s = _sm['Rzz_s']
-    TKE_s = _sm['TKE_s']
-    cor_yx_s = _sm['cor_yx_s']; I_corr_yx_s = _sm['I_corr_yx_s']
-    du_dy_s = _sm['du_dy_s']; visc_yx_s = _sm['visc_yx_s']; tau_yx_s = _sm['tau_yx_s']
-    cor_yz_s = _sm['cor_yz_s']; I_corr_yz_s = _sm['I_corr_yz_s']
-    dw_dy_s = _sm['dw_dy_s']; visc_yz_s = _sm['visc_yz_s']; tau_yz_s = _sm['tau_yz_s']
-    AVG_TKE_V_s = _sm['AVG_TKE_V_s']; AVG_TKE_V_s_i = _sm['AVG_TKE_V_s_i']
+_CORE_FIELDS = ('u_plus_rot', 'w_plus_rot', 'u_star2', 'TKE', 'rey_uv',
+                'du_dy', 'AvgPhU')
+print('-' * 78)
+print('PLOT READINESS — which cases the *_allRe figures can actually draw')
+print('  %-12s %-7s %-10s %-16s %s'
+      % ('case', 'pickle', 'ny(prof)', 'z+ axis from', 'missing core fields'))
+_READY, _NOT_READY = [], []
+for _name in SIM_DIRS:
+    _sd   = sims.get(_name, {})
+    _pk   = 'yes' if _sd else 'NO'
+    _prof = _sd.get('u_plus_rot')
+    _ny   = ('%d' % len(_prof)) if _prof is not None else '-'
+    _yg, _src = _case_axis_y(_name)
+    _miss = [_f for _f in _CORE_FIELDS if _sd.get(_f) is None]
+    print('  %-12s %-7s %-10s %-16s %s'
+          % (_name, _pk, _ny, _src if _yg is not None else 'NONE',
+             ','.join(_miss) if _miss else '(none)'))
+    if _yg is None or _prof is None:
+        _NOT_READY.append((_name, _src if _yg is None else 'no u_plus_rot'))
+    else:
+        _READY.append(_name)
+for _name, _why in _NOT_READY:
+    print('  → %s will be SKIPPED by the shared z+/z- figures: %s' % (_name, _why))
+    if _name in sims and sims[_name].get('y') is None:
+        print('    fix: re-run stage b (PhAvg_rotated.py) in %s so the pickle '
+              'bundles its own grid, or put that case\'s `grid` file in the '
+              'directory.' % SIM_DIRS[_name])
+print('CASES PLOTTED: %s%s'
+      % (sorted(set(_READY) & ACTIVE_CASES) or 'NONE',
+         (' + smooth ' + ', '.join(SMOOTH_KEYS)) if SMOOTH_KEYS else ''))
+print('-' * 78)
 
-    # results.py-specific derived quantities (TKE advection field), from loader outputs
-    sx       = np.linspace(0, 1.08, rU_s.shape[1])
-    TKE_s_dx = np.gradient(TKE_s, sx,  axis=1)
-    TKE_s_dy = np.gradient(TKE_s, y_s, axis=0)
-    Adv_s    = rU_s * TKE_s_dx + rV_s * TKE_s_dy
+###############################################################################
+# Load EVERY declared smooth-wall reference (flat NetCDF) — the benchmark curves.
+#
+# `SMOOTH_KEYS` / `SMOOTH_NC` were resolved with the source lines above (nc1,
+# nc2, …).  Each reference is loaded into `smooths[key]` as a self-contained
+# dict of that file's `*_s` quantities, and the FLAT module names (y_in_s,
+# Rxy_s, ustr_s1, SMOOTH_COLOR, …) are BOUND to one reference at a time by
+# `_bind_smooth`.  Plot blocks iterate with `for _ in smooth_refs():`, which
+# rebinds those names per reference — so one block body draws every reference.
+#
+# EVERY flat name is PRE-SEEDED first, so a missing (or switched-off) smooth
+# reference can never raise NameError further down: the scalars fall back to the
+# USTAR_REF entry and the arrays to None, while `_smooth_loaded = False` keeps
+# all smooth curves out of the figures.
+###############################################################################
+# The complete set of flat names one smooth reference owns (pre-seed + rebind).
+_SMOOTH_FLAT = (
+    'sy', 'nys', 'U_s', 'V_s', 'W_s', 'su', 'sw', 'alpha_s',
+    'alpha_str_s', 'y_s', 'y_in_s', 'rU_s', 'rV_s', 'rW_s', 'rP_s',
+    'rs_s', 'G_x_s', 'G_z_s', 'G_s', 'U_s_p', 'W_s_p', 'GblU_s',
+    'GblW_s', 'Rxx_s', 'Rxy_s', 'Rxz_s', 'Ryy_s', 'Ryz_s', 'Rzz_s',
+    'TKE_s', 'cor_yx_s', 'I_corr_yx_s', 'du_dy_s', 'visc_yx_s',
+    'tau_yx_s', 'cor_yz_s', 'I_corr_yz_s', 'dw_dy_s', 'visc_yz_s',
+    'tau_yz_s', 'AVG_TKE_V_s', 'AVG_TKE_V_s_i', 'sx', 'TKE_s_dx',
+    'TKE_s_dy', 'Adv_s', 'Disp_U_s', 'Disp_V_s', 'Disp_W_s',
+    'ustr_s1', 'ustr_s1_stored',
+    # style of the reference currently bound (used by every smooth plot call)
+    'SMOOTH_COLOR', 'SMOOTH_LS', 'SMOOTH_LABEL', 'SMOOTH_MARKER', 'SMOOTH_KEY',
+)
+_smooth_loaded = False
+for _k_s in _SMOOTH_FLAT:
+    globals().setdefault(_k_s, None)
+ustr_s1        = float(USTAR_REF.get('Sm_Neu', u_star))   # smooth normalizer
+ustr_s1_stored = ustr_s1                                  # smooth PHYSICAL u*
+
+
+def _load_one_smooth(_key, _path):
+    """Load ONE flat smooth reference into a dict of its `*_s` quantities.
+
+    Smooth case computed by the SINGLE shared loader (functions.load_smooth_case),
+    identical to PhAvg.py — the two scripts can no longer diverge.  Uses PhAvg's
+    validated formulas: TKE_s = 0.5*(Rxx+Ryy+Rzz); Coriolis cor_yx_s = -(W_s-G_z)
+    with scalar geostrophic G_z = max(W_s); Fornberg du_dy_s.
+
+    nu / Re_lambda are THIS FILE's own (case_nu(key) — set from its Reynolds
+    number), not the global Re=500 pair: they set the loader's viscous stress and
+    its inner axis y_s_p = y*u*/nu, which would be wrong by a factor of 4 on the
+    Re=1000 reference."""
+    _nu_s    = case_nu(_key)
+    _relam_s = 1.0 / _nu_s
+    _sm = load_smooth_case(_path, x, _nu_s, _relam_s)
+    _d = {'sy': _sm['sy'], 'nys': _sm['nys'],
+          'U_s': _sm['U_s'], 'V_s': _sm['V_s'], 'W_s': _sm['W_s'],
+          'su': _sm['su'], 'sw': _sm['sw'], 'alpha_s': _sm['alpha_s'],
+          'alpha_str_s': _sm['alpha_str_s'],
+          'y_s': _sm['y_s'], 'y_in_s': _sm['y_s_p'],   # this file uses y_in_s
+          'rU_s': _sm['rU_s'], 'rV_s': _sm['rV_s'], 'rW_s': _sm['rW_s'],
+          'rP_s': _sm['rP_s'],
+          # mean scalar ⟨s⟩ (Boussinesq solution); ≡0 in the neutral reference
+          'rs_s': _sm['rs_s'],
+          'G_x_s': _sm['G_x_s'], 'G_z_s': _sm['G_z_s'], 'G_s': _sm['G_s'],
+          'U_s_p': _sm['U_s_p'], 'W_s_p': _sm['W_s_p'],
+          'GblU_s': _sm['GblU_s'], 'GblW_s': _sm['GblW_s'],
+          'Rxx_s': _sm['Rxx_s'], 'Rxy_s': _sm['Rxy_s'], 'Rxz_s': _sm['Rxz_s'],
+          'Ryy_s': _sm['Ryy_s'], 'Ryz_s': _sm['Ryz_s'], 'Rzz_s': _sm['Rzz_s'],
+          'TKE_s': _sm['TKE_s'],
+          'cor_yx_s': _sm['cor_yx_s'], 'I_corr_yx_s': _sm['I_corr_yx_s'],
+          'du_dy_s': _sm['du_dy_s'], 'visc_yx_s': _sm['visc_yx_s'],
+          'tau_yx_s': _sm['tau_yx_s'],
+          'cor_yz_s': _sm['cor_yz_s'], 'I_corr_yz_s': _sm['I_corr_yz_s'],
+          'dw_dy_s': _sm['dw_dy_s'], 'visc_yz_s': _sm['visc_yz_s'],
+          'tau_yz_s': _sm['tau_yz_s'],
+          'AVG_TKE_V_s': _sm['AVG_TKE_V_s'],
+          'AVG_TKE_V_s_i': _sm['AVG_TKE_V_s_i']}
+    # ustr_s1 is the normalizer for every curve OF THIS REFERENCE (u/ustr_s1,
+    # stress/ustr_s1**2, outer y_s/ustr_s1).  It follows the USER INPUT entry so
+    # the smooth overlay obeys USTAR_REF exactly like the valley cases do.
+    # ustr_s1_stored is the reference's PHYSICAL friction velocity and keeps
+    # setting its physical delta+.  A flat .nc may carry no `FrictionVelocity`
+    # (the loader then returns None): fall back to its Method-2 plateau, then to
+    # the registry value, so it is ALWAYS a finite number.
+    _u_st = _sm['ustr_s1']
+    if _u_st is None or not np.isfinite(_u_st):
+        _u_st = _sm.get('ustr_M2_plateau_s')
+        print('  %s: .nc stores no FrictionVelocity — using the Method-2 '
+              'plateau u*=%s' % (_key, _u_st))
+    if _u_st is None or not np.isfinite(_u_st):
+        _u_st = SMOOTH_USTAR_FALLBACK.get(_key, u_star)
+    _d['ustr_s1_stored'] = float(_u_st)
+    _d['ustr_s1'] = float(USTAR_REF.get(_key, _d['ustr_s1_stored']))
+
+    # Derived quantities (TKE advection field), from the loader outputs
+    _d['sx']       = np.linspace(0, 1.08, _d['rU_s'].shape[1])
+    _d['TKE_s_dx'] = np.gradient(_d['TKE_s'], _d['sx'],  axis=1)
+    _d['TKE_s_dy'] = np.gradient(_d['TKE_s'], _d['y_s'], axis=0)
+    _d['Adv_s']    = _d['rU_s'] * _d['TKE_s_dx'] + _d['rV_s'] * _d['TKE_s_dy']
     # Smooth-case "dispersive" proxies (P06-P08).  The flat-wall .nc has NO
-    # streamwise axis — its second axis is TIME (the 250 averaging records), which
+    # streamwise axis — its second axis is TIME (the averaging records), which
     # sx maps to a pseudo-x.  So these are the deviation of each time record from
     # the time-mean profile (a temporal stand-in for the true spatial dispersive
     # field, which is identically zero on a flat wall).  keepdims=True: rU_s is
-    # (ny, nt), mean over the pseudo-x axis is (ny,), must broadcast back as (ny,1).
+    # (ny, nt), mean over the pseudo-x axis is (ny,), must broadcast back (ny,1).
     # Disp_V_s is ~machine-zero (rV_s≡0); Disp_U_s/Disp_W_s carry real structure.
-    Disp_U_s = rU_s - rU_s.mean(axis=1, keepdims=True)
-    Disp_V_s = rV_s - rV_s.mean(axis=1, keepdims=True)
-    Disp_W_s = rW_s - rW_s.mean(axis=1, keepdims=True)
-    _smooth_loaded = True
-else:
-    print(f'Warning: Smooth NetCDF not found at {_nc_smooth}')
+    _d['Disp_U_s'] = _d['rU_s'] - _d['rU_s'].mean(axis=1, keepdims=True)
+    _d['Disp_V_s'] = _d['rV_s'] - _d['rV_s'].mean(axis=1, keepdims=True)
+    _d['Disp_W_s'] = _d['rW_s'] - _d['rW_s'].mean(axis=1, keepdims=True)
+    # Style of this reference (bound alongside its data so every plot call picks
+    # up the right colour/linestyle/label without a lookup).
+    _st = SMOOTH_MAP[_key]
+    _d['SMOOTH_COLOR']  = _st['color'];  _d['SMOOTH_LS']     = _st['ls']
+    _d['SMOOTH_LABEL']  = _st['label'];  _d['SMOOTH_MARKER'] = _st['marker']
+    _d['SMOOTH_KEY']    = _key
+    _d['_nu'] = _nu_s
+    return _d
 
+
+smooths = {}                      # key -> that reference's flat quantities
+for _k_s in list(SMOOTH_KEYS):
+    try:
+        smooths[_k_s] = _load_one_smooth(_k_s, SMOOTH_NC[_k_s])
+        print('Loaded smooth reference: %-12s %s  (Re_D=%.0f, nu=%.4e, '
+              'u*_stored=%.5f, u*_norm=%.5f)'
+              % (_k_s, SMOOTH_NC[_k_s], SMOOTH_MAP[_k_s]['Re'],
+                 smooths[_k_s]['_nu'], smooths[_k_s]['ustr_s1_stored'],
+                 smooths[_k_s]['ustr_s1']))
+    except Exception as _e_ld:
+        # One unreadable reference must not take the whole run down: report it
+        # and carry on with the others (same policy as a missing pickle).
+        print('Warning: smooth reference %s could not be loaded (%s) — skipped'
+              % (_k_s, _e_ld))
+SMOOTH_KEYS = [_k for _k in SMOOTH_KEYS if _k in smooths]   # only what loaded
 if not PLOT_SMOOTH:
-    _smooth_loaded = False
-# Reference u* for the SMOOTH curves / outer figures.  The orographic inner-scale
-# curves are normalised per case by norm_ustar(case) instead.
-_ustar_ref = ustr_s1 if os.path.exists(_nc_smooth) else u_star
+    SMOOTH_KEYS = []                                        # master off switch
+if SMOOTH_KEYS and _SM_PRIMARY not in SMOOTH_KEYS:
+    _SM_PRIMARY = SMOOTH_KEYS[0]                            # primary must exist
+
+
+def _bind_smooth(_key):
+    """Bind the flat `*_s` module names (and SMOOTH_COLOR/LS/LABEL/MARKER) to
+    one loaded smooth reference.  This is what lets a plot block written for a
+    single reference draw all of them: `for _ in smooth_refs():` rebinds these
+    names once per reference around the unchanged block body."""
+    _d = smooths.get(_key)
+    if _d is None:
+        return False
+    globals().update({_n: _d[_n] for _n in _SMOOTH_FLAT if _n in _d})
+    return True
+
+
+def smooth_refs():
+    """Iterate over EVERY smooth reference that is declared, found and loaded,
+    binding it to the flat `*_s` names before each iteration.  Yields the
+    reference key.  Yields NOTHING when no reference is available, so
+
+        for _ in smooth_refs():
+            <block>
+
+    is a drop-in replacement for the old `if _smooth_loaded:` guard.  The PRIMARY
+    reference is re-bound when the loop ends — in a `finally`, so the flat names
+    are restored even if the loop is abandoned or the body raises."""
+    try:
+        for _k in SMOOTH_KEYS:
+            if _bind_smooth(_k):
+                yield _k
+    finally:
+        _bind_smooth(_SM_PRIMARY)
+
+
+# Bind the PRIMARY reference so the flat names are populated for everything that
+# does not iterate (helpers, tables, the 2-D panel builder's default).
+_smooth_loaded = bool(SMOOTH_KEYS) and _bind_smooth(_SM_PRIMARY)
+if not SMOOTH_KEYS:
+    print('Warning: no smooth reference available — every smooth overlay is '
+          'skipped.  Declared sources: %s'
+          % ([_e['var'] for _e in _SMOOTH_REGISTRY] or 'none'))
+# NOTE: there is no single "_ustar_ref" any more — every smooth curve is scaled
+# by the u* of the reference being drawn (`ustr_s1`, rebound per reference by
+# smooth_refs()), and every valley curve by norm_ustar(case).
 
 ###############################################################################
 # Derived quantities stored back into each sim dict
@@ -2620,13 +3082,17 @@ if (1 == plotRes):
     # Derived lists (SIM_NAMES, SIM_COLORS, …) kept for loop compatibility.
     ###########################################################################
     CASE_MAP  = {c['name']: c for c in CASES}
-    _smooth   = CASE_MAP['Sm_Neu']
-    _sims     = [c for c in CASES if c['name'] != 'Sm_Neu' and c['name'] in ACTIVE_CASES]
-
-    SMOOTH_COLOR  = _smooth['color']
-    SMOOTH_LS     = _smooth['ls']
-    SMOOTH_LABEL  = _smooth['label']
-    SMOOTH_MARKER = _smooth['marker']
+    # `_smooth` is the PRIMARY smooth reference's style; SMOOTH_COLOR / _LS /
+    # _LABEL / _MARKER are NOT frozen here — `_bind_smooth` rebinds them to
+    # whichever reference `smooth_refs()` is currently yielding, so a plot block
+    # written for one smooth curve draws every declared reference in its own
+    # colour.  Between iterations they hold the primary reference (bound at load).
+    _smooth   = CASE_MAP.get(_SM_PRIMARY, {'name': 'Sm_Neu', 'label': 'Smooth',
+                                           'color': '#636363', 'ls': '-',
+                                           'marker': 'o'})
+    _smooths  = [CASE_MAP[k] for k in SMOOTH_KEYS]      # every reference drawn
+    _sims     = [c for c in CASES
+                 if c['name'] not in SMOOTH_MAP and c['name'] in ACTIVE_CASES]
 
     SIM_NAMES      = [c['name']   for c in _sims]
     SIM_LABELS     = [c['label']  for c in _sims]
@@ -2708,7 +3174,7 @@ if (1 == plotRes):
 
         # ---- 3a. Shear stress tau_zx — streamwise/wall-normal (INNER units) ----
         plt.figure(figsize=(10, 6), dpi=300)
-        if _smooth_loaded:
+        for _ in smooth_refs():
             _rey_s = -np.mean(Rxy_s, axis=1)      # flat wall: Reynolds ≡ turbulent
             _tot_s = -I_corr_yx_s + np.mean(visc_yx_s, axis=1) + _rey_s
             plt.plot(y_in_s[:160], -I_corr_yx_s[:160]/ustr_s1**2,
@@ -2780,7 +3246,7 @@ if (1 == plotRes):
         # fig4_smooth_standalone.py); the physical closure and u* are unaffected.
         _SP = -1.0 if FIG4_PAPER_SPANWISE_SIGN else 1.0
         plt.figure(figsize=(10, 6), dpi=300)
-        if _smooth_loaded:
+        for _ in smooth_refs():
             _rey_sz = -np.mean(Ryz_s, axis=1)     # R_zy = -⟨v'w'⟩
             _tot_sz = I_corr_yz_s + np.mean(visc_yz_s, axis=1) + _rey_sz
             plt.plot(y_in_s[:160], _SP*I_corr_yz_s[:160]/ustr_s1**2,
@@ -3135,9 +3601,9 @@ if (1 == plotRes):
     #  match the rough-case definition rather than the full Pxx+Pyy+Pzz trace.)
     _prod_panels = []
     _zmax_lim = _contour_zmax(use_inner=False)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _P_s2d = -Rxy_s * du_dy_s
-        _prod_panels.append((_smooth['label'],
+        _prod_panels.append((SMOOTH_LABEL,
                              sx, y_s[:limity_range], _P_s2d[:limity_range, :],
                              np.array([]), np.array([])))
     for _cname, _clbl in zip(SIM_NAMES, SIM_LABELS):
@@ -3157,8 +3623,8 @@ if (1 == plotRes):
 
     # TKE advection — smooth (if loaded) + all active rough cases (subplots)
     _adv_panels = []
-    if _smooth_loaded:
-        _adv_panels.append((_smooth['label'],
+    for _ in smooth_refs():
+        _adv_panels.append((SMOOTH_LABEL,
                             sx, y_s[:limity_range], Adv_s[:limity_range, :],
                             np.array([]), np.array([])))
     for _cname, _clbl in zip(SIM_NAMES, SIM_LABELS):
@@ -3296,15 +3762,25 @@ if (1 == plotRes):
     # Helper _lyr_idx → FUNCTION DEFINITIONS section (top).
 
     _LYR_IDX   = _lyr_idx(y_in)
-    _LYR_IDX_S = _lyr_idx(y_in_s) if _smooth_loaded else [(0, 0)] * 4
+    # Layer index windows per smooth reference (each has its own z+ axis, so a
+    # single shared set of indices would mis-window every non-primary curve).
+    _LYR_IDX_S_BY = {}
+    for _ in smooth_refs():
+        _LYR_IDX_S_BY[SMOOTH_KEY] = _lyr_idx(y_in_s)
+    _LYR_IDX_S = _LYR_IDX_S_BY.get(_SM_PRIMARY, [(0, 0)] * 4)
 
     # Helpers _autoscale_y/_autoscale_x/_save_layers_x/_save_layers_y
     # → FUNCTION DEFINITIONS section (top).
 
     # Log-law references
-    if _smooth_loaded:
-        u_most    = (1/0.43)*np.log(y_in_s) + 4.9
-        u_most[0] = 0
+    def _u_most_s():
+        """Neutral MOST log law on the CURRENTLY BOUND smooth reference's inner
+        axis.  A function, not a stored array: each reference has its own y_in_s,
+        so it must be evaluated inside the smooth_refs() loop that draws it."""
+        _um    = (1/0.43)*np.log(y_in_s) + 4.9
+        _um[0] = 0
+        return _um
+    u_most = _u_most_s() if _smooth_loaded else None   # primary (kept for compat)
     u_most_v    = (1/0.43)*np.log(y_in) + 4.7
     u_most_v[0] = 0
 
@@ -3363,8 +3839,13 @@ if (1 == plotRes):
     # Smooth flat-wall reference (neutral, Fr = ∞): fit the SAME neutral law to
     # its plotted profile.  U_s_p is already in u⁺ units and z⁺ = y_in_s, so no
     # rescaling is needed (unlike the rough cases, whose u_plus_rot is in G units).
-    _ll_fit_smooth = None
-    if _smooth_loaded:
+    # One fit per smooth reference, keyed by its name (_llf_s() returns the fit
+    # of whichever reference is currently bound).
+    _ll_fits_s = {}
+    def _llf_s():
+        return _ll_fits_s.get(SMOOTH_KEY)
+    for _ in smooth_refs():
+        _ll_fit_smooth = None
         _s_u = np.mean(U_s_p, axis=1)
         _s_m = (y_in_s >= _LL_ZMIN) & (y_in_s <= _LL_ZMAX)
         if np.count_nonzero(_s_m) >= 3:
@@ -3398,6 +3879,7 @@ if (1 == plotRes):
                                   'Fr': np.inf, 'z_ref': _s_zd,
                                   'u_ref': _s_ufit,
                                   'z_own': _s_zd, 'u_own': _s_ufit}
+        _ll_fits_s[SMOOTH_KEY] = _ll_fit_smooth
 
     # ── Print the fitted values as output (one row per simulation) ────────────
     print('=' * 78)
@@ -3410,17 +3892,17 @@ if (1 == plotRes):
     print('-' * 78)
     print('  %-14s %-12s %6s %7s %9s %7s %6s %10s %9s'
           % ('case', 'law', 'kappa', 'd+', 'z0m+', 'B', 'R2', '<Ri>', 'Ri_max'))
-    if _smooth_loaded:
-        if _ll_fit_smooth is not None:
-            _fs = _ll_fit_smooth
+    for _ in smooth_refs():
+        if _llf_s() is not None:
+            _fs = _llf_s()
             print('  %-14s %-12s %6.4f %7.2f %9.5f %7.3f %6.4f %+10.4f %+9.4f'
-                  % ('Sm_Neu', _fs['law'], _fs['kappa'], _fs['d'], _fs['z0m'],
+                  % (SMOOTH_KEY, _fs['law'], _fs['kappa'], _fs['d'], _fs['z0m'],
                      _fs['B'], _fs['r2'], _fs['Ri_mean'], _fs['Ri_max']))
         else:
             print('  %-14s %-12s  FIT NOT SUCCESSFUL '
                   '(no valid kappa in [%.2f,%.2f] over z+ in [%.0f,%.0f]) '
                   '-- not plotted'
-                  % ('Sm_Neu', 'neutral MOST', _LL_KBND[0], _LL_KBND[1],
+                  % (SMOOTH_KEY, 'neutral MOST', _LL_KBND[0], _LL_KBND[1],
                      _LL_ZMIN, _LL_ZMAX))
     for case in SIM_NAMES:
         _f = _ll_fits.get(case)
@@ -3487,8 +3969,8 @@ if (1 == plotRes):
     # BL height = friction velocity: smooth δ⁺ = u★_s²/ν, each valley case
     # δ⁺ = u_*(h)·u_star/ν on the shared single-reference z+ axis.
     _delta_all = []
-    if _smooth_loaded:
-        _delta_all.append((ustr_s1_stored / norm_l_in('Sm_Neu')))
+    for _ in smooth_refs():
+        _delta_all.append((ustr_s1_stored / norm_l_in(SMOOTH_KEY)))
     for _c in SIM_NAMES:
         _u2 = gv('u_star2', _c)
         if _u2 is not None:
@@ -3499,15 +3981,15 @@ if (1 == plotRes):
     _xmax_loglaw = (max(_delta_all) + 500.0) if _delta_all else Z_PLUS_MAX
 
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _u_sm = np.mean(U_s_p, axis=1)
         plt.plot(y_in_s, _u_sm,  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         plt.plot(y_in_s, -np.mean(W_s_p, axis=1), color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.4)
-        _delta_smooth = (ustr_s1_stored / norm_l_in('Sm_Neu'))
+        _delta_smooth = (ustr_s1_stored / norm_l_in(SMOOTH_KEY))
         plt.axvline(x=_delta_smooth, color=SMOOTH_COLOR, linestyle='--', linewidth=1.0, alpha=0.8)
         mark_layers(y_in_s, _u_sm, _smo_layer_idx(), filled=False, color=SMOOTH_COLOR)
-        if _ll_fit_smooth is not None:
-            plt.plot(_ll_fit_smooth['z_ref'], _ll_fit_smooth['u_ref'],
+        if _llf_s() is not None:
+            plt.plot(_llf_s()['z_ref'], _llf_s()['u_ref'],
                      color=SMOOTH_COLOR, linestyle=(0, (6, 2)), linewidth=1.0,
                      alpha=0.5, zorder=6)
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
@@ -3544,8 +4026,8 @@ if (1 == plotRes):
             # fixed-Re shorthand for `/ l_in`; per-case on a Reynolds ladder).
             _delta_case = float(_us2[ghill(case)]) / norm_l_in(case)
             plt.axvline(x=_delta_case, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
-    if _smooth_loaded:
-        plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
+    for _ in smooth_refs():
+        plt.plot(y_in_s, _u_most_s(), color='black', linestyle='--', linewidth=1.0, alpha=0.6)
     # Rough Re=1000 stable-ladder log-law overlay (own inner units; colour = Ri).
     for _rc, _rcol in zip(_rough_ladder, _ladder_colors):
         plt.plot(_rc['z_plus'], _rc['u_plus'], color=_rcol, linestyle='-',
@@ -3581,8 +4063,8 @@ if (1 == plotRes):
     # This is the collapsed / self-scaled view; P25 stays the shared-yardstick
     # view.  The smooth reference is already in its own units (u★ = ustr_s1).
     _delta_own = []
-    if _smooth_loaded:
-        _delta_own.append((ustr_s1_stored / norm_l_in('Sm_Neu')))
+    for _ in smooth_refs():
+        _delta_own.append((ustr_s1_stored / norm_l_in(SMOOTH_KEY)))
     for _c in SIM_NAMES:
         _u2 = gv('u_star2', _c)
         if _u2 is not None:
@@ -3592,15 +4074,15 @@ if (1 == plotRes):
     _xmax_own = (max(_delta_own) + 500.0) if _delta_own else Z_PLUS_MAX
 
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         # Smooth profile is already in its own inner units (z⁺=y_in_s, u⁺=U_s_p).
         _u_sm = np.mean(U_s_p, axis=1)
         plt.plot(y_in_s, _u_sm,  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         plt.plot(y_in_s, -np.mean(W_s_p, axis=1), color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.4)
-        plt.axvline(x=(ustr_s1_stored / norm_l_in('Sm_Neu')), color=SMOOTH_COLOR, linestyle='--', linewidth=1.0, alpha=0.8)
+        plt.axvline(x=(ustr_s1_stored / norm_l_in(SMOOTH_KEY)), color=SMOOTH_COLOR, linestyle='--', linewidth=1.0, alpha=0.8)
         mark_layers(y_in_s, _u_sm, _smo_layer_idx(), filled=False, color=SMOOTH_COLOR)
-        if _ll_fit_smooth is not None:
-            plt.plot(_ll_fit_smooth['z_own'], _ll_fit_smooth['u_own'],
+        if _llf_s() is not None:
+            plt.plot(_llf_s()['z_own'], _llf_s()['u_own'],
                      color=SMOOTH_COLOR, linestyle=(0, (6, 2)), linewidth=1.0,
                      alpha=0.5, zorder=6)
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
@@ -3632,8 +4114,8 @@ if (1 == plotRes):
         # BL height δ⁺ = u★_case²/ν in own units (ν per case on this ladder).
         plt.axvline(x=_uc**2 / case_nu(case), color=clr, linestyle='--',
                     linewidth=1.0, alpha=0.8)
-    if _smooth_loaded:
-        plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
+    for _ in smooth_refs():
+        plt.plot(y_in_s, _u_most_s(), color='black', linestyle='--', linewidth=1.0, alpha=0.6)
     # Rough Re=1000 stable-ladder log-law overlay (own inner units; colour = Ri).
     for _rc, _rcol in zip(_rough_ladder, _ladder_colors):
         plt.plot(_rc['z_plus'], _rc['u_plus'], color=_rcol, linestyle='-',
@@ -3663,8 +4145,9 @@ if (1 == plotRes):
     # (Req 8).  Each case scaled by its OWN outer friction velocity u_star2(h);
     # z- capped at 4.  Same on-curve layer markers (array indices are axis-agnostic).
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
-        _zs = y_s / ustr_s1
+    for _ in smooth_refs():
+        _zs   = y_s / ustr_s1
+        _u_sm = np.mean(U_s_p, axis=1)          # per reference, not the leftover
         plt.plot(_zs, _u_sm,  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         plt.plot(_zs, -np.mean(W_s_p, axis=1), color=SMOOTH_COLOR, linestyle=SMOOTH_LS, alpha=0.4)
         mark_layers(_zs, _u_sm, _smo_layer_idx(), filled=False, color=SMOOTH_COLOR)
@@ -3720,12 +4203,18 @@ if (1 == plotRes):
     #   small  (6 pt) = h       (valley crest, rough cases only)
     #   medium (9 pt) = 3h      (approx. RSL top, rough cases only)
     #   large (12 pt) = δ_o     (per-case outer BL scale)
-    _Re_tau_s = (ustr_s1_stored / norm_l_in('Sm_Neu'))   # BL thickness in smooth inner units
+    # (the smooth BL thickness in inner units is computed per reference where it
+    # is actually drawn — the dead `_Re_tau_s` that used to sit here was the
+    # NameError site whenever the smooth file was missing)
     _fig_hodo, _ax_hodo = plt.subplots(figsize=(7, 6), dpi=300)
     _mkw = dict(zorder=5, markeredgewidth=0.8)
     _hodo_data = []   # stores (un, wn) 1-D arrays for each available rough case
 
-    if _smooth_loaded:
+    # (key, u_norm, w_norm, per-reference layer indices) for every smooth
+    # reference — reused by the layer-zoom windows and the outer hodograph
+    # below, so neither depends on a value left behind by the loop.
+    _hodo_smooth = []
+    for _ in smooth_refs():
         _Us_ref = GblU_s[-1]                           # geostrophic u-component
         _Ws_ref = GblW_s[-1]                           # geostrophic w-component
         _G_ref  = np.sqrt(_Us_ref**2 + _Ws_ref**2)    # geostrophic wind magnitude
@@ -3733,6 +4222,8 @@ if (1 == plotRes):
         _wn_s   = -GblW_s / _G_ref
         _ax_hodo.plot(_un_s, _wn_s, color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         mark_layers(_un_s, _wn_s, _smo_layer_idx(), filled=False, color=SMOOTH_COLOR)
+        _hodo_smooth.append((SMOOTH_KEY, _un_s, _wn_s, SMOOTH_COLOR,
+                             _LYR_IDX_S_BY.get(SMOOTH_KEY, [(0, 0)] * 4)))
 
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
         # Use rotation-corrected profiles saved by PhAvg.py:
@@ -3768,12 +4259,14 @@ if (1 == plotRes):
     _ax_hodo.set_title(r'Hodograph — all Re (neutral)')
     _fig_hodo.savefig(_figdir+'P28_Hodograph_allRe.png', dpi=300, bbox_inches='tight')
     # Layer-zoomed hodographs: restrict visible window to each z+ range
-    for _ln, _lt, (_i0, _i1), (_i0_s, _i1_s) in zip(
-            _LYR_NAMES, _LYR_TITLES, _LYR_IDX, _LYR_IDX_S):
+    for _ilyr, (_ln, _lt, (_i0, _i1)) in enumerate(zip(
+            _LYR_NAMES, _LYR_TITLES, _LYR_IDX)):
         _uall, _wall = [], []
-        if _smooth_loaded and _i1_s > _i0_s:
-            _uall.extend(_un_s[_i0_s:_i1_s].tolist())
-            _wall.extend(_wn_s[_i0_s:_i1_s].tolist())
+        for _ks, _un_sk, _wn_sk, _cs, _lyr_s in _hodo_smooth:
+            _i0_s, _i1_s = _lyr_s[_ilyr]          # this reference's own indices
+            if _i1_s > _i0_s:
+                _uall.extend(_un_sk[_i0_s:_i1_s].tolist())
+                _wall.extend(_wn_sk[_i0_s:_i1_s].tolist())
         for _ud, _wd in _hodo_data:
             _ihi = min(_i1, len(_ud))
             if _ihi > _i0:
@@ -3795,9 +4288,11 @@ if (1 == plotRes):
     # Curves normalised by G are unchanged; markers locate h, 3h, δ_o
     # in outer-unit coordinates.
     _fig_hodo_out, _ax_hodo_out = plt.subplots(figsize=(7, 6), dpi=300)
-    if _smooth_loaded:
-        _ax_hodo_out.plot(_un_s, _wn_s, color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-        mark_layers(_un_s, _wn_s, _smo_layer_idx(), filled=False, color=SMOOTH_COLOR)
+    for _ks, _un_sk, _wn_sk, _cs, _lyr_s in _hodo_smooth:
+        _bind_smooth(_ks)                       # so _smo_layer_idx() matches _ks
+        _ax_hodo_out.plot(_un_sk, _wn_sk, color=_cs, linestyle=SMOOTH_LS)
+        mark_layers(_un_sk, _wn_sk, _smo_layer_idx(), filled=False, color=_cs)
+    _bind_smooth(_SM_PRIMARY)
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
         _u_rot = gv('u_plus_rot', case)
         _w_rot = gv('w_plus_rot', case)
@@ -3850,7 +4345,7 @@ if (1 == plotRes):
 
     # 2d (outer). Wind turning angle vs z- = y/u_star2(h) (Req 8).
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _ang_s = np.degrees(np.arctan2(-np.mean(W_s_p, axis=1), np.mean(U_s_p, axis=1)))
         plt.plot(y_s / ustr_s1, _ang_s, color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
@@ -3870,7 +4365,7 @@ if (1 == plotRes):
 
     # 2e. TKE vertical profile — all 6 cases (INNER units, z+ <= 200)
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         plt.plot(y_in_s[:130], np.mean(TKE_s, axis=1)[:130]/ustr_s1**2,
                  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
@@ -3886,8 +4381,9 @@ if (1 == plotRes):
     # guarded helper skips them instead of drawing a line far outside the plot.
     # Only height markers that fit the scale limit are rendered.
     _delta_marks = []
-    if _smooth_loaded:
-        _delta_marks.append(((ustr_s1_stored / norm_l_in('Sm_Neu')), r'$\delta_s$', SMOOTH_COLOR))
+    for _ in smooth_refs():
+        _delta_marks.append(((ustr_s1_stored / norm_l_in(SMOOTH_KEY)),
+                             r'$\delta_s$', SMOOTH_COLOR))
     for case, clr in zip(SIM_NAMES, SIM_COLORS):
         _us2 = gv('u_star2', case)
         if _us2 is not None:
@@ -3907,7 +4403,7 @@ if (1 == plotRes):
     # 2e (outer). TKE vertical profile — OUTER units z- = y/u_star2(h),
     # k normalised by u_star2(h)^2 per case; z- <= 4 (Req 8).
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         plt.plot(y_s / ustr_s1, np.mean(TKE_s, axis=1)/ustr_s1**2,
                  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
@@ -3929,7 +4425,7 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 6), dpi=300)
     # Smooth reference now comes from the shared loader (was wrongly read as zeros
     # from the rough-wall pickle via _n0.get('AVG_TKE_V_s_i')).
-    if _smooth_loaded:
+    for _ in smooth_refs():
         plt.plot(x_in, AVG_TKE_V_s_i/ustr_s1**2,
                  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
@@ -3996,8 +4492,11 @@ if (1 == plotRes):
     ]:
         plt.figure(figsize=(8, 6), dpi=300)
         _sm = globals().get(_key_sm)
-        if _sm is not None and _smooth_loaded:
-            plt.semilogy(y_in_s, np.mean(_sm, axis=1)/ustr_s1**2,
+        for _ in smooth_refs():
+            _sm_r = globals().get(_key_sm)     # re-fetch: rebound per reference
+            if _sm_r is None:
+                continue
+            plt.semilogy(y_in_s, np.mean(_sm_r, axis=1)/ustr_s1**2,
                          color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
             _r = gv(_key_r, case)
@@ -4027,8 +4526,11 @@ if (1 == plotRes):
 
         # (Req 8) OUTER-units twin: z- = y/u_star2(h), stress /u_star2(h)^2, z-<=4.
         plt.figure(figsize=(8, 6), dpi=300)
-        if _sm is not None and _smooth_loaded:
-            plt.semilogy(y_s/ustr_s1, np.mean(_sm, axis=1)/ustr_s1**2,
+        for _ in smooth_refs():
+            _sm_r = globals().get(_key_sm)     # re-fetch: rebound per reference
+            if _sm_r is None:
+                continue
+            plt.semilogy(y_s/ustr_s1, np.mean(_sm_r, axis=1)/ustr_s1**2,
                          color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
         for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
             _r = gv(_key_r, case)
@@ -4054,7 +4556,7 @@ if (1 == plotRes):
     # Solid lines = TURBULENT stress ⟨u''w''⟩ (rey_uv); faded (alpha=0.4) = dispersive
     # stress ũw̃ (their sum = the Reynolds shear stress); z+<=200.
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         plt.plot(y_in_s, np.mean(Rxy_s, axis=1)/ustr_s1**2,
                  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
     for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
@@ -4084,7 +4586,7 @@ if (1 == plotRes):
     # 2i (outer). Reynolds + dispersive shear stress uv — outer units
     # y^- = y / u_star2(h) per case; stress normalised by u_star2(h)^2.
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _y_out_s = y_s / ustr_s1
         plt.plot(_y_out_s, np.mean(Rxy_s, axis=1)/ustr_s1**2,
                  color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
@@ -4114,11 +4616,13 @@ if (1 == plotRes):
     plt.savefig(_figdir+'P44_Stress_uv_allRe_outer.png', dpi=300)
     plt.show()
 
-    # 2j. p'v' pressure transport — only plotted if pdvd2D is in the pickle
-    if gv('pdvd2D', 're500_oro') is not None:
+    # 2j. p'v' pressure transport — only plotted if pdvd2D is in the pickle.
+    # Gate on ANY active case carrying it (it used to test only the first case,
+    # by name, so the panel vanished whenever that case was switched off).
+    if any(gv('pdvd2D', _c) is not None for _c in SIM_NAMES):
         plt.figure(figsize=(6, 8), dpi=300)
-        for case, clr, ls, lbl in zip(SIM_NAMES[:2], SIM_COLORS[:2],
-                                      SIM_LINESTYLES[:2], SIM_LABELS[:2]):
+        for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS,
+                                      SIM_LINESTYLES, SIM_LABELS):
             _pv = gv('pdvd2D', case)
             _yi = gy_in(case)
             if _pv is None or _yi is None:
@@ -4128,7 +4632,7 @@ if (1 == plotRes):
         _mark_h('h')
         plt.xlabel(r"$\langle p'w'\rangle / u_*^3$")
         plt.ylabel(r'$z^+$')
-        plt.legend(handles=sim_handles()[:2], fontsize=7)
+        plt.legend(handles=sim_handles(), fontsize=7)
         plt.grid(True, which='both', ls='--', alpha=0.5)
         plt.title(r"Pressure transport $\langle p'w'\rangle$ — all Re (neutral)")
         plt.savefig(_figdir+'P45_PressureTransport.png', dpi=300)
@@ -4173,7 +4677,7 @@ if (1 == plotRes):
     # 3a (outer). Shear stress tau_yx — outer units z- = y/u_star2(h).
     # (Req 6/8) renamed to "shear stress"; free y-scale; black total; z- <= 4.
     plt.figure(figsize=(10, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _y_out_s = y_s / ustr_s1
         plt.plot(_y_out_s, -I_corr_yx_s/ustr_s1**2,
                  color='steelblue',   linestyle=SMOOTH_LS, linewidth=1.5)
@@ -4235,7 +4739,7 @@ if (1 == plotRes):
     # as PhAvg_rotated.py / the inner P47 twin); physical closure & u* unaffected. z- <= 4.
     _SP = -1.0 if FIG4_PAPER_SPANWISE_SIGN else 1.0
     plt.figure(figsize=(10, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _y_out_s = y_s / ustr_s1
         plt.plot(_y_out_s, _SP*I_corr_yz_s/ustr_s1**2,
                  color='steelblue',   linestyle=SMOOTH_LS, linewidth=1.5)
@@ -4624,10 +5128,10 @@ if (1 == plotRes):
     # P(z⁺) = −⟨u'v'⟩ ∂⟨u⟩/∂z at the valley-centre column; smooth reference is
     # x-mean.  Logs the production-peak height (Ch. 6: ≈17 smooth → ≈34 valley).
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _Ps = -np.mean(Rxy_s, axis=1) * np.mean(du_dy_s, axis=1)
         plt.semilogx(y_in_s, _Ps / ustr_s1 ** 3, color=SMOOTH_COLOR, linestyle=SMOOTH_LS)
-        _ch6set('smooth', 'TKEprod_peak_z', float(y_in_s[int(np.argmax(_Ps))]))
+        _ch6set(SMOOTH_KEY, 'TKEprod_peak_z', float(y_in_s[int(np.argmax(_Ps))]))
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
         _ruv = gv('rey_uv', case); _dd = gv('du_dy', case)
         if _ruv is None or _dd is None:
@@ -4648,7 +5152,9 @@ if (1 == plotRes):
     # ── D14. Outer-layer mean-velocity surplus ΔU⁺(z⁺) (Fig 6.19 #3) ─
     # ΔU⁺ = ⟨u⟩⁺_valley − ⟨u⟩⁺_smooth (both on the single-reference axis), per
     # case interpolated onto the smooth z⁺ grid.  Logs max surplus above z⁺≈100.
-    if _smooth_loaded:
+    for _ in smooth_refs():
+        # One figure PER smooth reference (the surplus is defined against a
+        # specific flat wall), so the filename/title carry the reference key.
         _Usm = np.mean(U_s_p, axis=1)
         plt.figure(figsize=(8, 6), dpi=300)
         for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
@@ -4662,13 +5168,15 @@ if (1 == plotRes):
             if np.any(_outer):
                 _jm = np.where(_outer)[0][int(np.argmax(_dU[_outer]))]
                 _ch6set(case, 'dUplus_max', (float(_dU[_jm]), float(y_in_s[_jm])))
+                # (recorded against the smooth reference currently bound)
         plt.axhline(0, color='k', lw=0.6)
         _mark_h('v'); plt.xscale('log')
         plt.xlabel(r'$z^+$'); plt.ylabel(r'$\Delta\langle\bar{u}\rangle^+$ (valley − smooth)')
         plt.legend(handles=sim_handles(), fontsize=7, ncol=2)
         plt.grid(True, which='both', linestyle='--', linewidth=0.4)
-        plt.title(r'Outer-layer velocity surplus $\Delta U^+$ — all Re')
-        plt.savefig(_figdir +'P64_Ch6_dUplus_allRe.png', dpi=300)
+        plt.title(r'Outer-layer velocity surplus $\Delta U^+$ — all Re '
+                  '(vs %s)' % SMOOTH_LABEL)
+        plt.savefig(_figdir + 'P64_Ch6_dUplus_allRe_%s.png' % SMOOTH_KEY, dpi=300)
         plt.show()
 
     # ── D15. TKE anisotropy: normal-stress components (TKE #5) ─────
@@ -4676,7 +5184,7 @@ if (1 == plotRes):
     # intrinsic) vs z⁺, all cases overlaid; smooth reference (flat wall: turbulent
     # ≡ Reynolds).  Logs which component the valley most enhances at peak.
     plt.figure(figsize=(8, 6), dpi=300)
-    if _smooth_loaded:
+    for _ in smooth_refs():
         plt.plot(y_in_s, np.mean(Rxx_s, axis=1) / ustr_s1 ** 2, color=SMOOTH_COLOR, linestyle='-')
         plt.plot(y_in_s, np.mean(Ryy_s, axis=1) / ustr_s1 ** 2, color=SMOOTH_COLOR, linestyle='--')
         plt.plot(y_in_s, np.mean(Rzz_s, axis=1) / ustr_s1 ** 2, color=SMOOTH_COLOR, linestyle=':')
@@ -4869,14 +5377,15 @@ if (1 == plotRes):
 
     # [console table, no figure] ── D13. Log-law parameters κ, z₀ₘ⁺, d⁺ (#16,#17) ─
     print('\n  [D13] Log-law parameters (κ, z₀ₘ⁺, d⁺):')
-    if _smooth_loaded:
+    for _ in smooth_refs():
         _Us = np.mean(U_s_p, axis=1)
         _msk = (y_in_s >= 60) & (y_in_s <= 200) & (_Us > 0)
         if np.count_nonzero(_msk) >= 2:
             _sl, _ic, _rv, _pv, _se = linregress(np.log(y_in_s[_msk]), _Us[_msk])
             _ksm = (1.0 / _sl) if _sl != 0 else float('nan')
-            _ch6set('smooth', 'kappa_matched', float(_ksm))
-            print(f"    smooth (matched z⁺∈[60,200]): κ={_ksm:.4f}  R²={_rv**2:.4f}")
+            _ch6set(SMOOTH_KEY, 'kappa_matched', float(_ksm))
+            print(f"    {SMOOTH_KEY} (matched z⁺∈[60,200]): "
+                  f"κ={_ksm:.4f}  R²={_rv**2:.4f}")
     print(f"    {'case':<14}{'κ':>9}{'z0m+':>11}{'d+':>9}")
     for case, lbl in zip(SIM_NAMES, SIM_LABELS):
         _k = gv('kappa_loglaw', case)
