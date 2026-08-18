@@ -523,39 +523,29 @@ def gv(name, case='nu_oro'):
 _USTAR_CACHE = {}
 
 def gustar(case='nu_oro'):     # [U*-NORM] inner-scale velocity/stress normalizer
-    """Per-case INNER-SCALE friction velocity u*_case.
+    """Per-case friction velocity u*_case — READ FROM THE PICKLE, never computed.
 
-    Read as the constant-flux PLATEAU of the case's pickled Method-2 profile
-    u_star2(z) (functions.plateau_value) — the same estimator PhAvg_rotated.py
-    prints as ``ustr_M2_plateau_o``.  This is the velocity scale used for ALL
-    inner-scale (surface-layer) normalisation in this script, so each case is
-    plotted in its OWN wall units:
+    Returns ``sims[case]['u_star']``, the scalar that PhAvg_rotated.py measured and
+    pickled:  u_star = max_z u_star2_c(z)  (the integrate->cavg Method-2 momentum-
+    integral profile).  Stage b is the ONLY place a friction velocity is derived;
+    this script must not re-derive one from the pickled u_star2 profile — no
+    plateau_value(), no crest value u_star2(h), no column mean.  That was the old
+    behaviour and it produced a second, different u* per case.
 
-        z+ = y * u*_case / nu        u+ = u / u*_case        tau+ = tau / u*_case^2
+    It is the single velocity scale for BOTH unit systems here:
+        inner:  z+ = y*u*_case/nu     u+ = u/u*_case      tau+ = tau/u*_case^2
+        outer:  z- = y/u*_case        (see _z_out)
 
-    rather than on the single 0.0618 neutral reference that the outer/cross-case
-    figures use.  This is a cheap scalar reduction of an ALREADY-PICKLED 1-D
-    profile, so it stays within the results.py "no major computation" rule.
-
-    Fallbacks, in order, so a legacy pickle still plots rather than crashing:
-    plateau -> crest value u_star2(h) -> the global reference u_star.
+    Fallback (legacy pickle with no 'u_star' key): the module-level reference
+    u_star, NOT cached, so a later call picks up the real value once loaded.
     """
     if case in _USTAR_CACHE:
         return _USTAR_CACHE[case]
-    _us2 = gv('u_star2', case)
-    _val = None
-    if _us2 is not None:
-        _arr = np.asarray(_us2, dtype=np.float64)
-        _p = float(plateau_value(_arr, gv('y_inner', case)))
-        if np.isfinite(_p) and _p > 0:
-            _val = _p
-        else:
-            _c = float(_arr[ghill(case)])
-            if np.isfinite(_c) and _c > 0:
-                _val = _c
-    if _val is None:
-        # No usable u_star2 (pickle not loaded yet, or a legacy pickle): fall back
-        # WITHOUT caching, so a later call still picks up the real value.
+    _u = gv('u_star', case)
+    if _u is None:
+        return u_star
+    _val = float(np.asarray(_u, dtype=np.float64).ravel()[0])
+    if not (np.isfinite(_val) and _val > 0):
         return u_star
     _USTAR_CACHE[case] = _val
     return _val
@@ -696,15 +686,20 @@ def _mark_heights_v(entries, lblpos=0.94):
                  fontsize=9, color=_clr, transform=_ax.get_xaxis_transform())
 
 def _z_out(case):
-    """Per-case OUTER wall-normal coordinate z- = y / u_star2(h) and the
-    scalar u_star2(h) used to normalise the plotted quantity.  Returns
-    (z_minus_array, u_star2_h) or (None, None) if the case lacks u_star2/grid."""
-    _us2 = gv('u_star2', case)
+    """Per-case OUTER wall-normal coordinate z- = y/(u*/f) = y/u*_case (f = 1) and
+    the scalar u*_case used to normalise the plotted quantity.  Returns
+    (z_minus_array, u_star_case) or (None, None) if the case lacks a grid.
+
+    u*_case is gustar(case) = the PICKLED 'u_star' (= max(u_star2_c), measured in
+    PhAvg_rotated.py).  It was previously the CREST value u_star2(h) read off the
+    pickled profile — a second, different u* from the one the inner figures used;
+    there is now exactly ONE friction velocity per case and it is never recomputed
+    here (see gustar)."""
     _yc  = gv('y', case)
-    if _us2 is None or _yc is None:
+    if _yc is None:
         return None, None
-    _u2h = float(_us2[ghill(case)])
-    if _u2h == 0.0:
+    _u2h = float(gustar(case))
+    if not (np.isfinite(_u2h) and _u2h != 0.0):
         return None, None
     return _yc / _u2h, _u2h
 
@@ -1987,7 +1982,7 @@ Gz = -np.sin(alpha)
 #     The smooth reference is already in its own units (u*_s = ustr_s1), so the
 #     ustr_s1 divisions on the smooth curves ARE own-unit scalings and stay.
 #   OUTER / cross-case plots -> keep the shared yardstick below (u_star, l_in,
-#     Re_tau) plus the per-case outer coordinate z- = y/u_star2(h) via _z_out,
+#     Re_tau) plus the per-case outer coordinate z- = y/u*_case via _z_out,
 #     so the cross-case comparison still sits on one common axis.
 #
 # u_star therefore remains the reference for outer units and as the fallback
@@ -2392,7 +2387,7 @@ if (1 == plotRes):
     ###########################################################################
     # Shared axis conventions for the z-resolved profiles (Req 8)
     #   inner units : z+ = y / l_in  (single reference l_in), capped at z+ = 200
-    #   outer units : z- = y / u_star2(h)  (per-case),        capped at z- = 4
+    #   outer units : z- = y / u*_case  (per-case),        capped at z- = 4
     # Z_PLUS_MAX / Z_MINUS_MAX are the axis limits requested for the two views.
     ###########################################################################
     Z_PLUS_MAX  = 200.0
@@ -3064,8 +3059,8 @@ if (1 == plotRes):
     #   with Ri = (∂⟨b⟩/∂z)/(∂⟨ū⟩/∂z)² measured from THIS case's own profiles
     #   (AvgScal is the buoyancy b; ū is the rotated mean).  Fit method matches
     #   PhAvg_rotated: OLS of u⁺ vs the abscissa, d⁺ grid-searched, κ constrained,
-    #   best R² kept.  The fit is done in each case's OWN inner units (its Method-2
-    #   crest u★ — the physical wall scale, so κ lands in the wall-law band); the
+    #   best R² kept.  The fit is done in each case's OWN inner units (gustar =
+    #   the pickled u★ — the physical wall scale, so κ lands in the wall-law band); the
     #   fitted curve is then mapped onto the shared single-reference z⁺ axis for
     #   overlay on P25.  Constants mirror config.py.
     _LL_ZMIN, _LL_ZMAX = 45.0, 125.0     # log-law fit region for THIS flow (z⁺∈[45,125])
@@ -3235,8 +3230,9 @@ if (1 == plotRes):
     if _smooth_loaded:
         _delta_all.append(ustr_s1**2 / nu)
     for _c in SIM_NAMES:
-        if gv('u_star2', _c) is not None:
-            _delta_all.append(gustar(_c)**2 / nu)
+        _u_d = float(gustar(_c))                  # pickled u_star — never recomputed
+        if np.isfinite(_u_d) and _u_d > 0:
+            _delta_all.append(_u_d**2 / nu)
     _xmax_loglaw = (max(_delta_all) + 500.0) if _delta_all else Z_PLUS_MAX
 
     plt.figure(figsize=(8, 6), dpi=300)
@@ -3254,7 +3250,6 @@ if (1 == plotRes):
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
         _upr  = gv('u_plus_rot', case)
         _wpr  = gv('w_plus_rot', case)
-        _us2  = gv('u_star2',    case)
         _yi   = gy_in(case)
         if _upr is None or _yi is None:
             continue
@@ -3280,7 +3275,7 @@ if (1 == plotRes):
         # BL height = the friction velocity (grid rule: y_BL = u★).  In the case's
         # own inner units this is δ⁺ = u*_case²/ν, so each case's BL line sits at
         # its own height rather than the common Re_tau.
-        if _us2 is not None:
+        if np.isfinite(_uc) and _uc > 0:
             plt.axvline(x=_uc**2 / nu, color=clr, linestyle='--', linewidth=1.0, alpha=0.8)
     if _smooth_loaded:
         plt.plot(y_in_s, u_most, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
@@ -3311,24 +3306,24 @@ if (1 == plotRes):
     _save_layers_x(cwd+'fig'+'/'+'P25_Velocity_LogLaw_allFr', r'Log-law velocity profile — all Fr, Re=500', is_log=True)
     plt.show()
 
-    # 2a (crest u★). Same log-law velocity profile, self-scaled like P25 but with
-    # the CREST Method-2 friction velocity u★_case = u_star2(h) instead of the
-    # constant-flux PLATEAU gustar(case) that P25 (and every other inner-scale
-    # figure) now uses.  So here
-    #   z⁺ = y·u_star2(h)/ν   u⁺ = u_plus_rot / u_star2(h)   δ⁺ = u_star2(h)²/ν
+    # 2a (own units). Same log-law velocity profile, self-scaled from the case's
+    # own physical grid:
+    #   z⁺ = y·u★_case/ν    u⁺ = u_plus_rot / u★_case    δ⁺ = u★_case²/ν
     # and the overlaid wall-law fit uses the fit's own-unit curve (z_own,u_own).
-    # Both figures are self-scaled; they differ ONLY in which u★ estimator is
-    # used, so comparing them shows how sensitive the collapse is to that choice.
+    # u★_case = gustar(case) = the PICKLED 'u_star' (max(u_star2_c), measured in
+    # PhAvg_rotated.py).  This panel used to re-derive a SECOND estimator here —
+    # the CREST value u_star2(h) — so that it could be compared against the
+    # plateau used by P25.  There is now exactly ONE friction velocity per case,
+    # fixed upstream and merely read here, so the two panels share a scaling and
+    # this one differs from P25 only in building z⁺ from the case's own y grid.
     # The smooth reference is already in its own units (u★ = ustr_s1).
     _delta_own = []
     if _smooth_loaded:
         _delta_own.append(ustr_s1**2 / nu)
     for _c in SIM_NAMES:
-        _u2 = gv('u_star2', _c)
-        if _u2 is not None:
-            _uc_c = float(_u2[ghill(_c)])
-            if np.isfinite(_uc_c) and _uc_c > 0:
-                _delta_own.append(_uc_c**2 / nu)
+        _uc_c = float(gustar(_c))                 # pickled u_star — never recomputed
+        if np.isfinite(_uc_c) and _uc_c > 0:
+            _delta_own.append(_uc_c**2 / nu)
     _xmax_own = (max(_delta_own) + 500.0) if _delta_own else Z_PLUS_MAX
 
     plt.figure(figsize=(8, 6), dpi=300)
@@ -3346,11 +3341,10 @@ if (1 == plotRes):
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
         _upr  = gv('u_plus_rot', case)
         _wpr  = gv('w_plus_rot', case)
-        _us2  = gv('u_star2',    case)
         _yg   = gv('y', case)
-        if _upr is None or _yg is None or _us2 is None:
+        if _upr is None or _yg is None:
             continue
-        _uc = float(_us2[ghill(case)])
+        _uc = float(gustar(case))                 # pickled u_star — never recomputed
         if not (np.isfinite(_uc) and _uc > 0):
             continue
         _zown = _yg * _uc / nu                    # own inner-unit wall-normal coord
@@ -3398,8 +3392,8 @@ if (1 == plotRes):
     plt.savefig(cwd+'fig'+'/'+'P25b_Velocity_LogLaw_allFr_ownustar.png', dpi=300)
     plt.show()
 
-    # 2a (outer). Log-law velocity profile — OUTER units z- = y/u_star2(h)
-    # (Req 8).  Each case scaled by its OWN outer friction velocity u_star2(h);
+    # 2a (outer). Log-law velocity profile — OUTER units z- = y/u*_case
+    # (Req 8).  Each case scaled by its OWN outer friction velocity u*_case;
     # z- capped at 4.  Same on-curve layer markers (array indices are axis-agnostic).
     plt.figure(figsize=(8, 6), dpi=300)
     if _smooth_loaded:
@@ -3419,7 +3413,7 @@ if (1 == plotRes):
             mark_layers(_zo, _upr/_u2h, _mk, filled=True, color=clr)
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
-    plt.ylabel(r'$\langle\bar{u}_i\rangle\,/\,u_{\star 2}(h)$')
+    plt.ylabel(r'$\langle\bar{u}_i\rangle\,/\,u_{\star}$')
     plt.legend(handles=_lgh_2a, fontsize=7, ncol=2)
     add_marker_legend(oro=True, smooth=_smooth_loaded)
     plt.grid(True, linestyle='--', linewidth=0.4)
@@ -3479,7 +3473,6 @@ if (1 == plotRes):
         #   w_plus_rot = -(avg_c(eps,U,x)*sin(α) + avg_c(eps,W,x)*cos(α))
         _u_rot = gv('u_plus_rot', case)
         _w_rot = gv('w_plus_rot', case)
-        _us2   = gv('u_star2', case)
         _yi    = gy_in(case)
         if _u_rot is None or _w_rot is None or _yi is None:
             continue
@@ -3530,7 +3523,7 @@ if (1 == plotRes):
     _ax_hodo.set_title(r'Hodograph — all Fr, Re=500')
     plt.show()
 
-    # 2c (outer). Hodograph — outer units (y^- = y / u_star2(h) per case)
+    # 2c (outer). Hodograph — outer units (y^- = y / u*_case per case)
     # Curves normalised by G are unchanged; markers locate h, 3h, δ_o
     # in outer-unit coordinates.
     _fig_hodo_out, _ax_hodo_out = plt.subplots(figsize=(7, 6), dpi=300)
@@ -3540,8 +3533,7 @@ if (1 == plotRes):
     for case, clr, ls, mrkr in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_MARKERS):
         _u_rot = gv('u_plus_rot', case)
         _w_rot = gv('w_plus_rot', case)
-        _us2   = gv('u_star2', case)
-        if _u_rot is None or _w_rot is None or _us2 is None:
+        if _u_rot is None or _w_rot is None:
             continue
         _G_ref_c = np.sqrt(_u_rot[-1]**2 + _w_rot[-1]**2)
         _un_o    = _u_rot / _G_ref_c
@@ -3556,7 +3548,7 @@ if (1 == plotRes):
     _ax_hodo_out.legend(handles=_lgh_hodo, fontsize=7, ncol=2)
     add_marker_legend(ax=_ax_hodo_out, oro=True, smooth=_smooth_loaded)
     _ax_hodo_out.grid(True)
-    _ax_hodo_out.set_title(r'Hodograph (outer units, $u_{\star 2}(h)$) — all Fr, Re=500')
+    _ax_hodo_out.set_title(r'Hodograph (outer units, $u_{\star}$) — all Fr, Re=500')
     _fig_hodo_out.savefig(cwd+'fig'+'/'+'P29_Hodograph_allFr_outer.png', dpi=300, bbox_inches='tight')
     plt.show()
 
@@ -3587,7 +3579,7 @@ if (1 == plotRes):
     _save_layers_x(cwd+'fig'+'/'+'P30_TurningAngle_allFr', r'Wind turning angle — rough-wall cases, Re=500', is_log=True)
     plt.show()
 
-    # 2d (outer). Wind turning angle vs z- = y/u_star2(h) (Req 8).
+    # 2d (outer). Wind turning angle vs z- = y/u*_case (Req 8).
     plt.figure(figsize=(8, 6), dpi=300)
     if _smooth_loaded:
         _ang_s = np.degrees(np.arctan2(-np.mean(W_s_p, axis=1), np.mean(U_s_p, axis=1)))
@@ -3628,10 +3620,11 @@ if (1 == plotRes):
     if _smooth_loaded:
         _delta_marks.append((ustr_s1**2 / nu, r'$\delta_s$', SMOOTH_COLOR))
     for case, clr in zip(SIM_NAMES, SIM_COLORS):
-        _us2 = gv('u_star2', case)
-        if _us2 is not None:
-            _delta_marks.append((float(_us2[ghill(case)]) * u_star / nu,
-                                 r'$\delta_o$', clr))
+        # delta = u*_case/f (f=1), drawn on the reference z+ axis.  u*_case is the
+        # pickled scalar (gustar), not a crest value read off the u_star2 profile.
+        _uc_d = float(gustar(case))
+        if np.isfinite(_uc_d) and _uc_d > 0:
+            _delta_marks.append((_uc_d * u_star / nu, r'$\delta_o$', clr))
     _mark_heights_v(_delta_marks)
     plt.xlim(0, Z_PLUS_MAX)
     plt.xlabel(r'$z^+$')
@@ -3643,8 +3636,8 @@ if (1 == plotRes):
     _save_layers_x(cwd+'fig'+'/'+'P32_TKE_vertical_allFr', r'TKE vertical profile — all Fr, Re=500')
     plt.show()
 
-    # 2e (outer). TKE vertical profile — OUTER units z- = y/u_star2(h),
-    # k normalised by u_star2(h)^2 per case; z- <= 4 (Req 8).
+    # 2e (outer). TKE vertical profile — OUTER units z- = y/u*_case,
+    # k normalised by u*_case^2 per case; z- <= 4 (Req 8).
     plt.figure(figsize=(8, 6), dpi=300)
     if _smooth_loaded:
         plt.plot(y_s / ustr_s1, np.mean(TKE_s, axis=1)/ustr_s1**2,
@@ -3657,7 +3650,7 @@ if (1 == plotRes):
         plt.plot(_zo, np.mean(_tke, axis=1)/_u2h**2, color=clr, linestyle=ls)
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
-    plt.ylabel(r'$k/u_{\star 2}^2(h)$')
+    plt.ylabel(r'$k/u_{\star}^2$')
     plt.legend(handles=all_handles(), fontsize=7, ncol=2)
     plt.grid(True, linestyle='--', linewidth=0.4)
     plt.title(r'TKE vertical profile — outer units ($z^-\leq4$), Re=500')
@@ -3695,6 +3688,12 @@ if (1 == plotRes):
         if _us2 is None or _yi is None:
             continue
         plt.plot(_us2[:430], _yi[:430], color=clr, linestyle=ls, label=lbl)
+        _u2c = gv('u_star2_c', case)          # integrate->cavg profile (if pickled)
+        if _u2c is not None:
+            plt.plot(np.asarray(_u2c)[:430], _yi[:430], color=clr,
+                     linestyle=(0, (2, 2)), alpha=0.6)
+        # the ONE pickled scalar every figure normalises by: u_star = max(u_star2_c)
+        plt.axvline(gustar(case), color=clr, linestyle=':', linewidth=0.9, alpha=0.8)
     _mark_h('h')
     plt.ylim(0, Z_PLUS_MAX)
     plt.xlabel(r'$u_*(z)$')
@@ -3707,7 +3706,7 @@ if (1 == plotRes):
     plt.show()
 
     # 2g (outer). Friction velocity profile u*(z-) — OUTER units
-    # z- = y/u_star2(h) on the y-axis, z- <= 4 (Req 8).
+    # z- = y/u*_case on the y-axis (u*_case = pickled u_star), z- <= 4 (Req 8).
     plt.figure(figsize=(8, 6), dpi=300)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
         _us2 = gv('u_star2', case)
@@ -3765,7 +3764,7 @@ if (1 == plotRes):
                        'Normal stress: ' + _lbl_r + ' and ' + _lbl_d + r' — all Fr, Re=500')
         plt.show()
 
-        # (Req 8) OUTER-units twin: z- = y/u_star2(h), stress /u_star2(h)^2, z-<=4.
+        # (Req 8) OUTER-units twin: z- = y/u*_case, stress /u*_case^2, z-<=4.
         plt.figure(figsize=(8, 6), dpi=300)
         if _sm is not None and _smooth_loaded:
             plt.semilogy(y_s/ustr_s1, np.mean(_sm, axis=1)/ustr_s1**2,
@@ -3783,7 +3782,7 @@ if (1 == plotRes):
                              color=clr, linestyle=ls, alpha=0.4)
         plt.xlim(0, Z_MINUS_MAX)
         plt.xlabel(r'$z^-$')
-        plt.ylabel(_lbl_r + ', ' + _lbl_d + r' / $u_{\star 2}^2(h)$')
+        plt.ylabel(_lbl_r + ', ' + _lbl_d + r' / $u_{\star}^2$')
         plt.legend(handles=_leg_n, fontsize=7, ncol=2)
         plt.grid(True, which='both', linestyle='--', linewidth=0.4)
         plt.title('Normal stress: ' + _lbl_r + ' and ' + _lbl_d + r' — outer units ($z^-\leq4$)')
@@ -3822,7 +3821,7 @@ if (1 == plotRes):
     plt.show()
 
     # 2i (outer). Reynolds + dispersive shear stress uv — outer units
-    # y^- = y / u_star2(h) per case; stress normalised by u_star2(h)^2.
+    # y^- = y / u*_case per case; stress normalised by u*_case^2.
     plt.figure(figsize=(8, 6), dpi=300)
     if _smooth_loaded:
         _y_out_s = y_s / ustr_s1
@@ -3831,11 +3830,10 @@ if (1 == plotRes):
     for case, clr, ls in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES):
         _r   = gv('rey_uv',  case)
         _d   = gv('UV_disp', case)
-        _us2 = gv('u_star2', case)
         _yc  = gv('y', case)
-        if _r is None or _us2 is None or _yc is None:
+        if _r is None or _yc is None:
             continue
-        _us2_hgt = _us2[ghill(case)]
+        _us2_hgt = gustar(case)          # pickled u_star — never recomputed here
         _y_out   = _yc / _us2_hgt
         plt.plot(_y_out, np.mean(_r*gmask0(case), axis=1)/geps_f(case)/_us2_hgt**2,
                  color=clr, linestyle=ls)
@@ -3844,7 +3842,7 @@ if (1 == plotRes):
                      color=clr, linestyle=ls, alpha=0.4)
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
-    plt.ylabel(r"$\overline{u''w''},\;\tilde{u}\tilde{w}\;/\;u_{\star 2}^2(h)$")
+    plt.ylabel(r"$\overline{u''w''},\;\tilde{u}\tilde{w}\;/\;u_{\star}^2$")
     _leg_uv_out = ([Line2D([0],[0], color='k', ls='-', lw=2,   label=r"$\overline{u''w''}$ (solid)"),
                     Line2D([0],[0], color='k', ls='-', lw=0.8, alpha=0.4, label=r'$\tilde{u}\tilde{w}$ (faded)')]
                    + all_handles())
@@ -3906,11 +3904,11 @@ if (1 == plotRes):
 
     ###########################################################################
     # SECTION 3 (outer units) — MOMENTUM BALANCE
-    # y^- = y / u_star2(h) per case; stresses normalised by u_star2(h)^2.
+    # y^- = y / u*_case per case; stresses normalised by u*_case^2.
     # Smooth case: y^-_s = y_s / ustr_s1, normalised by ustr_s1^2.
     ###########################################################################
 
-    # 3a (outer). Shear stress tau_yx — outer units z- = y/u_star2(h).
+    # 3a (outer). Shear stress tau_yx — outer units z- = y/u*_case.
     # (Req 6/8) renamed to "shear stress"; free y-scale; black total; z- <= 4.
     plt.figure(figsize=(10, 6), dpi=300)
     if _smooth_loaded:
@@ -3931,11 +3929,10 @@ if (1 == plotRes):
         _rv  = gv('rey_uv',      case)
         _dv  = gv('UV_disp',     case)
         _dt  = gv('dudt',        case)
-        _us2 = gv('u_star2',     case)
         _yc  = gv('y',           case)
-        if _Ic is None or _us2 is None or _yc is None:
+        if _Ic is None or _yc is None:
             continue
-        _us2_hgt = _us2[ghill(case)]
+        _us2_hgt = gustar(case)          # pickled u_star — never recomputed here
         _y_out   = _yc / _us2_hgt
         plt.plot(_y_out, -_Ic/_us2_hgt**2,  color='steelblue',  linestyle=ls)
         _tot = -np.asarray(_Ic, dtype=float)
@@ -3968,7 +3965,7 @@ if (1 == plotRes):
     plt.savefig(cwd+'fig'+'/'+'P48_MomBal_tauyx_allFr_outer.png', dpi=300)
     plt.show()
 
-    # 3b (outer). Shear stress tau_yz — outer units z- = y/u_star2(h).
+    # 3b (outer). Shear stress tau_yz — outer units z- = y/u*_case.
     # 🔒 LOCKED — STANDARD signs (see CLAUDE.md), mirroring the tau_zx outer twin but
     # with the spanwise Coriolis C_zy = +I_corr_yz (Levi-Civita) and R_zy = -(turb+disp).
     # DISPLAY: the whole τ_zy panel is negated by _SP for paper handedness (same flag
@@ -3989,11 +3986,10 @@ if (1 == plotRes):
         _rw  =  gv('rey_vw',      case)
         _dvw =  gv('VW_disp',     case)
         _dw  =  gv('dwdt',        case)
-        _us2 =  gv('u_star2',     case)
         _yc  =  gv('y',           case)
-        if _Iz is None or _us2 is None or _yc is None:
+        if _Iz is None or _yc is None:
             continue
-        _us2_hgt = _us2[ghill(case)]
+        _us2_hgt = gustar(case)          # pickled u_star — never recomputed here
         _y_out   = _yc / _us2_hgt
         plt.plot(_y_out,  _SP*_Iz/_us2_hgt**2, color='steelblue',  linestyle=ls)
         if _vz is not None:
@@ -4072,7 +4068,7 @@ if (1 == plotRes):
     _save_layers_x(cwd+'fig'+'/'+'P51_DKE_allFr', r'Dispersive kinetic energy (DKE) — rough-wall cases, Re=500')
     plt.show()
 
-    # 4b (outer). DKE — OUTER units z- = y/u_star2(h), /u_star2(h)^2, z-<=4
+    # 4b (outer). DKE — OUTER units z- = y/u*_case, /u*_case^2, z-<=4
     plt.figure(figsize=(8, 6), dpi=300)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
         _du = gv('DispVelU', case); _dv = gv('DispVelV', case); _dw = gv('DispVelW', case)
@@ -4084,7 +4080,7 @@ if (1 == plotRes):
         plt.semilogy(_zo, _dke, color=clr, linestyle=ls, label=lbl)
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
-    plt.ylabel(r'$\frac{1}{2}\langle\tilde{u}_i\tilde{u}_i\rangle / u_{\star 2}^2(h)$')
+    plt.ylabel(r'$\frac{1}{2}\langle\tilde{u}_i\tilde{u}_i\rangle / u_{\star}^2$')
     plt.legend(handles=sim_handles(), fontsize=7, ncol=2)
     plt.grid(True, which='both', linestyle='--', linewidth=0.4)
     plt.title(r'Dispersive kinetic energy (DKE) — outer units ($z^-\leq4$), Re=500')
@@ -4112,7 +4108,7 @@ if (1 == plotRes):
     _save_layers_x(cwd+'fig'+'/'+'P53_TKEproduction_allFr', r'TKE shear production — rough-wall cases, Re=500')
     plt.show()
 
-    # 4c (outer). TKE shear production — OUTER units, P/u_star2(h)^3, z-<=4
+    # 4c (outer). TKE shear production — OUTER units, P/u*_case^3, z-<=4
     plt.figure(figsize=(8, 6), dpi=300)
     for case, clr, ls, lbl in zip(SIM_NAMES, SIM_COLORS, SIM_LINESTYLES, SIM_LABELS):
         _rv = gv('rey_uv', case); _dd = gv('du_dy', case)
@@ -4123,7 +4119,7 @@ if (1 == plotRes):
         plt.plot(_zo, _P1d, color=clr, linestyle=ls, label=lbl)
     plt.xlim(0, Z_MINUS_MAX)
     plt.xlabel(r'$z^-$')
-    plt.ylabel(r"$-\langle\overline{u'w'}\rangle\,\partial\langle\bar{u}\rangle/\partial z\;/ u_{\star 2}^3(h)$")
+    plt.ylabel(r"$-\langle\overline{u'w'}\rangle\,\partial\langle\bar{u}\rangle/\partial z\;/ u_{\star}^3$")
     plt.legend(handles=sim_handles(), fontsize=7, ncol=2)
     plt.grid(True)
     plt.title(r'TKE shear production — outer units ($z^-\leq4$), Re=500')
@@ -4158,8 +4154,8 @@ if (1 == plotRes):
                    r'Streamwise advection at orographic landmarks — rough-wall cases, Re=500')
     plt.show()
 
-    # 4d (outer). Streamwise advection — OUTER units z- = y/u_star2(h),
-    # value /u_star2(h)^3, z- <= 4 on the y-axis (Req 8).
+    # 4d (outer). Streamwise advection — OUTER units z- = y/u*_case,
+    # value /u*_case^3, z- <= 4 on the y-axis (Req 8).
     plt.figure(figsize=(6, 7), dpi=300)
     for case, ls in zip(SIM_NAMES, SIM_LINESTYLES):
         _zo, _u2h = _z_out(case)
@@ -4177,7 +4173,7 @@ if (1 == plotRes):
             plt.plot(_cv[:_n]/_u2h**3, _zo[:_n], color=clr, linestyle=ls)
     plt.legend(handles=_lh + sim_handles(), fontsize=7, ncol=2)
     plt.ylim(0, Z_MINUS_MAX)
-    plt.xlabel(r'$u_j\,\partial u_i/\partial x_j\;/ u_{\star 2}^3(h)$')
+    plt.xlabel(r'$u_j\,\partial u_i/\partial x_j\;/ u_{\star}^3$')
     plt.ylabel(r'$z^-$')
     plt.grid(True, linestyle=':')
     plt.title(r'Streamwise advection at orographic landmarks — outer units ($z^-\leq4$), Re=500')

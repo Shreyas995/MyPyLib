@@ -726,25 +726,106 @@ if (1 == postprocess):
     # Resultant surface stress magnitude; square-root twice because stress ~ u*²
     # u_star2 = ((total_tau_yx**2 + total_tau_yz**2 + tau_corrctn**2)**0.5)**0.5
     u_star2 = ((total_tau_yx**2 + total_tau_yz**2)**0.5)**0.5
-    # u_star: this case's representative Method-2 friction velocity, used for inner
-    # scaling throughout.  Use the constant-flux-layer PLATEAU of the u_star2(z)
-    # profile (NOT the column mean): in a rotating layer the direct stress decays
-    # monotonically with height, so the mean is biased low — the plateau is the
-    # representative wall value (settled choice; cf. CLAUDE.md "Method 2").  This
-    # overrides config.u_star (the prescribed 0.076 is the grid-generation value
-    # only).  For a finite-Fr run this is genuinely different from the neutral u*.
-    u_star = plateau_value(u_star2, y)
 
     # ── Friction velocity from the alternative (integrate→cavg) Coriolis term ──
     # Same momentum-balance formula, but using I_corr_*_c (per-column vertical
     # integral, THEN intrinsic fluid-only average) in place of I_corr_* (x-mean
-    # THEN integral).  Compared in the Friction-Velocity comparison plot; inner
-    # scaling (u_star) above is unchanged and still uses the original u_star2.
+    # THEN integral).  Compared in the Friction-Velocity comparison plot.
     # Full Reynolds flux (turb + disp) and the Fig-4 τ_zy sign, matching total_tau_* above.
     total_tau_yx_c = -I_corr_yx_c + visc_yx - turb_yx - disp_yx
     total_tau_yz_c = I_corr_yz_c + visc_yz - turb_yz - disp_yz
     u_star2_c = ((total_tau_yx_c**2 + total_tau_yz_c**2)**0.5)**0.5
     u_star_c  = np.mean(u_star2_c)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # u_star — THE case's friction velocity.  SINGLE SOURCE OF TRUTH.
+    # ══════════════════════════════════════════════════════════════════════════
+    # Definition (settled 2026-08-18): the MAXIMUM of the integrate→cavg Method-2
+    # profile,  u_star = max_z u_star2_c(z).  u_star2_c is the same momentum-integral
+    # budget as u_star2 (identical signs/terms — see the LOCKED block) but with the
+    # Coriolis term integrated per column FIRST and intrinsically averaged after,
+    # which is the correct averaging order over orography.  The maximum is the
+    # wall-side value of a stress that decays monotonically upward under Coriolis.
+    #
+    # This value:
+    #   • sets ALL inner/outer scaling in this script (y_inner, y_in, l_in, …);
+    #   • is PICKLED as 'u_star' (IO.var_names) and is the ONLY friction velocity
+    #     results.py / results_Re.py are allowed to use — they must READ it, never
+    #     re-derive one from the u_star2 profile (no plateau, no crest, no mean).
+    # It overrides config.u_star (the prescribed 0.076 is grid-generation only).
+    # The former estimator (plateau of u_star2) is kept below for the printout only.
+    u_star_plateau_old = plateau_value(u_star2, y)          # previous definition
+    u_star = float(np.max(u_star2_c))                       # ← pickled value
+    _u_old = float(u_star_plateau_old)
+    _u_dpc = (100.0*(u_star - _u_old)/_u_old) if abs(_u_old) > 1e-12 else np.nan
+    print(f"\n[u*] pickled u_star = max(u_star2_c) = {u_star:.6f}   "
+          f"(previous estimator: plateau(u_star2) = {_u_old:.6f}, Δ = {_u_dpc:+.1f}%)")
+    print(f"      max at j = {int(np.argmax(u_star2_c))} (y = {y[int(np.argmax(u_star2_c))]:.6e});"
+          f"  this scalar is what results.py / results_Re.py read.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── AVERAGE-LAST (commuted) friction velocity — DIAGNOSTIC COMPARISON ONLY ──
+    # Same budget, same signs, same terms as the LOCKED block above; the ONLY
+    # change is WHERE the horizontal (x) average is taken.  Above, every term is
+    # x-averaged FIRST (np.mean / avg_c on each of corr, visc, turb, disp) and the
+    # 1-D profiles are then summed.  Here each term is kept as a 2-D (ny,nx) field,
+    # the contributions are summed AT EACH GRID POINT, and the intrinsic average is
+    # applied at the very LAST step.  Nothing else is altered: no sign, no formula.
+    #
+    #   Variant A  avg_c(τ(x,z))            — average the assembled stress last.
+    #              Linear, so it must reproduce total_tau_*_c to round-off
+    #              (avg_c is a sum/count ⇒ it commutes with the term-by-term sum);
+    #              it differs from total_tau_* only through the Coriolis term,
+    #              where the old path x-means (np.mean, extrinsic) before
+    #              integrating and this path integrates per column first.
+    #   Variant B  avg_c(u*²(x,z))          — form the stress MAGNITUDE pointwise
+    #              and average that.  sqrt(·) is NOT linear, so this genuinely does
+    #              NOT commute with the average — this is the case the comparison
+    #              below is really about.  Two flavours are printed: unmasked (the
+    #              strict commutation of the Variant-A field) and mask0-applied
+    #              (solid cells zeroed before the magnitude, since inside the body
+    #              the stale column integral survives in the 2-D field and, being
+    #              squared, can no longer cancel).
+    # ══════════════════════════════════════════════════════════════════════════
+    visc_yx_2d = (1/Re_lambda) * du_dy                  # V_zx(x,z), not averaged
+    turb_yx_2d = rey_uv                                 # turbulent ⟨u''v''⟩(x,z)
+    disp_yx_2d = UV_disp                                # dispersive ũṽ(x,z)
+    visc_yz_2d = (1/Re_lambda) * dw_dy                  # V_zy(x,z), not averaged
+    turb_yz_2d = rey_vw                                 # turbulent ⟨v''w''⟩(x,z)
+    disp_yz_2d = VW_disp                                # dispersive ṽw̃(x,z)
+
+    # Pointwise stress: identical expression to total_tau_yx / total_tau_yz above.
+    total_tau_yx_2d = -I_corr_yx_2d + visc_yx_2d - turb_yx_2d - disp_yx_2d
+    total_tau_yz_2d =  I_corr_yz_2d + visc_yz_2d - turb_yz_2d - disp_yz_2d
+
+    # Variant A — average LAST (linear ⇒ ≡ total_tau_*_c up to round-off).
+    total_tau_yx_al = avg_c(eps, total_tau_yx_2d, axis=1)
+    total_tau_yz_al = avg_c(eps, total_tau_yz_2d, axis=1)
+    u_star2_al = ((total_tau_yx_al**2 + total_tau_yz_al**2)**0.5)**0.5
+    u_star_al  = plateau_value(u_star2_al, y)
+
+    # Variant B — magnitude pointwise, THEN average (non-commuting).
+    u_star2_2d   = ((total_tau_yx_2d**2 + total_tau_yz_2d**2)**0.5)**0.5
+    u_star2_pt   = avg_c(eps, u_star2_2d, axis=1)                 # unmasked
+    u_star2_pt_m = avg_c(eps, u_star2_2d*mask0, axis=1)           # solid zeroed
+    u_star_pt    = plateau_value(u_star2_pt,   y)
+    u_star_pt_m  = plateau_value(u_star2_pt_m, y)
+
+    print("\n══ u* : where the x-average is taken (signs/formulas unchanged) ══")
+    print(f"{'z+':>8} | {'avg-first':>11} {'A avg-last':>11} {'Δ%':>7} | "
+          f"{'B ptwise':>11} {'Δ%':>7} | {'B ptw+mask':>11} {'Δ%':>7}")
+    for _zt in (5, 15, 30, 60, 100, 200, 500):
+        _j = int(np.argmin(np.abs(y_in - _zt)))
+        print(f"{y_in[_j]:8.1f} | {u_star2[_j]:11.4e} {u_star2_al[_j]:11.4e} "
+              f"{_pct(u_star2[_j], u_star2_al[_j]):7.1f} | "
+              f"{u_star2_pt[_j]:11.4e} {_pct(u_star2[_j], u_star2_pt[_j]):7.1f} | "
+              f"{u_star2_pt_m[_j]:11.4e} {_pct(u_star2[_j], u_star2_pt_m[_j]):7.1f}")
+    print(f"  plateau u*:  avg-first = {u_star:.6f} | A avg-last = {u_star_al:.6f} "
+          f"({_pct(u_star, u_star_al):+.1f}%) | B ptwise = {u_star_pt:.6f} "
+          f"({_pct(u_star, u_star_pt):+.1f}%) | B ptw+mask = {u_star_pt_m:.6f} "
+          f"({_pct(u_star, u_star_pt_m):+.1f}%)")
+    print(f"  linearity check  max|A − integrate→cavg| = "
+          f"{np.max(np.abs(u_star2_al - u_star2_c)):.3e}  (expect ~round-off)")
 
     y_inner =  y*(u_star/nu)
     y_outer = y/u_star
@@ -1837,6 +1918,64 @@ if (1 == postprocess):
         globals()[_iname] = _ifl.astype(np.float32)
         print('[inst] %s ← %s (z-plane 1 fluctuation, pickled)'
               % (_iname, os.path.basename(_ipath)))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Pressure-Poisson source decomposition  ∇²P = −∂²(u_i u_j)/∂x_i∂x_j
+    # ──────────────────────────────────────────────────────────────────────────
+    # STAGE-B by design: this is a DERIVATIVE FIELD build (nine second-derivative
+    # passes over the full x–z grid), which the pipeline rule puts upstream, never
+    # in results*.py.  It used to be recomputed inside results_Re.py's D18 block
+    # for every case on every run — the single slowest thing in stage c.  Computed
+    # once here, pickled, and merely READ downstream.
+    #
+    # The RHS is split into the three sources of the triple decomposition:
+    #   Psource_mean = −∂²(ū_i ū_j)/∂x_i∂x_j          mean strain
+    #   Psource_rey  = −∂²⟨u'_i u'_j⟩/∂x_i∂x_j        turbulent
+    #   Psource_disp = −∂²(ũ_i ũ_j)/∂x_i∂x_j          dispersive (topography-locked)
+    #   Psource_total = their sum          (turbulent + dispersive = Reynolds source)
+    # Only the in-plane (x, wall-normal y) part is formed — the fields are spanwise
+    # phase-averages, so ∂/∂z ≡ 0.
+    #
+    # Scheme: the house compact/Padé operators `cd` (x periodic, y via DY_METHOD),
+    # i.e. the SAME derivatives every other stage-b field uses — an accuracy
+    # upgrade over the np.gradient double-difference the old results_Re.py block
+    # applied, so the numbers will not be bit-identical to that version.
+    # Derivatives are taken on the RAW fields (no mask0 pre-zeroing) exactly as
+    # before: zeroing the solid first would inject a step at the IBM interface.
+    # Stored float32 (display/diagnostic fields; halves the pickle cost).
+    def _poisson_src(_f11, _f12, _f22):
+        """−∂²f_ij/∂x_i∂x_j for the in-plane symmetric pair (xx, xy, yy)."""
+        return -(cd.d2dx2(_f11) + 2.0 * cd.ddy(cd.ddx(_f12)) + cd.d2dy2(_f22))
+
+    Psource_mean = _poisson_src(AvgPhU * AvgPhU, AvgPhU * AvgPhV, AvgPhV * AvgPhV)
+    Psource_rey  = _poisson_src(rey_uu, rey_uv, rey_vv)
+    Psource_disp = _poisson_src(UU_disp, UV_disp, VV_disp)
+    Psource_total = Psource_mean + Psource_rey + Psource_disp
+
+    # Which source dominates over the valley: |·| averaged over the near-wall band
+    # z⁺ < 50 between the windward (nx/4) and lee (3nx/4) stations — the same
+    # window and reduction the old results_Re.py D18 print used, so the pickled
+    # triple drops straight into its Chapter-6 summary row.
+    _pband = y_in < 50.0
+    _pi0, _pi1 = nx // 4, (3 * nx) // 4
+    _pf = [float(np.nanmean(np.abs(_s[_pband][:, _pi0:_pi1 + 1])))
+           for _s in (Psource_mean, Psource_rey, Psource_disp)]
+    _ptot = float(np.sum(_pf))
+    poisson_fracs = (tuple(_v / _ptot for _v in _pf) if _ptot > 0
+                     else (float('nan'),) * 3)
+    if _ptot > 0:
+        print('[research] Poisson source over valley (z+<50, windward→lee): '
+              'mean=%.2f rey=%.2f disp=%.2f → dominant: %s'
+              % (poisson_fracs[0], poisson_fracs[1], poisson_fracs[2],
+                 ['mean-strain', 'Reynolds', 'dispersive'][int(np.argmax(_pf))]))
+    else:
+        print('[research] Poisson source: degenerate (zero magnitude) — fracs = NaN.')
+
+    Psource_mean  = Psource_mean.astype(np.float32)
+    Psource_rey   = Psource_rey.astype(np.float32)
+    Psource_disp  = Psource_disp.astype(np.float32)
+    Psource_total = Psource_total.astype(np.float32)
+
 
     # Bundle every post-processed field listed in IO.var_names into sim1_results.pkl
     # (consumed cross-case by results.py).  IO.write_results_pickle skips names not
@@ -3050,6 +3189,11 @@ if (1 == plotRes):
     plt.figure(figsize=(8, 8), dpi=300)
     plt.plot(u_star2[:]/G_mag,   z_out[:], label=r'mean$\to$integrate (old)', color='blue', linestyle='-')
     plt.plot(u_star2_c[:]/G_mag, z_out[:], label=r'integrate$\to$cavg (new)', color='red',  linestyle='--')
+    # Average-last variants (same budget, average moved to the last step)
+    plt.plot(u_star2_al[:]/G_mag,   z_out[:], label=r'A: avg$_c(\tau)$ last',   color='green',  linestyle='-.')
+    plt.plot(u_star2_pt[:]/G_mag,   z_out[:], label=r'B: avg$_c(u_*^2)$ ptwise', color='purple', linestyle=':')
+    plt.plot(u_star2_pt_m[:]/G_mag, z_out[:], label=r'B: avg$_c(u_*^2)$ ptwise, solid masked',
+             color='orange', linestyle=':')
     mark_h(z_out[h_idx], 'h')
     plt.title('Friction Velocity — Coriolis-integral approaches')
     plt.ylabel(r'$z/\delta$')

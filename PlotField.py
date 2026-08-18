@@ -1011,7 +1011,9 @@ def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savenam
 
     Parameters
     ----------
-    x, y       : 1-D arrays  grid coordinates (inner-scaled; y may be stretched)
+    x, y       : 1-D arrays  grid coordinates (inner-scaled; either axis may be
+                 stretched — both are resampled onto a uniform mesh below,
+                 because streamplot() only accepts an equally-spaced grid)
     U          : (ny, nx)  streamwise velocity
     V          : (ny, nx)  wall-normal velocity
     W          : (ny, nx)  spanwise velocity
@@ -1021,11 +1023,52 @@ def plot_phavg_velocity_3D(x, y, U, V, W, eps, resolution, xfill, yfill, savenam
     savename   : str  output file path
     title      : str  optional figure-level name (suptitle) identifying the field
     """
-    y_uniform = np.linspace(y.min(), y.max(), resolution)
-    X, Y = np.meshgrid(x, y_uniform, indexing='xy')
+    # ── grid regularisation for streamplot() ──────────────────────────────
+    # matplotlib's streamplot builds a Grid(X, Y) that demands a PERFECTLY
+    # regular mesh: it raises "'x'/'y' values must be equally spaced" unless
+    # np.allclose(np.diff(axis), span/(n-1)) — rtol 1e-5, so even a mildly
+    # stretched (or non-finite) axis is rejected.  Only y used to be resampled
+    # here, and x was handed through raw, so a case whose streamwise axis is not
+    # exactly uniform — or whose inner-unit normalisation produced NaN/inf —
+    # crashed the whole figure inside matplotlib.  Resample BOTH axes onto their
+    # own uniform grid: for the tlab periodic x (dx = Lx/nx) x_uniform == x to
+    # round-off, so an already-uniform case draws exactly as before.
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    _why = None
+    if x.size < 4 or y.size < 4:
+        _why = 'needs >=4 points per axis for the spline (nx=%d, nz=%d)' % (x.size, y.size)
+    elif not (np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+        _why = ('non-finite grid coordinates (%d NaN/inf in x, %d in y) — a NaN '
+                'or zero normalisation length gives an all-NaN inner axis'
+                % (int(np.sum(~np.isfinite(x))), int(np.sum(~np.isfinite(y)))))
+    elif not ((np.diff(x) > 0).all() and (np.diff(y) > 0).all()):
+        _why = 'grid coordinates are not strictly increasing'
+    else:
+        for _nm, _f in (('U', U), ('V', V), ('W', W), ('eps', eps)):
+            if np.shape(_f) != (y.size, x.size):
+                _why = ('%s has shape %s, expected (nz, nx) = (%d, %d)'
+                        % (_nm, np.shape(_f), y.size, x.size))
+                break
+    if _why is not None:
+        print('plot_phavg_velocity_3D: %s — %s skipped.'
+              % (_why, os.path.basename(str(savename))))
+        return
+
+    _dx, _ideal = np.diff(x), (x[-1] - x[0]) / (x.size - 1)
+    if not np.allclose(_dx, _ideal):
+        # Say so rather than only failing: this is the axis streamplot rejects.
+        print('plot_phavg_velocity_3D: streamwise axis is NOT uniform '
+              '(dx in [%.6e, %.6e], uniform value %.6e) — resampled onto a '
+              'uniform x for %s.'
+              % (_dx.min(), _dx.max(), _ideal, os.path.basename(str(savename))))
+
+    x_uniform = np.linspace(x[0], x[-1], x.size)
+    y_uniform = np.linspace(y[0], y[-1], resolution)
+    X, Y = np.meshgrid(x_uniform, y_uniform, indexing='xy')
 
     def _interp(field):
-        return RectBivariateSpline(y, x, field)(y_uniform, x)
+        return RectBivariateSpline(y, x, field)(y_uniform, x_uniform)
 
     U_u   = _interp(U)
     V_u   = _interp(V)

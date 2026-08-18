@@ -52,6 +52,9 @@ var_names = [
     # -------------------------------------------------------------------------
     'Re', 'Re_lambda', 'Re_tau', 'nu', 'dt', 'f',
     'alpha', 'Gx', 'Gz',
+    # 'u_star' is NOT the config scalar once PhAvg_rotated.py has run: it is the
+    # case's MEASURED friction velocity, u_star = max(u_star2_c).  It is the ONLY
+    # u* results.py / results_Re.py may use — they read it, never re-derive one.
     'kappa', 'u_star', 'wall_units',
 
     # -------------------------------------------------------------------------
@@ -160,6 +163,10 @@ var_names = [
     'corr_yx', 'I_corr_yx', 'visc_yx', 'total_tau_yx',
     'corr_yz', 'I_corr_yz', 'visc_yz', 'total_tau_yz',
     'tau_corrctn', 'u_star2',
+    # integrate->cavg Method-2 profile; the pickled scalar 'u_star' above is
+    # max(u_star2_c) (set in PhAvg_rotated.py).  Kept so downstream scripts can
+    # SHOW the profile behind u_star without ever re-deriving u_star from it.
+    'u_star2_c',
 
     # -------------------------------------------------------------------------
     # Momentum balance — Method 2: surface-integrated force scalars
@@ -188,6 +195,19 @@ var_names = [
     # energy propagation.  Computed from DispVelV (vertical) and DispVelU.
     # -------------------------------------------------------------------------
     'm_dispV', 'k_dispV', 'm_dispU', 'k_dispU', 'km_dispV',
+
+    # -------------------------------------------------------------------------
+    # Pressure-Poisson source decomposition  (2D: ny×nx, float32)  + fracs
+    # ∇²P = −∂²(u_i u_j)/∂x_i∂x_j split into mean-strain / turbulent /
+    # dispersive sources (turbulent + dispersive = the Reynolds source);
+    # Psource_total is their sum.  Built with the compact operators in
+    # PhAvg_rotated.py — nine 2nd-derivative passes, far too heavy for stage c,
+    # where results_Re.py's D18 block now merely READS these.  poisson_fracs =
+    # (mean, rey, disp) shares of |source| over the valley band z⁺<50 between
+    # the windward and lee stations.
+    # -------------------------------------------------------------------------
+    'Psource_mean', 'Psource_rey', 'Psource_disp', 'Psource_total',
+    'poisson_fracs',
 
     # -------------------------------------------------------------------------
     # Advection term u_j ∂U/∂x_j at four orographic landmarks  (1D: ny)
